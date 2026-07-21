@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
 import json
 import threading
@@ -27,7 +27,6 @@ threading.Thread(target=run_web, daemon=True).start()
 # ==========================================
 TZ_THAI = timezone(timedelta(hours=7))
 
-# ระยะเวลารีดาวน์ของบอสแต่ละตัว
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
     "Elemental Queen": timedelta(hours=2, minutes=30),
@@ -42,7 +41,7 @@ BOSS_CD_TEXT = {
     "Bigmama": "48 ชั่วโมง"
 }
 
-# ความจำชั่วคราวสำหรับเก็บตารางเวลาบอสเกิดล่าสุด
+# เก็บตารางเวลาเกิดบอส และสถานะการแจ้งเตือน
 boss_schedule = {}
 
 # ==========================================
@@ -62,6 +61,46 @@ async def on_ready():
         print(f"ซิงค์ Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง")
     except Exception as e:
         print(f"เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
+    
+    # เริ่มรันระบบตรวจเช็กเวลาแจ้งเตือน
+    if not check_boss_notifications.is_running():
+        check_boss_notifications.start()
+
+# ==========================================
+# ⏰ 4. Task เช็กเวลาแจ้งเตือนอัตโนมัติ (ทำงานทุก 10 วินาที)
+# ==========================================
+@tasks.loop(seconds=10)
+async def check_boss_notifications():
+    now = datetime.now(TZ_THAI)
+    
+    for boss_name, data in list(boss_schedule.items()):
+        spawn_time = data["spawn_time"]
+        channel = data["channel"]
+        notified_30m = data.get("notified_30m", False)
+        
+        # คำนวณเวลาที่เหลือ (วินาที)
+        time_left = (spawn_time - now).total_seconds()
+        
+        # 1. แจ้งเตือนล่วงหน้า 30 นาที (1740 ถึง 1800 วินาที) -> เปลี่ยนแท็กเป็น @everyone
+        if 0 < time_left <= 1800 and not notified_30m:
+            timestamp_unix = int(spawn_time.timestamp())
+            embed = discord.Embed(
+                title=f"⚠️ แจ้งเตือนบอสเตรียมเกิด!",
+                description=f"บอส **{boss_name}** จะเกิดในอีก **30 นาที**!\nเวลาเกิด: <t:{timestamp_unix}:F>",
+                color=discord.Color.gold()
+            )
+            await channel.send(content="@everyone", embed=embed)
+            boss_schedule[boss_name]["notified_30m"] = True  # ทำเครื่องหมายว่าเตือนแล้ว
+
+        # 2. เมื่อบอสเกิดแล้ว (ลบออกจากตารางอัตโนมัติ) -> เปลี่ยนแท็กเป็น @everyone
+        elif time_left <= 0:
+            embed = discord.Embed(
+                title=f"⚔️ บอสเกิดแล้ว!",
+                description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
+                color=discord.Color.green()
+            )
+            await channel.send(content="@everyone", embed=embed)
+            del boss_schedule[boss_name]
 
 # Autocomplete สำหรับเลือกชื่อบอส
 async def boss_autocomplete(
@@ -75,7 +114,7 @@ async def boss_autocomplete(
     ]
 
 # ==========================================
-# ⚔️ 4. Slash Commands ทั้งหมด
+# ⚔️ 5. Slash Commands
 # ==========================================
 
 # 1️⃣ คำสั่ง /kill : บันทึกเวลาบอสตาย
@@ -110,17 +149,21 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     next_spawn = killed_at + respawn_delta
     
     # บันทึกลงตาราง
-    boss_schedule[boss_name] = next_spawn
+    boss_schedule[boss_name] = {
+        "spawn_time": next_spawn,
+        "channel": interaction.channel,
+        "notified_30m": False
+    }
 
     timestamp_unix = int(next_spawn.timestamp())
-    discord_time_str = f"<t:{timestamp_unix}:F> (<t:{timestamp_unix}:R>)"
+    discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
 
     embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายเรียบร้อย", color=discord.Color.red())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-    embed.add_field(name="⏱️ เวลาที่ตาย", value=killed_at.strftime("%H:%M น."), inline=True)
+    embed.add_field(name="⏱️ เวลาที่ตาย", value=killed_at.strftime("%H:%M:%S น."), inline=True)
     embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=BOSS_CD_TEXT[boss_name], inline=True)
     embed.add_field(name="🔔 บอสจะเกิดเวลา", value=discord_time_str, inline=False)
-    embed.set_footer(text=f"ลงเวลาโดย {interaction.user.display_name}")
+    embed.set_footer(text=f"ลงเวลาโดย {interaction.user.display_name} • ระบบจะแจ้งเตือน @everyone ล่วงหน้า 30 นาที")
 
     await interaction.response.send_message(embed=embed)
 
@@ -134,14 +177,14 @@ async def list_bosses(interaction: discord.Interaction):
 
     embed = discord.Embed(title="📜 ตารางเวลาเกิดบอสล่าสุด", color=discord.Color.blue())
     
-    # เรียงลำดับบอสตัวที่จะเกิดก่อนขึ้นหน้า
-    sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1])
+    sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
 
-    for boss, spawn_time in sorted_bosses:
+    for boss, data in sorted_bosses:
+        spawn_time = data["spawn_time"]
         timestamp_unix = int(spawn_time.timestamp())
         embed.add_field(
             name=f"👾 {boss}",
-            value=f"เกิดเวลา: <t:{timestamp_unix}:F>\nนับถอยหลัง: <t:{timestamp_unix}:R>",
+            value=f"เกิดเวลา: `{spawn_time.strftime('%H:%M:%S น.')}`\nนับถอยหลัง: <t:{timestamp_unix}:R>",
             inline=False
         )
 
@@ -170,7 +213,7 @@ async def boss_info(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # ==========================================
-# 🚀 5. รันบอท Discord
+# 🚀 6. รันบอท Discord
 # ==========================================
 if __name__ == "__main__":
     TOKEN = os.environ.get("DISCORD_TOKEN")
