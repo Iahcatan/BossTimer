@@ -28,7 +28,9 @@ threading.Thread(target=run_web, daemon=True).start()
 # ==========================================
 TZ_THAI = timezone(timedelta(hours=7))
 DATA_FILE = "boss_data.json"
-TARGET_ROLE_NAME = "Eternal MEAW ANTI"  # ชื่อ Role ที่ต้องการให้บอทแท็ก
+
+# รายชื่อ Role ที่ต้องการให้บอทแท็กแจ้งเตือน
+TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
 
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
@@ -154,18 +156,22 @@ async def check_boss_notifications():
         if not channel:
             continue
 
-        # ค้นหา Role "Eternal MEAW ANTI" ใน Server
-        mention_target = "@everyone"  # ค่าเริ่มต้นหากหา Role ไม่เจอ
+        # ค้นหาทั้ง 3 Roles ใน Server
+        mentions = []
         if hasattr(channel, "guild") and channel.guild:
-            role = discord.utils.get(channel.guild.roles, name=TARGET_ROLE_NAME)
-            if role:
-                mention_target = role.mention
+            for role_name in TARGET_ROLE_NAMES:
+                role = discord.utils.get(channel.guild.roles, name=role_name)
+                if role:
+                    mentions.append(role.mention)
+        
+        # ถ้าหา Role เจออย่างน้อย 1 ยศ ให้ต่อข้อความแท็ก หากไม่เจอเลยให้ใช้ @everyone
+        mention_target = " ".join(mentions) if mentions else "@everyone"
 
         time_left = (spawn_time - now).total_seconds()
         notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
         notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
         
-        # 1. แจ้งเตือนล่วงหน้า -> แท็ก Role
+        # 1. แจ้งเตือนล่วงหน้า -> แท็ก Roles
         if 0 < time_left <= notice_limit and not notified_advance:
             timestamp_unix = int(spawn_time.timestamp())
             embed = discord.Embed(
@@ -182,7 +188,7 @@ async def check_boss_notifications():
             boss_schedule[boss_name]["notified_advance"] = True
             changed = True
 
-        # 2. เมื่อบอสเกิดแล้ว -> แท็ก Role และลบออกจากตาราง
+        # 2. เมื่อบอสเกิดแล้ว -> แท็ก Roles และลบออกจากตาราง
         elif time_left <= 0:
             embed = discord.Embed(
                 title="⚔️ บอสเกิดแล้ว!",
@@ -259,13 +265,14 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     timestamp_unix = int(next_spawn.timestamp())
     discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
     notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
+    roles_display = ", ".join([f"`{r}`" for r in TARGET_ROLE_NAMES])
 
     embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายเรียบร้อย", color=discord.Color.red())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
     embed.add_field(name="⏱️ เวลาที่ตาย", value=killed_at.strftime("%H:%M:%S น."), inline=True)
     embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=BOSS_CD_TEXT[boss_name], inline=True)
     embed.add_field(name="🔔 บอสจะเกิดเวลา", value=discord_time_str, inline=False)
-    embed.set_footer(text=f"ลงเวลาโดย {interaction.user.display_name} • ระบบจะแจ้งเตือน {TARGET_ROLE_NAME} ล่วงหน้า {notice_text}")
+    embed.set_footer(text=f"ลงเวลาโดย {interaction.user.display_name} • ระบบจะแจ้งเตือนยศ {roles_display} ล่วงหน้า {notice_text}")
 
     await interaction.followup.send(embed=embed)
 
