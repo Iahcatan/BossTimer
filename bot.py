@@ -33,7 +33,9 @@ BOSS_RESPAWN_TIMES = {
     "Elemental Queen": timedelta(hours=2, minutes=30),
     "Tank": timedelta(minutes=58, seconds=20),
     "Bigmama": timedelta(hours=48),
-    "CHIEF MAGIEF": timedelta(minutes=30)
+    "CHIEF MAGIEF": timedelta(minutes=30),
+    "Faith": timedelta(hours=5, minutes=53),
+    "Apapa": timedelta(minutes=15)
 }
 
 BOSS_CD_TEXT = {
@@ -41,7 +43,9 @@ BOSS_CD_TEXT = {
     "Elemental Queen": "2 ชั่วโมง 30 นาที",
     "Tank": "58 นาที 20 วินาที",
     "Bigmama": "48 ชั่วโมง",
-    "CHIEF MAGIEF": "30 นาที"
+    "CHIEF MAGIEF": "30 นาที",
+    "Faith": "5 ชั่วโมง 53 นาที",
+    "Apapa": "15 นาที"
 }
 
 # 🔔 กำหนดเวลาแจ้งเตือนล่วงหน้า (หน่วย: วินาที)
@@ -50,7 +54,9 @@ ADVANCE_NOTICE_SECONDS = {
     "Elemental Queen": 300, # 5 นาที
     "Tank": 300,            # 5 นาที
     "Bigmama": 300,         # 5 นาที
-    "CHIEF MAGIEF": 300     # 5 นาที
+    "CHIEF MAGIEF": 300,    # 5 นาที
+    "Faith": 300,           # 5 นาที
+    "Apapa": 300            # 5 นาที
 }
 
 ADVANCE_NOTICE_TEXT = {
@@ -58,7 +64,9 @@ ADVANCE_NOTICE_TEXT = {
     "Elemental Queen": "5 นาที",
     "Tank": "5 นาที",
     "Bigmama": "5 นาที",
-    "CHIEF MAGIEF": "5 นาที"
+    "CHIEF MAGIEF": "5 นาที",
+    "Faith": "5 นาที",
+    "Apapa": "5 นาที"
 }
 
 boss_schedule = {}
