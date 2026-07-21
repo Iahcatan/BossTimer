@@ -26,40 +26,76 @@ threading.Thread(target=run_web, daemon=True).start()
 # ⚙️ 2. ตั้งค่า Timezone ไทย & Database
 # ==========================================
 TZ_THAI = timezone(timedelta(hours=7))
+DATA_FILE = "boss_data.json"
 
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
     "Elemental Queen": timedelta(hours=2, minutes=30),
     "Tank": timedelta(minutes=58, seconds=20),
-    "Bigmama": timedelta(hours=48)
+    "Bigmama": timedelta(hours=48),
+    "CHIEF MAGIEF": timedelta(minutes=30)
 }
 
 BOSS_CD_TEXT = {
     "Wadangka": "2 ชั่วโมง 30 นาที",
     "Elemental Queen": "2 ชั่วโมง 30 นาที",
     "Tank": "58 นาที 20 วินาที",
-    "Bigmama": "48 ชั่วโมง"
+    "Bigmama": "48 ชั่วโมง",
+    "CHIEF MAGIEF": "30 นาที"
 }
 
-# 🔔 กำหนดเวลาแจ้งเตือนล่วงหน้าของแต่ละตัว (หน่วย: วินาที)
-# Wadangka = 30 นาที (1800 วิ), ตัวอื่น = 5 นาที (300 วิ)
+# 🔔 กำหนดเวลาแจ้งเตือนล่วงหน้า (หน่วย: วินาที)
 ADVANCE_NOTICE_SECONDS = {
-    "Wadangka": 1800,
-    "Elemental Queen": 300,
-    "Tank": 300,
-    "Bigmama": 300
+    "Wadangka": 1800,       # 30 นาที
+    "Elemental Queen": 300, # 5 นาที
+    "Tank": 300,            # 5 นาที
+    "Bigmama": 300,         # 5 นาที
+    "CHIEF MAGIEF": 300     # 5 นาที
 }
 
-# ข้อความแจ้งเตือนให้อ่านง่าย
 ADVANCE_NOTICE_TEXT = {
     "Wadangka": "30 นาที",
     "Elemental Queen": "5 นาที",
     "Tank": "5 นาที",
-    "Bigmama": "5 นาที"
+    "Bigmama": "5 นาที",
+    "CHIEF MAGIEF": "5 นาที"
 }
 
-# เก็บตารางเวลาเกิดบอส
 boss_schedule = {}
+
+# ==========================================
+# 💾 ระบบบันทึกและโหลดข้อมูลป้องกันข้อมูลหาย (JSON File)
+# ==========================================
+def save_boss_data():
+    data_to_save = {}
+    for boss_name, data in boss_schedule.items():
+        data_to_save[boss_name] = {
+            "spawn_time": data["spawn_time"].isoformat(),
+            "channel_id": data["channel"].id,
+            "notified_advance": data.get("notified_advance", False)
+        }
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data_to_save, f, ensure_ascii=False, indent=2)
+
+def load_boss_data():
+    global boss_schedule
+    if not os.path.exists(DATA_FILE):
+        return
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            saved_data = json.load(f)
+            for boss_name, data in saved_data.items():
+                spawn_time = datetime.fromisoformat(data["spawn_time"])
+                channel_id = data["channel_id"]
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    boss_schedule[boss_name] = {
+                        "spawn_time": spawn_time,
+                        "channel": channel,
+                        "notified_advance": data.get("notified_advance", False)
+                    }
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาดในการโหลดข้อมูล: {e}")
 
 # ==========================================
 # 🤖 3. Discord Bot Setup
@@ -73,6 +109,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
     print("----------------------------------------")
+    load_boss_data()
     try:
         synced = await bot.tree.sync()
         print(f"ซิงค์ Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง")
@@ -88,6 +125,7 @@ async def on_ready():
 @tasks.loop(seconds=10)
 async def check_boss_notifications():
     now = datetime.now(TZ_THAI)
+    changed = False
     
     for boss_name, data in list(boss_schedule.items()):
         spawn_time = data["spawn_time"]
@@ -95,12 +133,10 @@ async def check_boss_notifications():
         notified_advance = data.get("notified_advance", False)
         
         time_left = (spawn_time - now).total_seconds()
-        
-        # ดึงเวลาแจ้งเตือนล่วงหน้าเฉพาะของบอสตัวนั้นๆ
         notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
         notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
         
-        # 1. แจ้งเตือนล่วงหน้าตามเงื่อนไข (Wadangka 30 นาที / ตัวอื่น 5 นาที)
+        # 1. แจ้งเตือนล่วงหน้า -> @everyone
         if 0 < time_left <= notice_limit and not notified_advance:
             timestamp_unix = int(spawn_time.timestamp())
             embed = discord.Embed(
@@ -110,6 +146,7 @@ async def check_boss_notifications():
             )
             await channel.send(content="@everyone", embed=embed)
             boss_schedule[boss_name]["notified_advance"] = True
+            changed = True
 
         # 2. เมื่อบอสเกิดแล้ว -> @everyone และลบออกจากตาราง
         elif time_left <= 0:
@@ -120,6 +157,10 @@ async def check_boss_notifications():
             )
             await channel.send(content="@everyone", embed=embed)
             del boss_schedule[boss_name]
+            changed = True
+
+    if changed:
+        save_boss_data()
 
 # Autocomplete สำหรับเลือกชื่อบอส
 async def boss_autocomplete(
@@ -164,16 +205,15 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         await interaction.response.send_message("❌ กรุณากรอกเวลาให้ถูกต้องตามรูปแบบ `ชั่วโมง:นาที` เช่น `17:05` หรือ `09:30`", ephemeral=True)
         return
 
-    # คำนวณเวลาเกิดใหม่
     respawn_delta = BOSS_RESPAWN_TIMES[boss_name]
     next_spawn = killed_at + respawn_delta
     
-    # บันทึกลงตาราง
     boss_schedule[boss_name] = {
         "spawn_time": next_spawn,
         "channel": interaction.channel,
         "notified_advance": False
     }
+    save_boss_data()
 
     timestamp_unix = int(next_spawn.timestamp())
     discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
@@ -220,6 +260,7 @@ async def list_bosses(interaction: discord.Interaction):
 async def clear_boss(interaction: discord.Interaction, boss_name: str):
     if boss_name in boss_schedule:
         del boss_schedule[boss_name]
+        save_boss_data()
         await interaction.response.send_message(f"🗑️ ลบเวลาของบอส `{boss_name}` ออกจากตารางเรียบร้อยแล้ว!")
     else:
         await interaction.response.send_message(f"❌ ไม่พบข้อมูลการลงเวลาของบอส `{boss_name}`", ephemeral=True)
