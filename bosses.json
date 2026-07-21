@@ -1,0 +1,18 @@
+{
+  "Wadangka": {
+    "respawn_time_minutes": 150,
+    "icon": "🐮"
+  },
+  "Devilish": {
+    "respawn_time_minutes": 180,
+    "icon": "👿"
+  },
+  "Spore": {
+    "respawn_time_minutes": 120,
+    "icon": "🍄"
+  },
+  "Big Mama": {
+    "respawn_time_minutes": 240,
+    "icon": "🕷️"
+  }
+}
