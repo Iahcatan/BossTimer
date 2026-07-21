@@ -29,13 +29,21 @@ threading.Thread(target=run_web, daemon=True).start()
 # ==========================================
 TZ_THAI = pytz.timezone('Asia/Bangkok')
 
-# 💡 กำหนดเวลาเกิดใหม่ (Respawn Time) ของบอสแต่ละตัว (หน่วย: ชั่วโมง)
-# คุณสามารถเพิ่ม/ลด/แก้ไขชื่อบอสและชั่วโมงตรงนี้ได้เลยครับ
+# 💡 กำหนดเวลาเกิดใหม่ (Respawn Time) ของบอสแต่ละตัว
+# เก็บโครงสร้างเวลารีดาวน์เป็น (ชั่วโมง, นาที, วินาที)
 BOSS_RESPAWN_TIMES = {
-    "บอสหนู": 2,
-    "บอสหมู": 4,
-    "บอสหมา": 6,
-    "คราเคน": 12
+    "Wadangka": timedelta(hours=2, minutes=30),
+    "Elemental Queen": timedelta(hours=2, minutes=30),
+    "Tank": timedelta(minutes=58, seconds=20),
+    "Bigmama": timedelta(hours=48)
+}
+
+# ข้อความแสดงระยะเวลารีดาวน์แบบอ่านง่าย
+BOSS_CD_TEXT = {
+    "Wadangka": "2 ชั่วโมง 30 นาที",
+    "Elemental Queen": "2 ชั่วโมง 30 นาที",
+    "Tank": "58 นาที 20 วินาที",
+    "Bigmama": "48 ชั่วโมง"
 }
 
 # ==========================================
@@ -59,12 +67,6 @@ async def on_ready():
 # ==========================================
 # ⚔️ 4. Slash Command: /kill (บันทึกเวลาบอสตาย)
 # ==========================================
-@bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05) แล้วคำนวณเวลาเกิดให้อัตโนมัติ")
-@app_commands.describe(
-    boss_name="ชื่อบอส",
-    kill_time="ระบุเวลาที่บอสตาย (รูปแบบ HH:MM เช่น 17:05)"
-)
-# สร้าง Autocomplete ให้กดเลือกชื่อบอสได้ง่ายๆ
 async def boss_autocomplete(
     interaction: discord.Interaction,
     current: str,
@@ -76,6 +78,10 @@ async def boss_autocomplete(
     ]
 
 @bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05) แล้วคำนวณเวลาเกิดให้อัตโนมัติ")
+@app_commands.describe(
+    boss_name="เลือกชื่อบอส",
+    kill_time="ระบุเวลาที่บอสตาย (รูปแบบ HH:MM เช่น 17:05 หรือ 09:30)"
+)
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str):
     # 1. เช็กว่ามีชื่อบอสในระบบไหม
@@ -92,7 +98,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         now = datetime.now(TZ_THAI)
         killed_at = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
         
-        # ถ้าระบุเวลาล่วงหน้าเกินเวลาปัจจุบัน (เช่น ตอนนี้ 00:30 แต่ลงเวลา 23:50) ให้ถือว่าเป็นของเมื่อวาน
+        # ถ้าระบุเวลาล่วงหน้าเกินเวลาปัจจุบัน ให้ถือว่าเป็นของเมื่อวาน
         if killed_at > now:
             killed_at -= timedelta(days=1)
 
@@ -100,11 +106,11 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         await interaction.response.send_message("❌ กรุณากรอกเวลาให้ถูกต้องตามรูปแบบ `ชั่วโมง:นาที` เช่น `17:05` หรือ `09:30`", ephemeral=True)
         return
 
-    # 3. คำนวณเวลาเกิดใหม่
-    respawn_hours = BOSS_RESPAWN_TIMES[boss_name]
-    next_spawn = killed_at + timedelta(hours=respawn_hours)
+    # 3. คำนวณเวลาเกิดใหม่ (Respawn Time)
+    respawn_delta = BOSS_RESPAWN_TIMES[boss_name]
+    next_spawn = killed_at + respawn_delta
 
-    # แปลงเป็น Discord Timestamp สำหรับนับถอยหลัง
+    # แปลงเป็น Discord Timestamp สำหรับนับถอยหลังเรียลไทม์
     timestamp_unix = int(next_spawn.timestamp())
     discord_time_str = f"<t:{timestamp_unix}:F> (<t:{timestamp_unix}:R>)"
 
@@ -115,7 +121,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     )
     embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
     embed.add_field(name="⏱️ เวลาที่ตาย", value=killed_at.strftime("%H:%M น."), inline=True)
-    embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=f"{respawn_hours} ชั่วโมง", inline=True)
+    embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=BOSS_CD_TEXT[boss_name], inline=True)
     embed.add_field(name="🔔 บอสจะเกิดเวลา", value=discord_time_str, inline=False)
     embed.set_footer(text=f"ลงเวลาโดย {interaction.user.display_name}")
 
@@ -125,10 +131,8 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 # 🚀 5. รันบอท Discord
 # ==========================================
 if __name__ == "__main__":
-    # ดึง Token จาก Environment Variable บน Render (หรือรับจาก config.json)
     TOKEN = os.environ.get("DISCORD_TOKEN")
     
-    # ถ้าไม่ได้ตั้งไว้ใน Environment Variable ให้ไปดึงจาก config.json
     if not TOKEN and os.path.exists('config.json'):
         with open('config.json', 'r', encoding='utf-8') as f:
             config = json.load(f)
