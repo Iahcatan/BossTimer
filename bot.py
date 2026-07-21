@@ -78,10 +78,9 @@ async def check_boss_notifications():
         channel = data["channel"]
         notified_30m = data.get("notified_30m", False)
         
-        # คำนวณเวลาที่เหลือ (วินาที)
         time_left = (spawn_time - now).total_seconds()
         
-        # 1. แจ้งเตือนล่วงหน้า 30 นาที (1740 ถึง 1800 วินาที) -> เปลี่ยนแท็กเป็น @everyone
+        # 1. แจ้งเตือนล่วงหน้า 30 นาที (1740 ถึง 1800 วินาที) -> @everyone
         if 0 < time_left <= 1800 and not notified_30m:
             timestamp_unix = int(spawn_time.timestamp())
             embed = discord.Embed(
@@ -90,9 +89,9 @@ async def check_boss_notifications():
                 color=discord.Color.gold()
             )
             await channel.send(content="@everyone", embed=embed)
-            boss_schedule[boss_name]["notified_30m"] = True  # ทำเครื่องหมายว่าเตือนแล้ว
+            boss_schedule[boss_name]["notified_30m"] = True
 
-        # 2. เมื่อบอสเกิดแล้ว (ลบออกจากตารางอัตโนมัติ) -> เปลี่ยนแท็กเป็น @everyone
+        # 2. เมื่อบอสเกิดแล้ว -> @everyone
         elif time_left <= 0:
             embed = discord.Embed(
                 title=f"⚔️ บอสเกิดแล้ว!",
@@ -107,11 +106,12 @@ async def boss_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    return [
+    choices = [
         app_commands.Choice(name=boss, value=boss)
         for boss in BOSS_RESPAWN_TIMES.keys()
         if current.lower() in boss.lower()
     ]
+    return choices[:25]
 
 # ==========================================
 # ⚔️ 5. Slash Commands
