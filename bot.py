@@ -5,17 +5,113 @@ import os
 import json
 import threading
 from datetime import datetime, timedelta, timezone
-from flask import Flask
+from flask import Flask, render_template_string
 from waitress import serve
 
 # ==========================================
-# 🌐 1. Web Server หลอก Port สำหรับ Render (Production WSGI Server)
+# 🌐 1. Web Dashboard & Server สำหรับ Render
 # ==========================================
 app = Flask(__name__)
 
+# Template HTML/CSS หน้า Dashboard
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boss Timer Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <meta http-equiv="refresh" content="10"> <!-- รีเฟรชหน้าเว็บอัตโนมัติทุก 10 วินาที -->
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Kanit', sans-serif; }
+        .card { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; }
+        .status-badge { font-size: 0.9rem; padding: 6px 12px; border-radius: 20px; }
+        .table { color: #f8fafc; }
+        .table-dark { --bs-table-bg: #1e293b; }
+    </style>
+</head>
+<body>
+    <div class="container py-5">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2>⚔️ Boss Timer Dashboard</h2>
+            <span class="badge bg-success status-badge">🟢 Bot Online</span>
+        </div>
+
+        <div class="card p-4 shadow-sm mb-4">
+            <h4 class="card-title text-warning mb-3">📜 ตารางเวลาบอสล่าสุด</h4>
+            {% if bosses %}
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle">
+                    <thead>
+                        <tr>
+                            <th>ชื่อบอส</th>
+                            <th>เวลาเกิด (เวลาไทย)</th>
+                            <th>สถานะ/นับถอยหลัง</th>
+                            <th>แจ้งเตือนล่วงหน้า</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for boss in bosses %}
+                        <tr>
+                            <td class="fw-bold text-info">{{ boss.name }}</td>
+                            <td>{{ boss.spawn_time }} น.</td>
+                            <td>
+                                {% if boss.is_spawned %}
+                                    <span class="badge bg-danger">⚔️ เกิดแล้ว!</span>
+                                {% else %}
+                                    <span class="badge bg-primary">⏳ เหลือ {{ boss.time_left }}</span>
+                                {% endif %}
+                            </td>
+                            <td><small class="text-muted">{{ boss.notice_text }}</small></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <p class="text-muted mb-0">📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในขณะนี้</p>
+            {% endif %}
+        </div>
+        
+        <footer class="text-center text-muted">
+            <small>อัปเดตข้อมูลอัตโนมัติทุกๆ 10 วินาที • Boss Timer Bot 24/7</small>
+        </footer>
+    </div>
+</body>
+</html>
+"""
+
 @app.route('/')
-def health_check():
-    return "Boss Timer Bot is online 24/7!", 200
+def dashboard():
+    now = datetime.now(TZ_THAI)
+    boss_list = []
+    
+    # ดึงข้อมูลบอสจัดเรียงตามเวลาเกิด
+    sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
+    
+    for boss_name, data in sorted_bosses:
+        spawn_time = data["spawn_time"]
+        time_left_sec = (spawn_time - now).total_seconds()
+        
+        if time_left_sec <= 0:
+            time_left_str = "เกิดแล้ว!"
+            is_spawned = True
+        else:
+            m, s = divmod(int(time_left_sec), 60)
+            h, m = divmod(m, 60)
+            time_left_str = f"{h:02d}:{m:02d}:{s:02d} ชม."
+            is_spawned = False
+
+        boss_list.append({
+            "name": boss_name,
+            "spawn_time": spawn_time.strftime("%H:%M:%S"),
+            "time_left": time_left_str,
+            "is_spawned": is_spawned,
+            "notice_text": ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
+        })
+
+    return render_template_string(HTML_TEMPLATE, bosses=boss_list)
 
 def run_web():
     port = int(os.environ.get("PORT", 5000))
@@ -29,7 +125,6 @@ threading.Thread(target=run_web, daemon=True).start()
 TZ_THAI = timezone(timedelta(hours=7))
 DATA_FILE = "boss_data.json"
 
-# รายชื่อ Role ที่ต้องการให้บอทแท็กแจ้งเตือน
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
 
 BOSS_RESPAWN_TIMES = {
@@ -156,7 +251,6 @@ async def check_boss_notifications():
         if not channel:
             continue
 
-        # ค้นหาทั้ง 3 Roles ใน Server
         mentions = []
         if hasattr(channel, "guild") and channel.guild:
             for role_name in TARGET_ROLE_NAMES:
@@ -164,14 +258,13 @@ async def check_boss_notifications():
                 if role:
                     mentions.append(role.mention)
         
-        # ถ้าหา Role เจออย่างน้อย 1 ยศ ให้ต่อข้อความแท็ก หากไม่เจอเลยให้ใช้ @everyone
         mention_target = " ".join(mentions) if mentions else "@everyone"
 
         time_left = (spawn_time - now).total_seconds()
         notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
         notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
         
-        # 1. แจ้งเตือนล่วงหน้า -> แท็ก Roles
+        # 1. แจ้งเตือนล่วงหน้า
         if 0 < time_left <= notice_limit and not notified_advance:
             timestamp_unix = int(spawn_time.timestamp())
             embed = discord.Embed(
@@ -188,7 +281,7 @@ async def check_boss_notifications():
             boss_schedule[boss_name]["notified_advance"] = True
             changed = True
 
-        # 2. เมื่อบอสเกิดแล้ว -> แท็ก Roles และลบออกจากตาราง
+        # 2. เมื่อบอสเกิดแล้ว
         elif time_left <= 0:
             embed = discord.Embed(
                 title="⚔️ บอสเกิดแล้ว!",
@@ -207,7 +300,6 @@ async def check_boss_notifications():
     if changed:
         save_boss_data()
 
-# Autocomplete สำหรับเลือกชื่อบอส
 async def boss_autocomplete(
     interaction: discord.Interaction,
     current: str,
@@ -223,7 +315,6 @@ async def boss_autocomplete(
 # ⚔️ 6. Slash Commands
 # ==========================================
 
-# 1️⃣ คำสั่ง /kill : บันทึกเวลาบอสตาย
 @bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05) แล้วคำนวณเวลาเกิดให้อัตโนมัติ")
 @app_commands.describe(
     boss_name="เลือกชื่อบอส",
@@ -276,8 +367,6 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
     await interaction.followup.send(embed=embed)
 
-
-# 2️⃣ คำสั่ง /list : ดูรายการตารางบอสทั้งหมด
 @bot.tree.command(name="list", description="ดูตารางเวลาเกิดของบอสทั้งหมด")
 async def list_bosses(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -301,8 +390,6 @@ async def list_bosses(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
-
-# 3️⃣ คำสั่ง /clear : ลบเวลาบอสออกจากตาราง
 @bot.tree.command(name="clear", description="ลบเวลาบอสออกจากตาราง")
 @app_commands.describe(boss_name="เลือกชื่อบอสที่ต้องการลบ")
 @app_commands.autocomplete(boss_name=boss_autocomplete)
@@ -316,8 +403,6 @@ async def clear_boss(interaction: discord.Interaction, boss_name: str):
     else:
         await interaction.followup.send(f"❌ ไม่พบข้อมูลการลงเวลาของบอส `{boss_name}`", ephemeral=True)
 
-
-# 4️⃣ คำสั่ง /info : ดูรายชื่อบอสและระยะเวลารีดาวน์
 @bot.tree.command(name="info", description="ดูรายชื่อบอสและระยะเวลารีดาวน์ทั้งหมด")
 async def boss_info(interaction: discord.Interaction):
     await interaction.response.defer()
