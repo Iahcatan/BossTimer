@@ -133,7 +133,8 @@ BOSS_RESPAWN_TIMES = {
     "Bigmama": timedelta(hours=48),
     "CHIEF MAGIEF": timedelta(minutes=30),
     "Faith": timedelta(hours=5, minutes=53),
-    "Apapa": timedelta(minutes=15)
+    "Apapa": timedelta(minutes=15),
+    "Corrupt Forest Keeper": timedelta(minutes=58)
 }
 
 BOSS_CD_TEXT = {
@@ -143,17 +144,19 @@ BOSS_CD_TEXT = {
     "Bigmama": "48 ชั่วโมง",
     "CHIEF MAGIEF": "30 นาที",
     "Faith": "5 ชั่วโมง 53 นาที",
-    "Apapa": "15 นาที"
+    "Apapa": "15 นาที",
+    "Corrupt Forest Keeper": "58 นาที"
 }
 
 ADVANCE_NOTICE_SECONDS = {
-    "Wadangka": 1800,       # 30 นาที
-    "Elemental Queen": 300, # 5 นาที
-    "Tank": 300,            # 5 นาที
-    "Bigmama": 300,         # 5 นาที
-    "CHIEF MAGIEF": 300,    # 5 นาที
-    "Faith": 300,           # 5 นาที
-    "Apapa": 300            # 5 นาที
+    "Wadangka": 1800,               # 30 นาที
+    "Elemental Queen": 300,         # 5 นาที
+    "Tank": 300,                    # 5 นาที
+    "Bigmama": 300,                 # 5 นาที
+    "CHIEF MAGIEF": 300,            # 5 นาที
+    "Faith": 300,                   # 5 นาที
+    "Apapa": 300,                   # 5 นาที
+    "Corrupt Forest Keeper": 300    # 5 นาที
 }
 
 ADVANCE_NOTICE_TEXT = {
@@ -163,7 +166,8 @@ ADVANCE_NOTICE_TEXT = {
     "Bigmama": "5 นาที",
     "CHIEF MAGIEF": "5 นาที",
     "Faith": "5 นาที",
-    "Apapa": "5 นาที"
+    "Apapa": "5 นาที",
+    "Corrupt Forest Keeper": "5 นาที"
 }
 
 boss_schedule = {}
@@ -250,7 +254,6 @@ async def check_boss_notifications():
         if not channel:
             continue
 
-        # ดึงการระบุยศทั้ง 3 ยศ (Eternal, Meaw, Anti) เสมอ
         mentions = []
         if hasattr(channel, "guild") and channel.guild:
             for role_name in TARGET_ROLE_NAMES:
@@ -264,7 +267,7 @@ async def check_boss_notifications():
         notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
         notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
         
-        # 1. แจ้งเตือนล่วงหน้า (Wadangka จะเตือนล่วงหน้า 30 นาที ตัวอื่น 5 นาที)
+        # 1. แจ้งเตือนล่วงหน้า
         if 0 < time_left <= notice_limit and not notified_advance:
             timestamp_unix = int(spawn_time.timestamp())
             embed = discord.Embed(
