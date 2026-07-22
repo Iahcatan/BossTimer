@@ -13,7 +13,6 @@ from waitress import serve
 # ==========================================
 app = Flask(__name__)
 
-# Template HTML/CSS หน้า Dashboard
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="th">
@@ -22,7 +21,7 @@ HTML_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Boss Timer Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <meta http-equiv="refresh" content="10"> <!-- รีเฟรชหน้าเว็บอัตโนมัติทุก 10 วินาที -->
+    <meta http-equiv="refresh" content="10">
     <style>
         body { background-color: #0f172a; color: #f8fafc; font-family: 'Kanit', sans-serif; }
         .card { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; }
@@ -87,7 +86,6 @@ def dashboard():
     now = datetime.now(TZ_THAI)
     boss_list = []
     
-    # ดึงข้อมูลบอสจัดเรียงตามเวลาเกิด
     sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
     
     for boss_name, data in sorted_bosses:
@@ -125,6 +123,7 @@ threading.Thread(target=run_web, daemon=True).start()
 TZ_THAI = timezone(timedelta(hours=7))
 DATA_FILE = "boss_data.json"
 
+# กำหนดให้แท็กทั้ง 3 ยศนี้กับบอสทุกตัว
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
 
 BOSS_RESPAWN_TIMES = {
@@ -251,6 +250,7 @@ async def check_boss_notifications():
         if not channel:
             continue
 
+        # ดึงการระบุยศทั้ง 3 ยศ (Eternal, Meaw, Anti) เสมอ
         mentions = []
         if hasattr(channel, "guild") and channel.guild:
             for role_name in TARGET_ROLE_NAMES:
@@ -258,13 +258,13 @@ async def check_boss_notifications():
                 if role:
                     mentions.append(role.mention)
         
-        mention_target = " ".join(mentions) if mentions else "@everyone"
+        mention_target = " ".join(mentions) if mentions else ""
 
         time_left = (spawn_time - now).total_seconds()
         notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
         notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
         
-        # 1. แจ้งเตือนล่วงหน้า
+        # 1. แจ้งเตือนล่วงหน้า (Wadangka จะเตือนล่วงหน้า 30 นาที ตัวอื่น 5 นาที)
         if 0 < time_left <= notice_limit and not notified_advance:
             timestamp_unix = int(spawn_time.timestamp())
             embed = discord.Embed(
@@ -312,7 +312,7 @@ async def boss_autocomplete(
     return choices[:25]
 
 # ==========================================
-# ⚔️ 6. Slash Commands (เพิ่ม defer() บรรทัดแรกทุกคำสั่ง)
+# ⚔️ 6. Slash Commands
 # ==========================================
 
 @bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05) แล้วคำนวณเวลาเกิดให้อัตโนมัติ")
@@ -322,7 +322,6 @@ async def boss_autocomplete(
 )
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str):
-    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     if boss_name not in BOSS_RESPAWN_TIMES:
@@ -370,7 +369,6 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
 @bot.tree.command(name="list", description="ดูตารางเวลาเกิดของบอสทั้งหมด")
 async def list_bosses(interaction: discord.Interaction):
-    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     if not boss_schedule:
@@ -396,7 +394,6 @@ async def list_bosses(interaction: discord.Interaction):
 @app_commands.describe(boss_name="เลือกชื่อบอสที่ต้องการลบ")
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 async def clear_boss(interaction: discord.Interaction, boss_name: str):
-    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     if boss_name in boss_schedule:
@@ -408,7 +405,6 @@ async def clear_boss(interaction: discord.Interaction, boss_name: str):
 
 @bot.tree.command(name="info", description="ดูรายชื่อบอสและระยะเวลารีดาวน์ทั้งหมด")
 async def boss_info(interaction: discord.Interaction):
-    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     embed = discord.Embed(title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (Respawn Time)", color=discord.Color.green())
