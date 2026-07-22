@@ -312,7 +312,7 @@ async def boss_autocomplete(
     return choices[:25]
 
 # ==========================================
-# ⚔️ 6. Slash Commands
+# ⚔️ 6. Slash Commands (เพิ่ม defer() บรรทัดแรกทุกคำสั่ง)
 # ==========================================
 
 @bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05) แล้วคำนวณเวลาเกิดให้อัตโนมัติ")
@@ -322,6 +322,7 @@ async def boss_autocomplete(
 )
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str):
+    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     if boss_name not in BOSS_RESPAWN_TIMES:
@@ -369,6 +370,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
 @bot.tree.command(name="list", description="ดูตารางเวลาเกิดของบอสทั้งหมด")
 async def list_bosses(interaction: discord.Interaction):
+    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     if not boss_schedule:
@@ -394,6 +396,7 @@ async def list_bosses(interaction: discord.Interaction):
 @app_commands.describe(boss_name="เลือกชื่อบอสที่ต้องการลบ")
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 async def clear_boss(interaction: discord.Interaction, boss_name: str):
+    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     if boss_name in boss_schedule:
@@ -405,6 +408,7 @@ async def clear_boss(interaction: discord.Interaction, boss_name: str):
 
 @bot.tree.command(name="info", description="ดูรายชื่อบอสและระยะเวลารีดาวน์ทั้งหมด")
 async def boss_info(interaction: discord.Interaction):
+    # 1. ตอบรับ Discord ทันทีเพื่อกัน Error 10062
     await interaction.response.defer()
 
     embed = discord.Embed(title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (Respawn Time)", color=discord.Color.green())
