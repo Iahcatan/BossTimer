@@ -6,3 +6,4 @@ pytz
 waitress
 pynacl
 davey
+requests
