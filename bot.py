@@ -4,6 +4,8 @@ from discord.ext import commands, tasks
 import os
 import json
 import threading
+import requests
+import base64
 from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template_string
 from waitress import serve
@@ -122,8 +124,8 @@ threading.Thread(target=run_web, daemon=True).start()
 # ==========================================
 TZ_THAI = timezone(timedelta(hours=7))
 DATA_FILE = "boss_data.json"
+CUSTOM_BOSSES_FILE = "custom_bosses.json"
 
-# กำหนดให้แท็กทั้ง 3 ยศนี้กับบอสทุกตัว
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
 
 BOSS_RESPAWN_TIMES = {
@@ -149,14 +151,14 @@ BOSS_CD_TEXT = {
 }
 
 ADVANCE_NOTICE_SECONDS = {
-    "Wadangka": 1800,               # 30 นาที
-    "Elemental Queen": 300,         # 5 นาที
-    "Tank": 300,                    # 5 นาที
-    "Bigmama": 300,                 # 5 นาที
-    "CHIEF MAGIEF": 300,            # 5 นาที
-    "Faith": 300,                   # 5 นาที
-    "Apapa": 300,                   # 5 นาที
-    "Corrupt Forest Keeper": 300    # 5 นาที
+    "Wadangka": 1800,
+    "Elemental Queen": 300,
+    "Tank": 300,
+    "Bigmama": 300,
+    "CHIEF MAGIEF": 300,
+    "Faith": 300,
+    "Apapa": 300,
+    "Corrupt Forest Keeper": 300
 }
 
 ADVANCE_NOTICE_TEXT = {
@@ -173,8 +175,72 @@ ADVANCE_NOTICE_TEXT = {
 boss_schedule = {}
 
 # ==========================================
-# 💾 3. ระบบบันทึกและโหลดข้อมูลแบบปลอดภัย (JSON File)
+# 💾 3. ระบบโหลดและเซฟไฟล์ JSON + GitHub Sync
 # ==========================================
+def save_custom_bosses_to_github():
+    """บันทึกบอสทั้งหมดที่เพิ่มใหม่ลง custom_bosses.json และอัปเดตไป GitHub อัตโนมัติ"""
+    custom_data = {}
+    for name in list(BOSS_RESPAWN_TIMES.keys()):
+        if name not in ["Wadangka", "Elemental Queen", "Tank", "Bigmama", "CHIEF MAGIEF", "Faith", "Apapa", "Corrupt Forest Keeper"]:
+            custom_data[name] = {
+                "total_seconds": int(BOSS_RESPAWN_TIMES[name].total_seconds()),
+                "cd_text": BOSS_CD_TEXT[name],
+                "notice_seconds": ADVANCE_NOTICE_SECONDS[name],
+                "notice_text": ADVANCE_NOTICE_TEXT[name]
+            }
+
+    # 1. เซฟไฟล์ลงในเครื่อง/Render ก่อน
+    try:
+        with open(CUSTOM_BOSSES_FILE, "w", encoding="utf-8") as f:
+            json.dump(custom_data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ เซฟลง local ไม่สำเร็จ: {e}")
+
+    # 2. ส่งขึ้น GitHub API ถาวร
+    github_token = os.environ.get("GITHUB_TOKEN")
+    repo_name = os.environ.get("GITHUB_REPO")  # รูปแบบ: username/repository-name
+
+    if github_token and repo_name:
+        try:
+            url = f"https://api.github.com/repos/{repo_name}/contents/{CUSTOM_BOSSES_FILE}"
+            headers = {"Authorization": f"token {github_token}"}
+
+            # ดึง sha ของไฟล์เดิมบน GitHub ก่อน
+            res = requests.get(url, headers=headers)
+            sha = res.json().get("sha", "") if res.status_code == 200 else None
+
+            content_b64 = base64.b64encode(json.dumps(custom_data, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
+
+            payload = {
+                "message": "Auto-update custom_bosses.json via Discord Bot",
+                "content": content_b64
+            }
+            if sha:
+                payload["sha"] = sha
+
+            put_res = requests.put(url, headers=headers, json=payload)
+            if put_res.status_code in [200, 201]:
+                print("✅ อัปเดตไฟล์ custom_bosses.json บน GitHub สำเร็จถาวร!")
+            else:
+                print(f"⚠️ อัปเดต GitHub ไม่สำเร็จ Status Code: {put_res.status_code}")
+        except Exception as e:
+            print(f"❌ อัปเดตขึ้น GitHub ไม่สำเร็จ: {e}")
+
+def load_custom_bosses():
+    if not os.path.exists(CUSTOM_BOSSES_FILE):
+        return
+    try:
+        with open(CUSTOM_BOSSES_FILE, "r", encoding="utf-8") as f:
+            custom_data = json.load(f)
+            for boss_name, data in custom_data.items():
+                BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
+                BOSS_CD_TEXT[boss_name] = data["cd_text"]
+                ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
+                ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
+        print("✅ โหลดบอสคัสตอมเรียบร้อยแล้ว")
+    except Exception as e:
+        print(f"❌ โหลดข้อมูล custom_bosses ไม่สำเร็จ: {e}")
+
 def save_boss_data():
     data_to_save = {}
     for boss_name, data in boss_schedule.items():
@@ -219,6 +285,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
     print("----------------------------------------")
+    load_custom_bosses()
     load_boss_data()
     try:
         synced = await bot.tree.sync()
@@ -230,7 +297,7 @@ async def on_ready():
         check_boss_notifications.start()
 
 # ==========================================
-# ⏰ 5. Task เช็กเวลาแจ้งเตือนอัตโนมัติ (ทำงานทุก 10 วินาที)
+# ⏰ 5. Task เช็กเวลาแจ้งเตือนอัตโนมัติ
 # ==========================================
 @tasks.loop(seconds=10)
 async def check_boss_notifications():
@@ -317,6 +384,59 @@ async def boss_autocomplete(
 # ==========================================
 # ⚔️ 6. Slash Commands
 # ==========================================
+
+@bot.tree.command(name="addboss", description="เพิ่มบอสใหม่เข้าสู่ระบบ")
+@app_commands.describe(
+    boss_name="ชื่อบอสที่ต้องการเพิ่ม",
+    respawn_hours="ระยะเวลารีดาวน์ (ชั่วโมง)",
+    respawn_minutes="ระยะเวลารีดาวน์ (นาที)",
+    notice_minutes="แจ้งเตือนล่วงหน้ากี่นาที (ค่าเริ่มต้นคือ 5 นาที)"
+)
+async def add_boss(
+    interaction: discord.Interaction, 
+    boss_name: str, 
+    respawn_hours: int, 
+    respawn_minutes: int, 
+    notice_minutes: int = 5
+):
+    await interaction.response.defer()
+
+    if respawn_hours < 0 or respawn_minutes < 0 or notice_minutes < 0:
+        await interaction.followup.send("❌ เวลาต้องเป็นตัวเลขจำนวนเต็มบวกเท่านั้น!", ephemeral=True)
+        return
+
+    if respawn_hours == 0 and respawn_minutes == 0:
+        await interaction.followup.send("❌ ระยะเวลารีดาวน์ต้องมากกว่า 0 นาที!", ephemeral=True)
+        return
+
+    total_delta = timedelta(hours=respawn_hours, minutes=respawn_minutes)
+    
+    cd_parts = []
+    if respawn_hours > 0:
+        cd_parts.append(f"{respawn_hours} ชั่วโมง")
+    if respawn_minutes > 0:
+        cd_parts.append(f"{respawn_minutes} นาที")
+    cd_text = " ".join(cd_parts)
+
+    notice_sec = notice_minutes * 60
+    notice_txt = f"{notice_minutes} นาที"
+
+    # บันทึกเข้า Memory บอท
+    BOSS_RESPAWN_TIMES[boss_name] = total_delta
+    BOSS_CD_TEXT[boss_name] = cd_text
+    ADVANCE_NOTICE_SECONDS[boss_name] = notice_sec
+    ADVANCE_NOTICE_TEXT[boss_name] = notice_txt
+
+    # บันทึกไฟล์ และส่งไปอัปเดตบน GitHub อัตโนมัติ
+    save_custom_bosses_to_github()
+
+    embed = discord.Embed(title="✅ เพิ่มบอสใหม่เข้าสู่ระบบเรียบร้อย", color=discord.Color.green())
+    embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
+    embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=cd_text, inline=True)
+    embed.add_field(name="🔔 แจ้งเตือนล่วงหน้า", value=f"{notice_minutes} นาที", inline=True)
+    embed.set_footer(text=f"เพิ่มโดย {interaction.user.display_name}")
+
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05) แล้วคำนวณเวลาเกิดให้อัตโนมัติ")
 @app_commands.describe(
