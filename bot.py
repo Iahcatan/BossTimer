@@ -129,6 +129,7 @@ CUSTOM_BOSSES_FILE = "custom_bosses.json"
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
 
 BOSS_RESPAWN_TIMES = {
+    # บอสเดิม
     "Wadangka": timedelta(hours=2, minutes=30),
     "Elemental Queen": timedelta(hours=2, minutes=30),
     "Tank": timedelta(minutes=58, seconds=20),
@@ -136,10 +137,45 @@ BOSS_RESPAWN_TIMES = {
     "CHIEF MAGIEF": timedelta(minutes=30),
     "Faith": timedelta(hours=5, minutes=53),
     "Apapa": timedelta(minutes=15),
-    "Corrupt Forest Keeper": timedelta(minutes=58)
+    "Corrupt Forest Keeper": timedelta(minutes=58),
+
+    # บอสเพิ่มใหม่ตามลิสต์
+    "RECLUSE": timedelta(hours=11, minutes=23),
+    "BLACKSKULL": timedelta(minutes=56, seconds=50),
+    "Sleepy Kooii": timedelta(minutes=20),
+    "AWAKEN KOOII": timedelta(hours=1, minutes=3),
+    "EEHEEHEE": timedelta(hours=1, minutes=6, seconds=48),
+    "OOHEEHEEK": timedelta(hours=1, minutes=8, seconds=3),
+    "OOHEHE": timedelta(hours=1, minutes=5, seconds=8),
+    "GUARDIAN IMP": timedelta(hours=1, minutes=3),
+    "DEVILANG": timedelta(hours=5, minutes=33),
+    "BLACKJUNO": timedelta(minutes=35),
+    "BLACKSKY": timedelta(minutes=35),
+    "Red Fox": timedelta(minutes=20),
+    "7tailfox": timedelta(minutes=20),
+    "777TAILFOX": timedelta(minutes=30),
+    "Sunrise Flower": timedelta(minutes=20),
+    "Magma Senior Thief": timedelta(minutes=20),
+    "Bbinikjoe": timedelta(minutes=20),
+    "Bigmouse": timedelta(minutes=20),
+    "CALIGO": timedelta(days=7),
+    "Poison Root Flower": timedelta(minutes=28, seconds=10),
+    "Contaminated Queen Bee": timedelta(minutes=28),
+    "Rotten Pudding": timedelta(minutes=30),
+    "Swamp Flower Monster": timedelta(minutes=30),
+    "Ukpana": timedelta(hours=48),
+    "Darlene the Witch": timedelta(hours=72),
+    "Illust": timedelta(hours=72),
+    "Actaemon": timedelta(hours=6),
+    "Aiyo's Protector": timedelta(hours=72),
+    "Glucose": timedelta(minutes=30),
+    "Overload": timedelta(minutes=29, seconds=52),
+    "Soul Lich": timedelta(hours=24, minutes=15),
+    "Platanista": timedelta(hours=168)
 }
 
 BOSS_CD_TEXT = {
+    # บอสเดิม
     "Wadangka": "2 ชั่วโมง 30 นาที",
     "Elemental Queen": "2 ชั่วโมง 30 นาที",
     "Tank": "58 นาที 20 วินาที",
@@ -147,29 +183,130 @@ BOSS_CD_TEXT = {
     "CHIEF MAGIEF": "30 นาที",
     "Faith": "5 ชั่วโมง 53 นาที",
     "Apapa": "15 นาที",
-    "Corrupt Forest Keeper": "58 นาที"
+    "Corrupt Forest Keeper": "58 นาที",
+
+    # บอสเพิ่มใหม่
+    "RECLUSE": "11 ชั่วโมง 23 นาที",
+    "BLACKSKULL": "56 นาที 50 วินาที",
+    "Sleepy Kooii": "20 นาที",
+    "AWAKEN KOOII": "1 ชั่วโมง 3 นาที",
+    "EEHEEHEE": "1 ชั่วโมง 6 นาที 48 วินาที",
+    "OOHEEHEEK": "1 ชั่วโมง 8 นาที 3 วินาที",
+    "OOHEHE": "1 ชั่วโมง 5 นาที 8 วินาที",
+    "GUARDIAN IMP": "1 ชั่วโมง 3 นาที",
+    "DEVILANG": "5 ชั่วโมง 33 นาที",
+    "BLACKJUNO": "35 นาที",
+    "BLACKSKY": "35 นาที",
+    "Red Fox": "20 นาที",
+    "7tailfox": "20 นาที",
+    "777TAILFOX": "30 นาที",
+    "Sunrise Flower": "20 นาที",
+    "Magma Senior Thief": "20 นาที",
+    "Bbinikjoe": "20 นาที",
+    "Bigmouse": "20 นาที",
+    "CALIGO": "7 วัน",
+    "Poison Root Flower": "28 นาที 10 วินาที",
+    "Contaminated Queen Bee": "28 นาที",
+    "Rotten Pudding": "30 นาที",
+    "Swamp Flower Monster": "30 นาที",
+    "Ukpana": "48 ชั่วโมง",
+    "Darlene the Witch": "72 ชั่วโมง",
+    "Illust": "72 ชั่วโมง",
+    "Actaemon": "6 ชั่วโมง",
+    "Aiyo's Protector": "72 ชั่วโมง",
+    "Glucose": "30 นาที",
+    "Overload": "29 นาที 52 วินาที",
+    "Soul Lich": "24 ชั่วโมง 15 นาที",
+    "Platanista": "168 ชั่วโมง (7 วัน)"
 }
 
 ADVANCE_NOTICE_SECONDS = {
     "Wadangka": 1800,
     "Elemental Queen": 300,
     "Tank": 300,
-    "Bigmama": 300,
+    "Bigmama": 1800,
     "CHIEF MAGIEF": 300,
-    "Faith": 300,
+    "Faith": 1800,
     "Apapa": 300,
-    "Corrupt Forest Keeper": 300
+    "Corrupt Forest Keeper": 300,
+
+    # ตั้งเวลาเตือนล่วงหน้า (บอสเกิน 5 ชม. เตือนล่วงหน้า 30 นาที / บอสสั้นเตือนล่วงหน้า 5 นาที)
+    "RECLUSE": 1800,
+    "BLACKSKULL": 300,
+    "Sleepy Kooii": 300,
+    "AWAKEN KOOII": 300,
+    "EEHEEHEE": 300,
+    "OOHEEHEEK": 300,
+    "OOHEHE": 300,
+    "GUARDIAN IMP": 300,
+    "DEVILANG": 1800,
+    "BLACKJUNO": 300,
+    "BLACKSKY": 300,
+    "Red Fox": 300,
+    "7tailfox": 300,
+    "777TAILFOX": 300,
+    "Sunrise Flower": 300,
+    "Magma Senior Thief": 300,
+    "Bbinikjoe": 300,
+    "Bigmouse": 300,
+    "CALIGO": 3600,  # บอส 7 วัน เตือนล่วงหน้า 1 ชม.
+    "Poison Root Flower": 300,
+    "Contaminated Queen Bee": 300,
+    "Rotten Pudding": 300,
+    "Swamp Flower Monster": 300,
+    "Ukpana": 1800,
+    "Darlene the Witch": 1800,
+    "Illust": 1800,
+    "Actaemon": 1800,
+    "Aiyo's Protector": 1800,
+    "Glucose": 300,
+    "Overload": 300,
+    "Soul Lich": 1800,
+    "Platanista": 3600
 }
 
 ADVANCE_NOTICE_TEXT = {
     "Wadangka": "30 นาที",
     "Elemental Queen": "5 นาที",
     "Tank": "5 นาที",
-    "Bigmama": "5 นาที",
+    "Bigmama": "30 นาที",
     "CHIEF MAGIEF": "5 นาที",
-    "Faith": "5 นาที",
+    "Faith": "30 นาที",
     "Apapa": "5 นาที",
-    "Corrupt Forest Keeper": "5 นาที"
+    "Corrupt Forest Keeper": "5 นาที",
+
+    "RECLUSE": "30 นาที",
+    "BLACKSKULL": "5 นาที",
+    "Sleepy Kooii": "5 นาที",
+    "AWAKEN KOOII": "5 นาที",
+    "EEHEEHEE": "5 นาที",
+    "OOHEEHEEK": "5 นาที",
+    "OOHEHE": "5 นาที",
+    "GUARDIAN IMP": "5 นาที",
+    "DEVILANG": "30 นาที",
+    "BLACKJUNO": "5 นาที",
+    "BLACKSKY": "5 นาที",
+    "Red Fox": "5 นาที",
+    "7tailfox": "5 นาที",
+    "777TAILFOX": "5 นาที",
+    "Sunrise Flower": "5 นาที",
+    "Magma Senior Thief": "5 นาที",
+    "Bbinikjoe": "5 นาที",
+    "Bigmouse": "5 นาที",
+    "CALIGO": "1 ชั่วโมง",
+    "Poison Root Flower": "5 นาที",
+    "Contaminated Queen Bee": "5 นาที",
+    "Rotten Pudding": "5 นาที",
+    "Swamp Flower Monster": "5 นาที",
+    "Ukpana": "30 นาที",
+    "Darlene the Witch": "30 นาที",
+    "Illust": "30 นาที",
+    "Actaemon": "30 นาที",
+    "Aiyo's Protector": "30 นาที",
+    "Glucose": "5 นาที",
+    "Overload": "5 นาที",
+    "Soul Lich": "30 นาที",
+    "Platanista": "1 ชั่วโมง"
 }
 
 boss_schedule = {}
@@ -178,10 +315,11 @@ boss_schedule = {}
 # 💾 3. ระบบโหลดและเซฟไฟล์ JSON + GitHub Sync
 # ==========================================
 def save_custom_bosses_to_github():
-    """บันทึกบอสทั้งหมดที่เพิ่มใหม่ลง custom_bosses.json และอัปเดตไป GitHub อัตโนมัติ"""
+    """บันทึกบอสทั้งหมดที่เพิ่มใหม่ผ่านคำสั่ง /addboss ลง custom_bosses.json และอัปเดตไป GitHub อัตโนมัติ"""
+    default_bosses = list(BOSS_RESPAWN_TIMES.keys())
     custom_data = {}
     for name in list(BOSS_RESPAWN_TIMES.keys()):
-        if name not in ["Wadangka", "Elemental Queen", "Tank", "Bigmama", "CHIEF MAGIEF", "Faith", "Apapa", "Corrupt Forest Keeper"]:
+        if name not in default_bosses:
             custom_data[name] = {
                 "total_seconds": int(BOSS_RESPAWN_TIMES[name].total_seconds()),
                 "cd_text": BOSS_CD_TEXT[name],
@@ -189,23 +327,20 @@ def save_custom_bosses_to_github():
                 "notice_text": ADVANCE_NOTICE_TEXT[name]
             }
 
-    # 1. เซฟไฟล์ลงในเครื่อง/Render ก่อน
     try:
         with open(CUSTOM_BOSSES_FILE, "w", encoding="utf-8") as f:
             json.dump(custom_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"❌ เซฟลง local ไม่สำเร็จ: {e}")
 
-    # 2. ส่งขึ้น GitHub API ถาวร
     github_token = os.environ.get("GITHUB_TOKEN")
-    repo_name = os.environ.get("GITHUB_REPO")  # รูปแบบ: username/repository-name
+    repo_name = os.environ.get("GITHUB_REPO")
 
     if github_token and repo_name:
         try:
             url = f"https://api.github.com/repos/{repo_name}/contents/{CUSTOM_BOSSES_FILE}"
             headers = {"Authorization": f"token {github_token}"}
 
-            # ดึง sha ของไฟล์เดิมบน GitHub ก่อน
             res = requests.get(url, headers=headers)
             sha = res.json().get("sha", "") if res.status_code == 200 else None
 
@@ -421,13 +556,11 @@ async def add_boss(
     notice_sec = notice_minutes * 60
     notice_txt = f"{notice_minutes} นาที"
 
-    # บันทึกเข้า Memory บอท
     BOSS_RESPAWN_TIMES[boss_name] = total_delta
     BOSS_CD_TEXT[boss_name] = cd_text
     ADVANCE_NOTICE_SECONDS[boss_name] = notice_sec
     ADVANCE_NOTICE_TEXT[boss_name] = notice_txt
 
-    # บันทึกไฟล์ และส่งไปอัปเดตบน GitHub อัตโนมัติ
     save_custom_bosses_to_github()
 
     embed = discord.Embed(title="✅ เพิ่มบอสใหม่เข้าสู่ระบบเรียบร้อย", color=discord.Color.green())
