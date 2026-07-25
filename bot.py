@@ -139,7 +139,7 @@ BOSS_RESPAWN_TIMES = {
     "Apapa": timedelta(minutes=15),
     "Corrupt Forest Keeper": timedelta(minutes=58),
 
-    # บอสเพิ่มใหม่ตามลิสต์
+    # รายชื่อบอส
     "RECLUSE": timedelta(hours=11, minutes=23),
     "BLACKSKULL": timedelta(minutes=56, seconds=50),
     "Sleepy Kooii": timedelta(minutes=20),
@@ -171,7 +171,8 @@ BOSS_RESPAWN_TIMES = {
     "Glucose": timedelta(minutes=30),
     "Overload": timedelta(minutes=29, seconds=52),
     "Soul Lich": timedelta(hours=24, minutes=15),
-    "Platanista": timedelta(hours=168)
+    "Platanista": timedelta(hours=168),
+    "Barslaf": timedelta(hours=48)
 }
 
 BOSS_CD_TEXT = {
@@ -185,7 +186,7 @@ BOSS_CD_TEXT = {
     "Apapa": "15 นาที",
     "Corrupt Forest Keeper": "58 นาที",
 
-    # บอสเพิ่มใหม่
+    # รายชื่อบอส
     "RECLUSE": "11 ชั่วโมง 23 นาที",
     "BLACKSKULL": "56 นาที 50 วินาที",
     "Sleepy Kooii": "20 นาที",
@@ -217,7 +218,8 @@ BOSS_CD_TEXT = {
     "Glucose": "30 นาที",
     "Overload": "29 นาที 52 วินาที",
     "Soul Lich": "24 ชั่วโมง 15 นาที",
-    "Platanista": "168 ชั่วโมง (7 วัน)"
+    "Platanista": "168 ชั่วโมง (7 วัน)",
+    "Barslaf": "48 ชั่วโมง"
 }
 
 ADVANCE_NOTICE_SECONDS = {
@@ -230,7 +232,6 @@ ADVANCE_NOTICE_SECONDS = {
     "Apapa": 300,
     "Corrupt Forest Keeper": 300,
 
-    # ตั้งเวลาเตือนล่วงหน้า (บอสเกิน 5 ชม. เตือนล่วงหน้า 30 นาที / บอสสั้นเตือนล่วงหน้า 5 นาที)
     "RECLUSE": 1800,
     "BLACKSKULL": 300,
     "Sleepy Kooii": 300,
@@ -249,7 +250,7 @@ ADVANCE_NOTICE_SECONDS = {
     "Magma Senior Thief": 300,
     "Bbinikjoe": 300,
     "Bigmouse": 300,
-    "CALIGO": 3600,  # บอส 7 วัน เตือนล่วงหน้า 1 ชม.
+    "CALIGO": 3600,
     "Poison Root Flower": 300,
     "Contaminated Queen Bee": 300,
     "Rotten Pudding": 300,
@@ -262,7 +263,8 @@ ADVANCE_NOTICE_SECONDS = {
     "Glucose": 300,
     "Overload": 300,
     "Soul Lich": 1800,
-    "Platanista": 3600
+    "Platanista": 3600,
+    "Barslaf": 1800
 }
 
 ADVANCE_NOTICE_TEXT = {
@@ -306,7 +308,8 @@ ADVANCE_NOTICE_TEXT = {
     "Glucose": "5 นาที",
     "Overload": "5 นาที",
     "Soul Lich": "30 นาที",
-    "Platanista": "1 ชั่วโมง"
+    "Platanista": "1 ชั่วโมง",
+    "Barslaf": "30 นาที"
 }
 
 boss_schedule = {}
