@@ -6,9 +6,11 @@ import json
 import threading
 import requests
 import base64
+import asyncio
 from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template_string
 from waitress import serve
+from gtts import gTTS
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -129,7 +131,6 @@ CUSTOM_BOSSES_FILE = "custom_bosses.json"
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
 
 BOSS_RESPAWN_TIMES = {
-    # บอสเดิม
     "Wadangka": timedelta(hours=2, minutes=30),
     "Elemental Queen": timedelta(hours=2, minutes=30),
     "Tank": timedelta(minutes=58, seconds=20),
@@ -138,8 +139,6 @@ BOSS_RESPAWN_TIMES = {
     "Faith": timedelta(hours=5, minutes=53),
     "Apapa": timedelta(minutes=15),
     "Corrupt Forest Keeper": timedelta(minutes=58),
-
-    # รายชื่อบอส
     "RECLUSE": timedelta(hours=11, minutes=23),
     "BLACKSKULL": timedelta(minutes=56, seconds=50),
     "Sleepy Kooii": timedelta(minutes=20),
@@ -176,7 +175,6 @@ BOSS_RESPAWN_TIMES = {
 }
 
 BOSS_CD_TEXT = {
-    # บอสเดิม
     "Wadangka": "2 ชั่วโมง 30 นาที",
     "Elemental Queen": "2 ชั่วโมง 30 นาที",
     "Tank": "58 นาที 20 วินาที",
@@ -185,8 +183,6 @@ BOSS_CD_TEXT = {
     "Faith": "5 ชั่วโมง 53 นาที",
     "Apapa": "15 นาที",
     "Corrupt Forest Keeper": "58 นาที",
-
-    # รายชื่อบอส
     "RECLUSE": "11 ชั่วโมง 23 นาที",
     "BLACKSKULL": "56 นาที 50 วินาที",
     "Sleepy Kooii": "20 นาที",
@@ -223,93 +219,31 @@ BOSS_CD_TEXT = {
 }
 
 ADVANCE_NOTICE_SECONDS = {
-    "Wadangka": 1800,
-    "Elemental Queen": 300,
-    "Tank": 300,
-    "Bigmama": 1800,
-    "CHIEF MAGIEF": 300,
-    "Faith": 1800,
-    "Apapa": 300,
-    "Corrupt Forest Keeper": 300,
-
-    "RECLUSE": 1800,
-    "BLACKSKULL": 300,
-    "Sleepy Kooii": 300,
-    "AWAKEN KOOII": 300,
-    "EEHEEHEE": 300,
-    "OOHEEHEEK": 300,
-    "OOHEHE": 300,
-    "GUARDIAN IMP": 300,
-    "DEVILANG": 1800,
-    "BLACKJUNO": 300,
-    "BLACKSKY": 300,
-    "Red Fox": 300,
-    "7tailfox": 300,
-    "777TAILFOX": 300,
-    "Sunrise Flower": 300,
-    "Magma Senior Thief": 300,
-    "Bbinikjoe": 300,
-    "Bigmouse": 300,
-    "CALIGO": 3600,
-    "Poison Root Flower": 300,
-    "Contaminated Queen Bee": 300,
-    "Rotten Pudding": 300,
-    "Swamp Flower Monster": 300,
-    "Ukpana": 1800,
-    "Darlene the Witch": 1800,
-    "Illust": 1800,
-    "Actaemon": 1800,
-    "Aiyo's Protector": 1800,
-    "Glucose": 300,
-    "Overload": 300,
-    "Soul Lich": 1800,
-    "Platanista": 3600,
-    "Barslaf": 1800
+    "Wadangka": 1800, "Elemental Queen": 300, "Tank": 300, "Bigmama": 1800,
+    "CHIEF MAGIEF": 300, "Faith": 1800, "Apapa": 300, "Corrupt Forest Keeper": 300,
+    "RECLUSE": 1800, "BLACKSKULL": 300, "Sleepy Kooii": 300, "AWAKEN KOOII": 300,
+    "EEHEEHEE": 300, "OOHEEHEEK": 300, "OOHEHE": 300, "GUARDIAN IMP": 300,
+    "DEVILANG": 1800, "BLACKJUNO": 300, "BLACKSKY": 300, "Red Fox": 300,
+    "7tailfox": 300, "777TAILFOX": 300, "Sunrise Flower": 300, "Magma Senior Thief": 300,
+    "Bbinikjoe": 300, "Bigmouse": 300, "CALIGO": 3600, "Poison Root Flower": 300,
+    "Contaminated Queen Bee": 300, "Rotten Pudding": 300, "Swamp Flower Monster": 300,
+    "Ukpana": 1800, "Darlene the Witch": 1800, "Illust": 1800, "Actaemon": 1800,
+    "Aiyo's Protector": 1800, "Glucose": 300, "Overload": 300, "Soul Lich": 1800,
+    "Platanista": 3600, "Barslaf": 1800
 }
 
 ADVANCE_NOTICE_TEXT = {
-    "Wadangka": "30 นาที",
-    "Elemental Queen": "5 นาที",
-    "Tank": "5 นาที",
-    "Bigmama": "30 นาที",
-    "CHIEF MAGIEF": "5 นาที",
-    "Faith": "30 นาที",
-    "Apapa": "5 นาที",
-    "Corrupt Forest Keeper": "5 นาที",
-
-    "RECLUSE": "30 นาที",
-    "BLACKSKULL": "5 นาที",
-    "Sleepy Kooii": "5 นาที",
-    "AWAKEN KOOII": "5 นาที",
-    "EEHEEHEE": "5 นาที",
-    "OOHEEHEEK": "5 นาที",
-    "OOHEHE": "5 นาที",
-    "GUARDIAN IMP": "5 นาที",
-    "DEVILANG": "30 นาที",
-    "BLACKJUNO": "5 นาที",
-    "BLACKSKY": "5 นาที",
-    "Red Fox": "5 นาที",
-    "7tailfox": "5 นาที",
-    "777TAILFOX": "5 นาที",
-    "Sunrise Flower": "5 นาที",
-    "Magma Senior Thief": "5 นาที",
-    "Bbinikjoe": "5 นาที",
-    "Bigmouse": "5 นาที",
-    "CALIGO": "1 ชั่วโมง",
-    "Poison Root Flower": "5 นาที",
-    "Contaminated Queen Bee": "5 นาที",
-    "Rotten Pudding": "5 นาที",
-    "Swamp Flower Monster": "5 นาที",
-    "Ukpana": "30 นาที",
-    "Darlene the Witch": "30 นาที",
-    "Illust": "30 นาที",
-    "Actaemon": "30 นาที",
-    "Aiyo's Protector": "30 นาที",
-    "Glucose": "5 นาที",
-    "Overload": "5 นาที",
-    "Soul Lich": "30 นาที",
-    "Platanista": "1 ชั่วโมง",
-    "Barslaf": "30 นาที"
+    "Wadangka": "30 นาที", "Elemental Queen": "5 นาที", "Tank": "5 นาที", "Bigmama": "30 นาที",
+    "CHIEF MAGIEF": "5 นาที", "Faith": "30 นาที", "Apapa": "5 นาที", "Corrupt Forest Keeper": "5 นาที",
+    "RECLUSE": "30 นาที", "BLACKSKULL": "5 นาที", "Sleepy Kooii": "5 นาที", "AWAKEN KOOII": "5 นาที",
+    "EEHEEHEE": "5 นาที", "OOHEEHEEK": "5 นาที", "OOHEHE": "5 นาที", "GUARDIAN IMP": "5 นาที",
+    "DEVILANG": "30 นาที", "BLACKJUNO": "5 นาที", "BLACKSKY": "5 นาที", "Red Fox": "5 นาที",
+    "7tailfox": "5 นาที", "777TAILFOX": "5 นาที", "Sunrise Flower": "5 นาที", "Magma Senior Thief": "5 นาที",
+    "Bbinikjoe": "5 นาที", "Bigmouse": "5 นาที", "CALIGO": "1 ชั่วโมง", "Poison Root Flower": "5 นาที",
+    "Contaminated Queen Bee": "5 นาที", "Rotten Pudding": "5 นาที", "Swamp Flower Monster": "5 นาที",
+    "Ukpana": "30 นาที", "Darlene the Witch": "30 นาที", "Illust": "30 นาที", "Actaemon": "30 นาที",
+    "Aiyo's Protector": "30 นาที", "Glucose": "5 นาที", "Overload": "5 นาที", "Soul Lich": "30 นาที",
+    "Platanista": "1 ชั่วโมง", "Barslaf": "30 นาที"
 }
 
 boss_schedule = {}
@@ -318,7 +252,6 @@ boss_schedule = {}
 # 💾 3. ระบบโหลดและเซฟไฟล์ JSON + GitHub Sync
 # ==========================================
 def save_custom_bosses_to_github():
-    """บันทึกบอสทั้งหมดที่เพิ่มใหม่ผ่านคำสั่ง /addboss ลง custom_bosses.json และอัปเดตไป GitHub อัตโนมัติ"""
     default_bosses = list(BOSS_RESPAWN_TIMES.keys())
     custom_data = {}
     for name in list(BOSS_RESPAWN_TIMES.keys()):
@@ -343,30 +276,21 @@ def save_custom_bosses_to_github():
         try:
             url = f"https://api.github.com/repos/{repo_name}/contents/{CUSTOM_BOSSES_FILE}"
             headers = {"Authorization": f"token {github_token}"}
-
             res = requests.get(url, headers=headers)
             sha = res.json().get("sha", "") if res.status_code == 200 else None
 
             content_b64 = base64.b64encode(json.dumps(custom_data, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
-
-            payload = {
-                "message": "Auto-update custom_bosses.json via Discord Bot",
-                "content": content_b64
-            }
-            if sha:
-                payload["sha"] = sha
+            payload = {"message": "Auto-update custom_bosses.json via Discord Bot", "content": content_b64}
+            if sha: payload["sha"] = sha
 
             put_res = requests.put(url, headers=headers, json=payload)
             if put_res.status_code in [200, 201]:
                 print("✅ อัปเดตไฟล์ custom_bosses.json บน GitHub สำเร็จถาวร!")
-            else:
-                print(f"⚠️ อัปเดต GitHub ไม่สำเร็จ Status Code: {put_res.status_code}")
         except Exception as e:
             print(f"❌ อัปเดตขึ้น GitHub ไม่สำเร็จ: {e}")
 
 def load_custom_bosses():
-    if not os.path.exists(CUSTOM_BOSSES_FILE):
-        return
+    if not os.path.exists(CUSTOM_BOSSES_FILE): return
     try:
         with open(CUSTOM_BOSSES_FILE, "r", encoding="utf-8") as f:
             custom_data = json.load(f)
@@ -375,7 +299,6 @@ def load_custom_bosses():
                 BOSS_CD_TEXT[boss_name] = data["cd_text"]
                 ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
                 ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
-        print("✅ โหลดบอสคัสตอมเรียบร้อยแล้ว")
     except Exception as e:
         print(f"❌ โหลดข้อมูล custom_bosses ไม่สำเร็จ: {e}")
 
@@ -395,34 +318,56 @@ def save_boss_data():
 
 def load_boss_data():
     global boss_schedule
-    if not os.path.exists(DATA_FILE):
-        return
+    if not os.path.exists(DATA_FILE): return
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             saved_data = json.load(f)
             for boss_name, data in saved_data.items():
-                spawn_time = datetime.fromisoformat(data["spawn_time"])
                 boss_schedule[boss_name] = {
-                    "spawn_time": spawn_time,
+                    "spawn_time": datetime.fromisoformat(data["spawn_time"]),
                     "channel_id": data.get("channel_id"),
                     "notified_advance": data.get("notified_advance", False)
                 }
-        print("✅ โหลดข้อมูลตารางบอสเรียบร้อยแล้ว")
     except Exception as e:
         print(f"❌ โหลดข้อมูลไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🤖 4. Discord Bot Setup
+# 🤖 4. Discord Bot Setup & Voice Helper
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+async def speak_in_guild(guild: discord.Guild, text: str):
+    """แปลงข้อความสั้นเป็นเสียงพูดและเล่นใน Voice Channel ของ Guild นั้นๆ"""
+    if not guild or not guild.voice_client or not guild.voice_client.is_connected():
+        return
+
+    vc = guild.voice_client
+    try:
+        filename = "temp_notice.mp3"
+        tts = gTTS(text=text, lang='th')
+        tts.save(filename)
+
+        if vc.is_playing():
+            vc.stop()
+
+        audio_source = discord.FFmpegPCMAudio(filename)
+        vc.play(audio_source)
+
+        while vc.is_playing():
+            await asyncio.sleep(1)
+
+        if os.path.exists(filename):
+            os.remove(filename)
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด: {e}")
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
-    print("----------------------------------------")
     load_custom_bosses()
     load_boss_data()
     try:
@@ -451,20 +396,17 @@ async def check_boss_notifications():
         if channel_id:
             channel = bot.get_channel(channel_id)
             if not channel:
-                try:
-                    channel = await bot.fetch_channel(channel_id)
-                except Exception:
-                    channel = None
+                try: channel = await bot.fetch_channel(channel_id)
+                except Exception: channel = None
 
-        if not channel:
-            continue
+        if not channel: continue
 
+        guild = channel.guild if hasattr(channel, "guild") else None
         mentions = []
-        if hasattr(channel, "guild") and channel.guild:
+        if guild:
             for role_name in TARGET_ROLE_NAMES:
-                role = discord.utils.get(channel.guild.roles, name=role_name)
-                if role:
-                    mentions.append(role.mention)
+                role = discord.utils.get(guild.roles, name=role_name)
+                if role: mentions.append(role.mention)
         
         mention_target = " ".join(mentions) if mentions else ""
 
@@ -482,7 +424,8 @@ async def check_boss_notifications():
             )
             try:
                 await channel.send(content=mention_target, embed=embed)
-                print(f"✅ แจ้งเตือนล่วงหน้า {boss_name} สำเร็จ")
+                if guild:
+                    asyncio.create_task(speak_in_guild(guild, f"แจ้งเตือน บอส {boss_name} จะเกิดในอีก {notice_text}"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -498,7 +441,8 @@ async def check_boss_notifications():
             )
             try:
                 await channel.send(content=mention_target, embed=embed)
-                print(f"✅ แจ้งเตือนบอสเกิด {boss_name} สำเร็จ")
+                if guild:
+                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วครับ"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -508,10 +452,7 @@ async def check_boss_notifications():
     if changed:
         save_boss_data()
 
-async def boss_autocomplete(
-    interaction: discord.Interaction,
-    current: str,
-) -> list[app_commands.Choice[str]]:
+async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     choices = [
         app_commands.Choice(name=boss, value=boss)
         for boss in BOSS_RESPAWN_TIMES.keys()
@@ -520,49 +461,63 @@ async def boss_autocomplete(
     return choices[:25]
 
 # ==========================================
-# ⚔️ 6. Slash Commands
+# 🔊 6. Voice Commands (/join & /leave)
 # ==========================================
-
-@bot.tree.command(name="addboss", description="เพิ่มบอสใหม่เข้าสู่ระบบ")
-@app_commands.describe(
-    boss_name="ชื่อบอสที่ต้องการเพิ่ม",
-    respawn_hours="ระยะเวลารีดาวน์ (ชั่วโมง)",
-    respawn_minutes="ระยะเวลารีดาวน์ (นาที)",
-    notice_minutes="แจ้งเตือนล่วงหน้ากี่นาที (ค่าเริ่มต้นคือ 5 นาที)"
-)
-async def add_boss(
-    interaction: discord.Interaction, 
-    boss_name: str, 
-    respawn_hours: int, 
-    respawn_minutes: int, 
-    notice_minutes: int = 5
-):
+@bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
+async def join_voice(interaction: discord.Interaction):
     await interaction.response.defer()
-
-    if respawn_hours < 0 or respawn_minutes < 0 or notice_minutes < 0:
-        await interaction.followup.send("❌ เวลาต้องเป็นตัวเลขจำนวนเต็มบวกเท่านั้น!", ephemeral=True)
+    
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        await interaction.followup.send("❌ คุณต้องเชื่อมต่ออยู่ในห้องเสียงก่อนใช้คำสั่งนี้!", ephemeral=True)
         return
 
-    if respawn_hours == 0 and respawn_minutes == 0:
-        await interaction.followup.send("❌ ระยะเวลารีดาวน์ต้องมากกว่า 0 นาที!", ephemeral=True)
+    voice_channel = interaction.user.voice.channel
+    guild = interaction.guild
+
+    if guild.voice_client is not None:
+        await guild.voice_client.move_to(voice_channel)
+    else:
+        await voice_channel.connect()
+
+    embed = discord.Embed(
+        title="🔊 เชื่อมต่อห้องเสียงสำเร็จ",
+        description=f"บอทเข้าสู่ห้องเสียง **{voice_channel.name}** เรียบร้อยแล้ว!\nเมื่อถึงเวลาบอสเกิด ระบบจะส่งเสียงแจ้งเตือนในห้องนี้ครับ",
+        color=discord.Color.green()
+    )
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="leave", description="สั่งให้บอทออกจากห้องเสียง")
+async def leave_voice(interaction: discord.Interaction):
+    await interaction.response.defer()
+    guild = interaction.guild
+
+    if guild.voice_client:
+        await guild.voice_client.disconnect()
+        await interaction.followup.send("👋 ออกจากห้องเสียงเรียบร้อยแล้ว!")
+    else:
+        await interaction.followup.send("❌ บอทไม่ได้อยู่ในห้องเสียงใดๆ ในขณะนี้", ephemeral=True)
+
+# ==========================================
+# ⚔️ 7. Boss Slash Commands
+# ==========================================
+@bot.tree.command(name="addboss", description="เพิ่มบอสใหม่เข้าสู่ระบบ")
+@app_commands.describe(boss_name="ชื่อบอส", respawn_hours="ชั่วโมง", respawn_minutes="นาที", notice_minutes="เตือนล่วงหน้า (นาที)")
+async def add_boss(interaction: discord.Interaction, boss_name: str, respawn_hours: int, respawn_minutes: int, notice_minutes: int = 5):
+    await interaction.response.defer()
+    if respawn_hours < 0 or respawn_minutes < 0 or notice_minutes < 0:
+        await interaction.followup.send("❌ เวลาต้องเป็นจำนวนเต็มบวก!", ephemeral=True)
         return
 
     total_delta = timedelta(hours=respawn_hours, minutes=respawn_minutes)
-    
     cd_parts = []
-    if respawn_hours > 0:
-        cd_parts.append(f"{respawn_hours} ชั่วโมง")
-    if respawn_minutes > 0:
-        cd_parts.append(f"{respawn_minutes} นาที")
+    if respawn_hours > 0: cd_parts.append(f"{respawn_hours} ชั่วโมง")
+    if respawn_minutes > 0: cd_parts.append(f"{respawn_minutes} นาที")
     cd_text = " ".join(cd_parts)
-
-    notice_sec = notice_minutes * 60
-    notice_txt = f"{notice_minutes} นาที"
 
     BOSS_RESPAWN_TIMES[boss_name] = total_delta
     BOSS_CD_TEXT[boss_name] = cd_text
-    ADVANCE_NOTICE_SECONDS[boss_name] = notice_sec
-    ADVANCE_NOTICE_TEXT[boss_name] = notice_txt
+    ADVANCE_NOTICE_SECONDS[boss_name] = notice_minutes * 60
+    ADVANCE_NOTICE_TEXT[boss_name] = f"{notice_minutes} นาที"
 
     save_custom_bosses_to_github()
 
@@ -570,41 +525,28 @@ async def add_boss(
     embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
     embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=cd_text, inline=True)
     embed.add_field(name="🔔 แจ้งเตือนล่วงหน้า", value=f"{notice_minutes} นาที", inline=True)
-    embed.set_footer(text=f"เพิ่มโดย {interaction.user.display_name}")
-
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05) แล้วคำนวณเวลาเกิดให้อัตโนมัติ")
-@app_commands.describe(
-    boss_name="เลือกชื่อบอส",
-    kill_time="ระบุเวลาที่บอสตาย (รูปแบบ HH:MM เช่น 17:05 หรือ 09:30)"
-)
+@bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05)")
+@app_commands.describe(boss_name="เลือกชื่อบอส", kill_time="รูปแบบ HH:MM เช่น 17:05")
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str):
     await interaction.response.defer()
-
     if boss_name not in BOSS_RESPAWN_TIMES:
         await interaction.followup.send(f"❌ ไม่พบชื่อบอส `{boss_name}` ในฐานข้อมูล!", ephemeral=True)
         return
 
     try:
         hours, minutes = map(int, kill_time.split(":"))
-        if not (0 <= hours <= 23 and 0 <= minutes <= 59):
-            raise ValueError
-            
+        if not (0 <= hours <= 23 and 0 <= minutes <= 59): raise ValueError
         now = datetime.now(TZ_THAI)
         killed_at = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
-        
-        if killed_at > now:
-            killed_at -= timedelta(days=1)
-
+        if killed_at > now: killed_at -= timedelta(days=1)
     except ValueError:
-        await interaction.followup.send("❌ กรุณากรอกเวลาให้ถูกต้องตามรูปแบบ `ชั่วโมง:นาที` เช่น `17:05` หรือ `09:30`", ephemeral=True)
+        await interaction.followup.send("❌ กรุณากรอกเวลาให้ถูกต้องตามรูปแบบ `ชั่วโมง:นาที` เช่น `17:05`", ephemeral=True)
         return
 
-    respawn_delta = BOSS_RESPAWN_TIMES[boss_name]
-    next_spawn = killed_at + respawn_delta
-    
+    next_spawn = killed_at + BOSS_RESPAWN_TIMES[boss_name]
     boss_schedule[boss_name] = {
         "spawn_time": next_spawn,
         "channel_id": interaction.channel_id,
@@ -615,28 +557,23 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     timestamp_unix = int(next_spawn.timestamp())
     discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
     notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
-    roles_display = ", ".join([f"`{r}`" for r in TARGET_ROLE_NAMES])
 
     embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายเรียบร้อย", color=discord.Color.red())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
     embed.add_field(name="⏱️ เวลาที่ตาย", value=killed_at.strftime("%H:%M:%S น."), inline=True)
     embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=BOSS_CD_TEXT[boss_name], inline=True)
     embed.add_field(name="🔔 บอสจะเกิดเวลา", value=discord_time_str, inline=False)
-    embed.set_footer(text=f"ลงเวลาโดย {interaction.user.display_name} • ระบบจะแจ้งเตือนยศ {roles_display} ล่วงหน้า {notice_text}")
-
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="list", description="ดูตารางเวลาเกิดของบอสทั้งหมด")
 async def list_bosses(interaction: discord.Interaction):
     await interaction.response.defer()
-
     if not boss_schedule:
         await interaction.followup.send("📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในขณะนี้", ephemeral=True)
         return
 
     embed = discord.Embed(title="📜 ตารางเวลาเกิดบอสล่าสุด", color=discord.Color.blue())
     sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
-
     for boss, data in sorted_bosses:
         spawn_time = data["spawn_time"]
         timestamp_unix = int(spawn_time.timestamp())
@@ -646,15 +583,12 @@ async def list_bosses(interaction: discord.Interaction):
             value=f"เกิดเวลา: `{spawn_time.strftime('%H:%M:%S น.')}`\nนับถอยหลัง: <t:{timestamp_unix}:R>\n*(เตือนล่วงหน้า {notice_text})*",
             inline=False
         )
-
     await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="clear", description="ลบเวลาบอสออกจากตาราง")
-@app_commands.describe(boss_name="เลือกชื่อบอสที่ต้องการลบ")
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 async def clear_boss(interaction: discord.Interaction, boss_name: str):
     await interaction.response.defer()
-
     if boss_name in boss_schedule:
         del boss_schedule[boss_name]
         save_boss_data()
@@ -665,24 +599,17 @@ async def clear_boss(interaction: discord.Interaction, boss_name: str):
 @bot.tree.command(name="info", description="ดูรายชื่อบอสและระยะเวลารีดาวน์ทั้งหมด")
 async def boss_info(interaction: discord.Interaction):
     await interaction.response.defer()
-
     embed = discord.Embed(title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (Respawn Time)", color=discord.Color.green())
     for boss, cd_text in BOSS_CD_TEXT.items():
         notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
         embed.add_field(name=f"👾 {boss}", value=f"⏳ เกิดทุกๆ: **{cd_text}** (เตือนล่วงหน้า {notice_text})", inline=False)
-    
     await interaction.followup.send(embed=embed)
 
 # ==========================================
-# 🚀 7. รันบอท Discord
+# 🚀 8. รันบอท Discord
 # ==========================================
 if __name__ == "__main__":
     TOKEN = os.environ.get("DISCORD_TOKEN")
-    if not TOKEN and os.path.exists('config.json'):
-        with open('config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            TOKEN = config.get("token")
-
     if TOKEN:
         bot.run(TOKEN)
     else:
