@@ -8,3 +8,5 @@ pynacl
 davey
 requests
 gTTS 
+ffmpeg-python
+imageio-ffmpeg
