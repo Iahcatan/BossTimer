@@ -10,7 +10,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template_string
 from waitress import serve
-from gtts import gTTS
+import edge_tts
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -134,6 +134,9 @@ BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
     "Elemental Queen": timedelta(hours=2, minutes=30),
     "Tank": timedelta(minutes=58, seconds=20),
+    "Swirl Flame": timedelta(minutes=58, seconds=20),
+    "Maelstrom": timedelta(minutes=58, seconds=20),
+    "Twister": timedelta(minutes=58, seconds=20),
     "Bigmama": timedelta(hours=48),
     "CHIEF MAGIEF": timedelta(minutes=30),
     "Faith": timedelta(hours=5, minutes=53),
@@ -178,6 +181,9 @@ BOSS_CD_TEXT = {
     "Wadangka": "2 ชั่วโมง 30 นาที",
     "Elemental Queen": "2 ชั่วโมง 30 นาที",
     "Tank": "58 นาที 20 วินาที",
+    "Swirl Flame": "58 นาที 20 วินาที",
+    "Maelstrom": "58 นาที 20 วินาที",
+    "Twister": "58 นาที 20 วินาที",
     "Bigmama": "48 ชั่วโมง",
     "CHIEF MAGIEF": "30 นาที",
     "Faith": "5 ชั่วโมง 53 นาที",
@@ -219,12 +225,14 @@ BOSS_CD_TEXT = {
 }
 
 ADVANCE_NOTICE_SECONDS = {
-    "Wadangka": 1800, "Elemental Queen": 300, "Tank": 300, "Bigmama": 1800,
-    "CHIEF MAGIEF": 300, "Faith": 1800, "Apapa": 300, "Corrupt Forest Keeper": 300,
-    "RECLUSE": 1800, "BLACKSKULL": 300, "Sleepy Kooii": 300, "AWAKEN KOOII": 300,
-    "EEHEEHEE": 300, "OOHEEHEEK": 300, "OOHEHE": 300, "GUARDIAN IMP": 300,
-    "DEVILANG": 1800, "BLACKJUNO": 300, "BLACKSKY": 300, "Red Fox": 300,
-    "7tailfox": 300, "777TAILFOX": 300, "Sunrise Flower": 300, "Magma Senior Thief": 300,
+    "Wadangka": 1800, "Elemental Queen": 300, "Tank": 300, 
+    "Swirl Flame": 300, "Maelstrom": 300, "Twister": 300,
+    "Bigmama": 1800, "CHIEF MAGIEF": 300, "Faith": 1800, "Apapa": 300, 
+    "Corrupt Forest Keeper": 300, "RECLUSE": 1800, "BLACKSKULL": 300, 
+    "Sleepy Kooii": 300, "AWAKEN KOOII": 300, "EEHEEHEE": 300, 
+    "OOHEEHEEK": 300, "OOHEHE": 300, "GUARDIAN IMP": 300, "DEVILANG": 1800, 
+    "BLACKJUNO": 300, "BLACKSKY": 300, "Red Fox": 300, "7tailfox": 300, 
+    "777TAILFOX": 300, "Sunrise Flower": 300, "Magma Senior Thief": 300,
     "Bbinikjoe": 300, "Bigmouse": 300, "CALIGO": 3600, "Poison Root Flower": 300,
     "Contaminated Queen Bee": 300, "Rotten Pudding": 300, "Swamp Flower Monster": 300,
     "Ukpana": 1800, "Darlene the Witch": 1800, "Illust": 1800, "Actaemon": 1800,
@@ -233,17 +241,22 @@ ADVANCE_NOTICE_SECONDS = {
 }
 
 ADVANCE_NOTICE_TEXT = {
-    "Wadangka": "30 นาที", "Elemental Queen": "5 นาที", "Tank": "5 นาที", "Bigmama": "30 นาที",
-    "CHIEF MAGIEF": "5 นาที", "Faith": "30 นาที", "Apapa": "5 นาที", "Corrupt Forest Keeper": "5 นาที",
-    "RECLUSE": "30 นาที", "BLACKSKULL": "5 นาที", "Sleepy Kooii": "5 นาที", "AWAKEN KOOII": "5 นาที",
-    "EEHEEHEE": "5 นาที", "OOHEEHEEK": "5 นาที", "OOHEHE": "5 นาที", "GUARDIAN IMP": "5 นาที",
-    "DEVILANG": "30 นาที", "BLACKJUNO": "5 นาที", "BLACKSKY": "5 นาที", "Red Fox": "5 นาที",
-    "7tailfox": "5 นาที", "777TAILFOX": "5 นาที", "Sunrise Flower": "5 นาที", "Magma Senior Thief": "5 นาที",
-    "Bbinikjoe": "5 นาที", "Bigmouse": "5 นาที", "CALIGO": "1 ชั่วโมง", "Poison Root Flower": "5 นาที",
-    "Contaminated Queen Bee": "5 นาที", "Rotten Pudding": "5 นาที", "Swamp Flower Monster": "5 นาที",
-    "Ukpana": "30 นาที", "Darlene the Witch": "30 นาที", "Illust": "30 นาที", "Actaemon": "30 นาที",
-    "Aiyo's Protector": "30 นาที", "Glucose": "5 นาที", "Overload": "5 นาที", "Soul Lich": "30 นาที",
-    "Platanista": "1 ชั่วโมง", "Barslaf": "30 นาที"
+    "Wadangka": "30 นาที", "Elemental Queen": "5 นาที", "Tank": "5 นาที", 
+    "Swirl Flame": "5 นาที", "Maelstrom": "5 นาที", "Twister": "5 นาที",
+    "Bigmama": "30 นาที", "CHIEF MAGIEF": "5 นาที", "Faith": "30 นาที", 
+    "Apapa": "5 นาที", "Corrupt Forest Keeper": "5 นาที", "RECLUSE": "30 นาที", 
+    "BLACKSKULL": "5 นาที", "Sleepy Kooii": "5 นาที", "AWAKEN KOOII": "5 นาที",
+    "EEHEEHEE": "5 นาที", "OOHEEHEEK": "5 นาที", "OOHEHE": "5 นาที", 
+    "GUARDIAN IMP": "5 นาที", "DEVILANG": "30 นาที", "BLACKJUNO": "5 นาที", 
+    "BLACKSKY": "5 นาที", "Red Fox": "5 นาที", "7tailfox": "5 นาที", 
+    "777TAILFOX": "5 นาที", "Sunrise Flower": "5 นาที", "Magma Senior Thief": "5 นาที",
+    "Bbinikjoe": "5 นาที", "Bigmouse": "5 นาที", "CALIGO": "1 ชั่วโมง", 
+    "Poison Root Flower": "5 นาที", "Contaminated Queen Bee": "5 นาที", 
+    "Rotten Pudding": "5 นาที", "Swamp Flower Monster": "5 นาที",
+    "Ukpana": "30 นาที", "Darlene the Witch": "30 นาที", "Illust": "30 นาที", 
+    "Actaemon": "30 นาที", "Aiyo's Protector": "30 นาที", "Glucose": "5 นาที", 
+    "Overload": "5 นาที", "Soul Lich": "30 นาที", "Platanista": "1 ชั่วโมง", 
+    "Barslaf": "30 นาที"
 }
 
 boss_schedule = {}
@@ -341,15 +354,17 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 async def speak_in_guild(guild: discord.Guild, text: str):
-    """แปลงข้อความสั้นเป็นเสียงพูดและเล่นใน Voice Channel ของ Guild นั้นๆ"""
+    """แปลงข้อความภาษาอังกฤษเป็นเสียงพูด (Edge TTS) และเล่นใน Voice Channel"""
     if not guild or not guild.voice_client or not guild.voice_client.is_connected():
         return
 
     vc = guild.voice_client
     try:
         filename = "temp_notice.mp3"
-        tts = gTTS(text=text, lang='th')
-        tts.save(filename)
+        VOICE = "en-US-ChristopherNeural"  # เสียงผู้ชายภาษาอังกฤษ (ปรับเปลี่ยนได้)
+
+        communicate = edge_tts.Communicate(text, VOICE)
+        await communicate.save(filename)
 
         if vc.is_playing():
             vc.stop()
@@ -425,7 +440,7 @@ async def check_boss_notifications():
             try:
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
-                    asyncio.create_task(speak_in_guild(guild, f"แจ้งเตือน บอส {boss_name} จะเกิดในอีก {notice_text}"))
+                    asyncio.create_task(speak_in_guild(guild, f"Warning, {boss_name} will spawn in {notice_text}"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -442,7 +457,7 @@ async def check_boss_notifications():
             try:
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
-                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วครับ"))
+                    asyncio.create_task(speak_in_guild(guild, f"{boss_name} spawned now"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
