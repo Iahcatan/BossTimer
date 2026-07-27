@@ -8,3 +8,4 @@ ffmpeg-python
 imageio-ffmpeg
 python-dotenv
 pytz
+PyNaCl
