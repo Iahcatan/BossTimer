@@ -3,8 +3,7 @@ flask
 waitress
 requests
 pynacl
-davey
-edge-tts
+gTTS
 ffmpeg-python
 imageio-ffmpeg
 python-dotenv
