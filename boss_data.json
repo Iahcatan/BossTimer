@@ -1,26 +1,6 @@
 {
-  "Faith": {
-    "spawn_time": "2026-07-28T05:00:00+07:00",
-    "channel_id": 1526638825198059620,
-    "notified_advance": false
-  },
-  "Actaemon": {
-    "spawn_time": "2026-07-28T07:13:00+07:00",
-    "channel_id": 1526638825198059620,
-    "notified_advance": false
-  },
-  "Corrupt Forest Keeper": {
-    "spawn_time": "2026-07-28T04:34:00+07:00",
-    "channel_id": 1526638825198059620,
-    "notified_advance": false
-  },
-  "Chief Magief": {
-    "spawn_time": "2026-07-28T04:44:00+07:00",
-    "channel_id": 1526638825198059620,
-    "notified_advance": false
-  },
-  "Rotten Pudding": {
-    "spawn_time": "2026-07-28T04:45:00+07:00",
+  "7tailfox": {
+    "spawn_time": "2026-07-28T04:28:00+07:00",
     "channel_id": 1526638825198059620,
     "notified_advance": false
   }
