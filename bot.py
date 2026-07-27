@@ -325,14 +325,12 @@ def save_boss_data():
             "notified_advance": data.get("notified_advance", False)
         }
     
-    # 1. บันทึกลง Local
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"❌ บันทึกข้อมูล Local ไม่สำเร็จ: {e}")
 
-    # 2. Sync ขึ้น GitHub เพื่อไม่ให้ตารางเวลาบอสหายเวลา Deploy
     github_token = os.environ.get("GITHUB_TOKEN")
     repo_name = os.environ.get("GITHUB_REPO")
 
@@ -369,7 +367,7 @@ def load_boss_data():
         print(f"❌ โหลดข้อมูลไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🤖 4. Discord Bot Setup & Voice Helper (gTTS ภาษาไทย)
+# 🤖 4. Discord Bot Setup & Voice Helper (Auto-Join & Leave)
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -378,11 +376,37 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 async def speak_in_guild(guild: discord.Guild, text: str):
-    """แปลงข้อความภาษาไทยเป็นเสียงพูด (gTTS) และเล่นใน Voice Channel"""
-    if not guild or not guild.voice_client or not guild.voice_client.is_connected():
-        return
+    """
+    ระบบเสียงอัจฉริยะ:
+    1. ถ้าอยู่ในห้องเสียงอยู่แล้ว -> พูดได้เลย
+    2. ถ้าไม่อยู่ -> สแกนหาห้องเสียงที่มีคนนั่งอยู่แล้วกระโดดเข้าไปพูด -> พูดเสร็จแล้วออกให้อัตโนมัติ!
+    """
+    if not guild: return
 
     vc = guild.voice_client
+    should_disconnect = False
+
+    # ถ้าบอทไม่อยู่ในห้องเสียง ให้ค้นหาห้องที่มีสมาชิกอยู่
+    if not vc or not vc.is_connected():
+        target_vc = None
+        for channel in guild.voice_channels:
+            # คัดกรองเอาสมาชิกที่ไม่ใช่บอท
+            human_members = [m for m in channel.members if not m.bot]
+            if len(human_members) > 0:
+                target_vc = channel
+                break
+        
+        if target_vc:
+            try:
+                vc = await target_vc.connect()
+                should_disconnect = True
+            except Exception as e:
+                print(f"❌ เชื่อมต่อห้องเสียงไม่สำเร็จ: {e}")
+                return
+        else:
+            # ไม่มีใครอยู่ในห้องเสียงใดๆ เลย ไม่ต้องเล่นเสียง
+            return
+
     try:
         filename = "temp_notice.mp3"
 
@@ -401,8 +425,14 @@ async def speak_in_guild(guild: discord.Guild, text: str):
 
         if os.path.exists(filename):
             os.remove(filename)
+
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด: {e}")
+
+    finally:
+        # พูดเสร็จแล้วออกจากห้องทันที ป้องกันบอทหลุดค้าง
+        if should_disconnect and vc and vc.is_connected():
+            await vc.disconnect()
 
 @bot.event
 async def on_ready():
@@ -464,8 +494,8 @@ async def check_boss_notifications():
             try:
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
-                    # 🔊 เสียงแจ้งเตือนภาษาไทย
-                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ค่ะ"))
+                    # 🔊 เข้าห้องพูดภาษาไทยเสร็จแล้วออกอัตโนมัติ
+                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ครับ"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -482,8 +512,8 @@ async def check_boss_notifications():
             try:
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
-                    # 🔊 เสียงแจ้งเตือนภาษาไทย
-                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วค่ะ"))
+                    # 🔊 เข้าห้องพูดภาษาไทยเสร็จแล้วออกอัตโนมัติ
+                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วครับ"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -522,7 +552,7 @@ async def join_voice(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="🔊 เชื่อมต่อห้องเสียงสำเร็จ",
-        description=f"บอทเข้าสู่ห้องเสียง **{voice_channel.name}** เรียบร้อยแล้ว!\nเมื่อถึงเวลาบอสเกิด ระบบจะส่งเสียงแจ้งเตือนในห้องนี้ครับ",
+        description=f"บอทเข้าสู่ห้องเสียง **{voice_channel.name}** เรียบร้อยแล้ว!\nระบบพร้อมส่งเสียงแจ้งเตือนภาษาไทยเมื่อถึงเวลาครับ",
         color=discord.Color.green()
     )
     await interaction.followup.send(embed=embed)
