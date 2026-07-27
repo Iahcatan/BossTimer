@@ -10,7 +10,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template_string
 from waitress import serve
-import edge_tts
+from gtts import gTTS
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -316,6 +316,7 @@ def load_custom_bosses():
         print(f"❌ โหลดข้อมูล custom_bosses ไม่สำเร็จ: {e}")
 
 def save_boss_data():
+    global boss_schedule
     data_to_save = {}
     for boss_name, data in boss_schedule.items():
         data_to_save[boss_name] = {
@@ -323,11 +324,34 @@ def save_boss_data():
             "channel_id": data["channel_id"],
             "notified_advance": data.get("notified_advance", False)
         }
+    
+    # 1. บันทึกลง Local
     try:
         with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"❌ บันทึกข้อมูลไม่สำเร็จ: {e}")
+        print(f"❌ บันทึกข้อมูล Local ไม่สำเร็จ: {e}")
+
+    # 2. Sync ขึ้น GitHub เพื่อไม่ให้ตารางเวลาบอสหายเวลา Deploy
+    github_token = os.environ.get("GITHUB_TOKEN")
+    repo_name = os.environ.get("GITHUB_REPO")
+
+    if github_token and repo_name:
+        try:
+            url = f"https://api.github.com/repos/{repo_name}/contents/{DATA_FILE}"
+            headers = {"Authorization": f"token {github_token}"}
+            res = requests.get(url, headers=headers)
+            sha = res.json().get("sha", "") if res.status_code == 200 else None
+
+            content_b64 = base64.b64encode(json.dumps(data_to_save, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
+            payload = {"message": "Auto-update boss_data.json via Discord Bot", "content": content_b64}
+            if sha: payload["sha"] = sha
+
+            put_res = requests.put(url, headers=headers, json=payload)
+            if put_res.status_code in [200, 201]:
+                print("✅ อัปเดตข้อมูลตารางบอสขึ้น GitHub สำเร็จถาวร!")
+        except Exception as e:
+            print(f"❌ อัปเดตข้อมูลตารางบอสขึ้น GitHub ไม่สำเร็จ: {e}")
 
 def load_boss_data():
     global boss_schedule
@@ -345,7 +369,7 @@ def load_boss_data():
         print(f"❌ โหลดข้อมูลไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🤖 4. Discord Bot Setup & Voice Helper
+# 🤖 4. Discord Bot Setup & Voice Helper (gTTS ภาษาไทย)
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -354,17 +378,17 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 async def speak_in_guild(guild: discord.Guild, text: str):
-    """แปลงข้อความภาษาอังกฤษเป็นเสียงพูด (Edge TTS) และเล่นใน Voice Channel"""
+    """แปลงข้อความภาษาไทยเป็นเสียงพูด (gTTS) และเล่นใน Voice Channel"""
     if not guild or not guild.voice_client or not guild.voice_client.is_connected():
         return
 
     vc = guild.voice_client
     try:
         filename = "temp_notice.mp3"
-        VOICE = "en-US-ChristopherNeural"  # เสียงผู้ชายภาษาอังกฤษ (ปรับเปลี่ยนได้)
 
-        communicate = edge_tts.Communicate(text, VOICE)
-        await communicate.save(filename)
+        # 🇹🇭 เสียงพากย์ภาษาไทย gTTS
+        tts = gTTS(text=text, lang='th')
+        tts.save(filename)
 
         if vc.is_playing():
             vc.stop()
@@ -440,7 +464,8 @@ async def check_boss_notifications():
             try:
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
-                    asyncio.create_task(speak_in_guild(guild, f"Warning, {boss_name} will spawn in {notice_text}"))
+                    # 🔊 เสียงแจ้งเตือนภาษาไทย
+                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ค่ะ"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -457,7 +482,8 @@ async def check_boss_notifications():
             try:
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
-                    asyncio.create_task(speak_in_guild(guild, f"{boss_name} spawned now"))
+                    # 🔊 เสียงแจ้งเตือนภาษาไทย
+                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วค่ะ"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -571,7 +597,6 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
     timestamp_unix = int(next_spawn.timestamp())
     discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
-    notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
 
     embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายเรียบร้อย", color=discord.Color.red())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
