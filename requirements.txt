@@ -1,12 +1,11 @@
-discord.py>=2.3.0
-python-dotenv>=1.0.0
-discord.py
+discord.py[voice]
 flask
-pytz
 waitress
+requests
 pynacl
 davey
-requests
-gTTS 
+edge-tts
 ffmpeg-python
 imageio-ffmpeg
+python-dotenv
+pytz
