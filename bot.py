@@ -495,7 +495,7 @@ async def check_boss_notifications():
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
                     # 🔊 เข้าห้องพูดภาษาไทยเสร็จแล้วออกอัตโนมัติ
-                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ครับ"))
+                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ค่ะ"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
@@ -513,7 +513,7 @@ async def check_boss_notifications():
                 await channel.send(content=mention_target, embed=embed)
                 if guild:
                     # 🔊 เข้าห้องพูดภาษาไทยเสร็จแล้วออกอัตโนมัติ
-                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วครับ"))
+                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วค่ะ"))
             except Exception as e:
                 print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                 
