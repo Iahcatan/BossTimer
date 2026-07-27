@@ -138,7 +138,7 @@ BOSS_RESPAWN_TIMES = {
     "Maelstrom": timedelta(minutes=58, seconds=20),
     "Twister": timedelta(minutes=58, seconds=20),
     "Bigmama": timedelta(hours=48),
-    "CHIEF MAGIEF": timedelta(minutes=30),
+    "Chief Magief": timedelta(minutes=30),
     "Faith": timedelta(hours=5, minutes=53),
     "Apapa": timedelta(minutes=15),
     "Corrupt Forest Keeper": timedelta(minutes=58),
