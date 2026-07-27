@@ -12,7 +12,7 @@
   "Rotten Pudding": {
     "spawn_time": "2026-07-28T02:50:00+07:00",
     "channel_id": 1526638825198059620,
-    "notified_advance": false
+    "notified_advance": true
   },
   "7tailfox": {
     "spawn_time": "2026-07-28T02:48:00+07:00",
