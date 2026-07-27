@@ -3,5 +3,10 @@
     "spawn_time": "2026-07-27T23:42:00+07:00",
     "channel_id": 1451971414734143691,
     "notified_advance": true
+  },
+  "Faith": {
+    "spawn_time": "2026-07-28T05:00:00+07:00",
+    "channel_id": 1526638825198059620,
+    "notified_advance": false
   }
 }
