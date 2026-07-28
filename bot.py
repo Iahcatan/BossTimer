@@ -90,7 +90,7 @@ def dashboard():
     now = datetime.now(TZ_THAI)
     boss_list = []
     
-    # แก้ไข ป้องกัน RuntimeError: dictionary changed size during iteration
+    # Copy dict เพื่อป้องกัน RuntimeError เวลาใช้งานพร้อมกัน
     schedule_copy = boss_schedule.copy()
     sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
     
@@ -369,7 +369,7 @@ def load_boss_data():
         print(f"❌ โหลดข้อมูลไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🤖 4. Discord Bot Setup & Voice Helper (Auto-Join & Leave)
+# 🤖 4. Discord Bot Setup & Voice Helper
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -422,7 +422,6 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         if should_disconnect and vc and vc.is_connected():
             await vc.disconnect()
         
-        # ลบไฟล์เสียงอย่างปลอดภัย
         try:
             if os.path.exists(filename):
                 os.remove(filename)
@@ -523,7 +522,7 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     return choices[:25]
 
 # ==========================================
-# 🔊 6. Voice Commands (/join & /leave & /disconnect)
+# 🔊 6. Voice Commands (/join, /leave, /disconnect)
 # ==========================================
 @bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
 async def join_voice(interaction: discord.Interaction):
@@ -676,14 +675,44 @@ async def clear_boss(interaction: discord.Interaction, boss_name: str):
     else:
         await interaction.followup.send(f"❌ ไม่พบข้อมูลการลงเวลาของบอส `{boss_name}`", ephemeral=True)
 
+# 🛠️ ปรับแก้คำสั่ง info แบ่ง Embed อัตโนมัติป้องกันค้าง
 @bot.tree.command(name="info", description="ดูรายชื่อบอสและระยะเวลารีดาวน์ทั้งหมด")
 async def boss_info(interaction: discord.Interaction):
     await interaction.response.defer()
-    embed = discord.Embed(title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (Respawn Time)", color=discord.Color.green())
-    for boss, cd_text in BOSS_CD_TEXT.items():
-        notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
-        embed.add_field(name=f"👾 {boss}", value=f"⏳ เกิดทุกๆ: **{cd_text}** (เตือนล่วงหน้า {notice_text})", inline=False)
-    await interaction.followup.send(embed=embed)
+    try:
+        embeds = []
+        embed = discord.Embed(
+            title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (Respawn Time)", 
+            color=discord.Color.green()
+        )
+        
+        field_count = 0
+        for boss, cd_text in BOSS_CD_TEXT.items():
+            notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
+            embed.add_field(
+                name=f"👾 {boss}", 
+                value=f"⏳ **{cd_text}** (เตือนล่วงหน้า {notice_text})", 
+                inline=False
+            )
+            field_count += 1
+            
+            # แบ่ง Embed ใหม่ทุกๆ 25 ช่อง (ขีดจำกัด Discord)
+            if field_count == 25:
+                embeds.append(embed)
+                embed = discord.Embed(
+                    title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (ต่อ)", 
+                    color=discord.Color.green()
+                )
+                field_count = 0
+                
+        if field_count > 0:
+            embeds.append(embed)
+
+        await interaction.followup.send(embeds=embeds[:10])
+        
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในคำสั่ง info: {e}")
+        await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาดระบบ: `{e}`", ephemeral=True)
 
 # ==========================================
 # 🚀 8. รันบอท Discord
