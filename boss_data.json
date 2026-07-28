@@ -13,5 +13,10 @@
     "spawn_time": "2026-07-28T17:17:00+07:00",
     "channel_id": 1526638825198059620,
     "notified_advance": true
+  },
+  "Chief Magief": {
+    "spawn_time": "2026-07-28T17:42:00+07:00",
+    "channel_id": 1526638825198059620,
+    "notified_advance": false
   }
 }
