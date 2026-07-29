@@ -496,9 +496,6 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             options="-vn"
         )
 
-        # -----------------------------------------------------------
-        # 🔧 จุดที่แก้ไข: ใช้ asyncio.Event รอจนกว่าเสียงจะเล่นจบจริงๆ
-        # -----------------------------------------------------------
         loop = asyncio.get_running_loop()
         play_finished = asyncio.Event()
 
@@ -508,10 +505,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             loop.call_soon_threadsafe(play_finished.set)
 
         vc.play(audio_source, after=after_playing)
-        
-        # รอให้ Event ถูกแจ้งเตือนว่าเล่นจบแล้ว ก่อนรันต่อ
         await play_finished.wait()
-        # -----------------------------------------------------------
 
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด: {e}")
@@ -555,7 +549,60 @@ async def on_ready():
         check_auto_disconnect.start()
 
 # ==========================================
-# ⏰ 7. Tasks เช็กเวลาเตือน + Live Embed + Auto-Disconnect (อัปเดต try-except + 60s)
+# 📌 ฟังก์ชั่นอัปเดต Live Embed ป้ายไฟเรียลไทม์
+# ==========================================
+async def refresh_live_embed():
+    """ฟังก์ชั่นสำหรับอัปเดตป้ายไฟ Live Embed โดยใช้ Discord Relative Timestamp (<t:UNIX:R>)"""
+    try:
+        if not live_message_config: return
+        channel_id = live_message_config.get("channel_id")
+        message_id = live_message_config.get("message_id")
+
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            try: channel = await bot.fetch_channel(channel_id)
+            except Exception: return
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except Exception: return
+
+        now = datetime.now(TZ_THAI)
+        embed = discord.Embed(
+            title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time",
+            description=f"อัปเดตข้อมูลล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`\n*(เวลานับถอยหลังจะแสดงสดบน Discord อัตโนมัติ)*",
+            color=discord.Color.teal()
+        )
+
+        if not boss_schedule:
+            embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
+        else:
+            sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
+            for boss, data in sorted_bosses:
+                spawn_time = data["spawn_time"]
+                timestamp_unix = int(spawn_time.timestamp())
+                notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
+                
+                # 💡 ใช้ Discord Relative Timestamp (<t:timestamp_unix:R>) เพื่อนับถอยหลังสดอัตโนมัติบน Client
+                embed.add_field(
+                    name=f"👾 {boss}",
+                    value=f"เวลาเกิด: `<t:{timestamp_unix}:t>` | นับถอยหลัง: **<t:{timestamp_unix}:R>**\n*(เตือนล่วงหน้า {notice_text})*",
+                    inline=False
+                )
+
+        embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • Discord Relative Timestamp")
+        try:
+            await message.edit(embed=embed)
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                print("⚠️ เกิด Rate Limit ตอนอัปเดต Live Embed บอทจะข้ามไปอัปเดตรอบถัดไป")
+        except Exception as e:
+            print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน refresh_live_embed: {e}")
+
+# ==========================================
+# ⏰ 7. Tasks เช็กเวลาเตือน + Live Embed + Auto-Disconnect
 # ==========================================
 @tasks.loop(seconds=60)
 async def check_boss_notifications():
@@ -594,7 +641,7 @@ async def check_boss_notifications():
                 timestamp_unix = int(spawn_time.timestamp())
                 embed = discord.Embed(
                     title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
-                    description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_text}**!\nเวลาเกิด: <t:{timestamp_unix}:F>",
+                    description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_text}**!\nเวลาเกิด: <t:{timestamp_unix}:F> (<t:{timestamp_unix}:R>)",
                     color=discord.Color.gold()
                 )
                 try:
@@ -633,57 +680,14 @@ async def check_boss_notifications():
 
         if changed:
             save_boss_data()
+            asyncio.create_task(refresh_live_embed()) # อัปเดตป้ายไฟทันทีเมื่อมีบอสเกิด/ถูกลบออก
+
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'check_boss_notifications': {e}")
 
-@tasks.loop(seconds=60)
+@tasks.loop(minutes=2) # ปรับจาก 60s เป็น 2 นาที เพื่อประหยัด CPU/Network เพราะ Discord นับเวลาสดให้อยู่แล้ว
 async def update_live_embed():
-    try:
-        if not live_message_config: return
-        channel_id = live_message_config.get("channel_id")
-        message_id = live_message_config.get("message_id")
-
-        channel = bot.get_channel(channel_id)
-        if not channel:
-            try: channel = await bot.fetch_channel(channel_id)
-            except Exception: return
-
-        try:
-            message = await channel.fetch_message(message_id)
-        except Exception: return
-
-        now = datetime.now(TZ_THAI)
-        embed = discord.Embed(
-            title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time",
-            description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`",
-            color=discord.Color.teal()
-        )
-
-        if not boss_schedule:
-            embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
-        else:
-            sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
-            for boss, data in sorted_bosses:
-                spawn_time = data["spawn_time"]
-                timestamp_unix = int(spawn_time.timestamp())
-                notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
-                embed.add_field(
-                    name=f"👾 {boss}",
-                    value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: <t:{timestamp_unix}:R>\n*(เตือนล่วงหน้า {notice_text})*",
-                    inline=False
-                )
-
-        embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
-        try:
-            await message.edit(embed=embed)
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                print("⚠️ เกิด Rate Limit ตอนอัปเดต Live Embed บอทจะข้ามไปอัปเดตรอบถัดไป")
-                await asyncio.sleep(10)
-        except Exception as e:
-            print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'update_live_embed': {e}")
+    await refresh_live_embed()
 
 @tasks.loop(seconds=60)
 async def check_auto_disconnect():
@@ -826,6 +830,9 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     }
     save_boss_data()
 
+    # 💡 อัปเดตป้ายไฟ Live Embed ทันทีหลังจากฆ่าบอสสำเร็จ
+    asyncio.create_task(refresh_live_embed())
+
     timestamp_unix = int(next_spawn.timestamp())
     discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
 
@@ -884,6 +891,7 @@ async def add_boss(
     ADVANCE_NOTICE_TEXT[matched_name] = f"{notice_minutes} นาที"
 
     save_custom_bosses_to_github()
+    asyncio.create_task(refresh_live_embed())
 
     embed = discord.Embed(title="✅ เพิ่ม/แก้ไขบอสสำเร็จ", color=discord.Color.green())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
@@ -905,6 +913,7 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
     if boss_name in boss_schedule:
         del boss_schedule[boss_name]
         save_boss_data()
+        asyncio.create_task(refresh_live_embed())
         
         embed = discord.Embed(
             title="🗑️ ลบบอสสำเร็จ",
@@ -945,7 +954,7 @@ async def boss_status(interaction: discord.Interaction):
         notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
         embed.add_field(
             name=f"👾 {boss}",
-            value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: <t:{timestamp_unix}:R>\n*(เตือนล่วงหน้า {notice_text})*",
+            value=f"เวลาเกิด: `<t:{timestamp_unix}:t>` | นับถอยหลัง: **<t:{timestamp_unix}:R>**\n*(เตือนล่วงหน้า {notice_text})*",
             inline=False
         )
 
@@ -963,7 +972,7 @@ async def set_live(interaction: discord.Interaction):
         color=discord.Color.teal()
     )
     embed.add_field(name="📌 สถานะ", value="กำลังเริ่มต้นระบบ...", inline=False)
-    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
+    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • Discord Relative Timestamp")
 
     msg = await interaction.followup.send(embed=embed)
 
@@ -973,6 +982,7 @@ async def set_live(interaction: discord.Interaction):
         "message_id": msg.id
     }
     save_live_config()
+    asyncio.create_task(refresh_live_embed())
 
     log_details = f"📌 **ตั้งค่า Live Embed ในช่อง:** <#{interaction.channel_id}>\nMessage ID: `{msg.id}`"
     await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", log_details, discord.Color.teal())
