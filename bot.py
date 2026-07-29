@@ -5,6 +5,7 @@ import requests
 import base64
 import asyncio
 import time
+import shutil
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
@@ -12,7 +13,6 @@ from discord.ext import commands, tasks
 from flask import Flask, render_template_string
 from waitress import serve
 from gtts import gTTS
-from pydub import AudioSegment
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -434,7 +434,38 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     else:
         print(f"❌ เกิดข้อผิดพลาดของระบบ: {error}")
 
+
+def get_ffmpeg_path():
+    """
+    ฟังก์ชันค้นหาตำแหน่งไฟล์ ffmpeg อัตโนมัติ
+    1. ตรวจสอบในโฟลเดอร์เดียวกับ bot.py
+    2. ตรวจสอบในโฟลเดอร์ ffmpeg/bin
+    3. ตรวจสอบจาก System PATH
+    """
+    cwd = os.getcwd()
+    for filename in ["ffmpeg.exe", "ffmpeg"]:
+        local_path = os.path.join(cwd, filename)
+        if os.path.exists(local_path):
+            return local_path
+
+    for filename in ["ffmpeg.exe", "ffmpeg"]:
+        bin_path = os.path.join(cwd, "ffmpeg", "bin", filename)
+        if os.path.exists(bin_path):
+            return bin_path
+
+    system_path = shutil.which("ffmpeg")
+    if system_path:
+        return system_path
+
+    return "ffmpeg"
+
+
 async def speak_in_guild(guild: discord.Guild, text: str):
+    """
+    ฟังก์ชันส่งเสียงพูดแจ้งเตือนลงในห้องเสียงของ Guild
+    - สร้างไฟล์เสียงจาก gTTS โดยตรง ไม่ผ่าน pydub
+    - ค้นหา ffmpeg อัตโนมัติ ป้องกันปัญหาไฟล์ล็อกและหาโปรแกรมไม่พบ
+    """
     if not guild: return
 
     vc = guild.voice_client
@@ -461,27 +492,21 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             return
 
     tts_filename = f"temp_tts_{guild.id}.mp3"
-    final_filename = f"final_notice_{guild.id}.mp3"
     
     try:
+        # สร้างไฟล์เสียงพูดจาก gTTS โดยตรง (ไม่ใช้ pydub)
         tts = gTTS(text=text, lang='th')
         tts.save(tts_filename)
-
-        initial_padding = AudioSegment.silent(duration=1000)
-        bell = AudioSegment.sine(freq=880, duration=150).fade_in(20).fade_out(20)
-        bell += AudioSegment.silent(duration=50)
-        bell += AudioSegment.sine(freq=1320, duration=350).fade_in(20).fade_out(50)
-        bell = bell - 6
-        silence = AudioSegment.silent(duration=300)
-        speech = AudioSegment.from_file(tts_filename)
-        
-        combined = initial_padding + bell + silence + speech
-        combined.export(final_filename, format="mp3")
 
         if vc.is_playing():
             vc.stop()
 
-        audio_source = discord.FFmpegPCMAudio(final_filename)
+        ffmpeg_executable = get_ffmpeg_path()
+        audio_source = discord.FFmpegPCMAudio(
+            tts_filename,
+            executable=ffmpeg_executable,
+            options="-vn"
+        )
         vc.play(audio_source)
 
         while vc.is_playing():
@@ -494,10 +519,13 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         if should_disconnect and vc and vc.is_connected():
             await asyncio.sleep(0.5)
             await vc.disconnect()
-        for f in [tts_filename, final_filename]:
+        
+        if os.path.exists(tts_filename):
             try:
-                if os.path.exists(f): os.remove(f)
-            except Exception: pass
+                os.remove(tts_filename)
+            except Exception:
+                pass
+
 
 @bot.event
 async def on_ready():
