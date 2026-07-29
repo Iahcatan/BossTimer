@@ -454,12 +454,14 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         
         if target_vc:
             try:
-                vc = await target_vc.connect()
+                vc = await target_vc.connect(reconnect=True)
                 should_disconnect = True
+                await asyncio.sleep(0.5)
             except Exception as e:
                 print(f"❌ เชื่อมต่อห้องเสียงไม่สำเร็จ: {e}")
                 return
         else:
+            print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
             return
 
     tts_filename = f"temp_tts_{guild.id}.mp3"
@@ -469,6 +471,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         tts = gTTS(text=text, lang='th')
         tts.save(tts_filename)
 
+        initial_padding = AudioSegment.silent(duration=1000)
         bell = AudioSegment.sine(freq=880, duration=150).fade_in(20).fade_out(20)
         bell += AudioSegment.silent(duration=50)
         bell += AudioSegment.sine(freq=1320, duration=350).fade_in(20).fade_out(50)
@@ -476,7 +479,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         silence = AudioSegment.silent(duration=300)
         speech = AudioSegment.from_file(tts_filename)
         
-        combined = bell + silence + speech
+        combined = initial_padding + bell + silence + speech
         combined.export(final_filename, format="mp3")
 
         if vc.is_playing():
@@ -486,13 +489,14 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         vc.play(audio_source)
 
         while vc.is_playing():
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
 
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด: {e}")
 
     finally:
         if should_disconnect and vc and vc.is_connected():
+            await asyncio.sleep(0.5)
             await vc.disconnect()
         for f in [tts_filename, final_filename]:
             try:
@@ -826,41 +830,57 @@ async def boss_menu(interaction: discord.Interaction):
 
 @bot.tree.command(name="addboss", description="เพิ่มบอสใหม่หรือแก้ไขเวลา คูลดาวน์ / เวลาเตือนล่วงหน้า")
 @app_commands.describe(
-    name="ชื่อบอส",
-    hours="เวลาคูลดาวน์ (ชั่วโมง)",
-    minutes="เวลาคูลดาวน์ (นาที)",
+    name="ชื่อบอสที่ต้องการเพิ่มหรือแก้ไข",
+    hours="จำนวนชั่วโมงคูลดาวน์ (พิมพ์ตัวเลข)",
+    minutes="จำนวนนาทีคูลดาวน์ (พิมพ์ตัวเลข)",
+    seconds="จำนวนวินาทีคูลดาวน์ (พิมพ์ตัวเลข)",
     notice_minutes="เวลาที่ต้องการให้เตือนล่วงหน้า (นาที)"
 )
 @has_allowed_role()
-async def add_boss(interaction: discord.Interaction, name: str, hours: int, minutes: int, notice_minutes: int = 5):
+async def add_boss(
+    interaction: discord.Interaction, 
+    name: str, 
+    hours: int = 0, 
+    minutes: int = 0, 
+    seconds: int = 0, 
+    notice_minutes: int = 5
+):
     await interaction.response.defer()
     
-    total_seconds = (hours * 3600) + (minutes * 60)
+    total_seconds = (hours * 3600) + (minutes * 60) + seconds
     if total_seconds <= 0:
-        await interaction.followup.send("❌ เวลาคูลดาวน์ต้องมากกว่า 0 นาทีครับ!", ephemeral=True)
+        await interaction.followup.send("❌ เวลาคูลดาวน์รวมต้องมากกว่า 0 วินาทีครับ!", ephemeral=True)
         return
 
-    BOSS_RESPAWN_TIMES[name] = timedelta(seconds=total_seconds)
+    # ค้นหาชื่อบอสเดิมในระบบโดยไม่สนใจตัวพิมพ์เล็ก/ใหญ่ เพื่อคงชื่อภาษาอังกฤษ/รูปแบบเดิมไว้
+    matched_name = name
+    for existing_name in BOSS_RESPAWN_TIMES.keys():
+        if existing_name.lower() == name.lower():
+            matched_name = existing_name
+            break
+
+    BOSS_RESPAWN_TIMES[matched_name] = timedelta(seconds=total_seconds)
     
     cd_parts = []
     if hours > 0: cd_parts.append(f"{hours} ชั่วโมง")
     if minutes > 0: cd_parts.append(f"{minutes} นาที")
-    cd_text = " ".join(cd_parts) if cd_parts else "0 นาที"
+    if seconds > 0: cd_parts.append(f"{seconds} วินาที")
+    cd_text = " ".join(cd_parts) if cd_parts else "0 วินาที"
     
-    BOSS_CD_TEXT[name] = cd_text
-    ADVANCE_NOTICE_SECONDS[name] = notice_minutes * 60
-    ADVANCE_NOTICE_TEXT[name] = f"{notice_minutes} นาที"
+    BOSS_CD_TEXT[matched_name] = cd_text
+    ADVANCE_NOTICE_SECONDS[matched_name] = notice_minutes * 60
+    ADVANCE_NOTICE_TEXT[matched_name] = f"{notice_minutes} นาที"
 
     save_custom_bosses_to_github()
 
     embed = discord.Embed(title="✅ เพิ่ม/แก้ไขบอสสำเร็จ", color=discord.Color.green())
-    embed.add_field(name="👾 ชื่อบอส", value=f"`{name}`", inline=True)
+    embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
     embed.add_field(name="⏳ คูลดาวน์", value=cd_text, inline=True)
     embed.add_field(name="🔔 เตือนล่วงหน้า", value=f"{notice_minutes} นาที", inline=True)
     
     await interaction.followup.send(embed=embed)
 
-    log_details = f"➕ **เพิ่ม/แก้ไขบอส:** `{name}`\n⏳ **คูลดาวน์:** {cd_text}\n🔔 **เตือนล่วงหน้า:** {notice_minutes} นาที"
+    log_details = f"➕ **เพิ่ม/แก้ไขบอส:** `{matched_name}`\n⏳ **คูลดาวน์:** {cd_text}\n🔔 **เตือนล่วงหน้า:** {notice_minutes} นาที"
     await send_audit_log(interaction.guild, interaction.user, "เพิ่ม/แก้ไขบอส (/addboss)", log_details, discord.Color.green())
 
 @bot.tree.command(name="delboss", description="ลบบอสออกจากตารางนับถอยหลัง")
