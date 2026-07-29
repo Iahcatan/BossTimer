@@ -1,6 +1,3 @@
-import discord
-from discord import app_commands
-from discord.ext import commands, tasks
 import os
 import json
 import threading
@@ -9,6 +6,9 @@ import base64
 import asyncio
 import time
 from datetime import datetime, timedelta, timezone
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
 from flask import Flask, render_template_string
 from waitress import serve
 from gtts import gTTS
@@ -506,7 +506,6 @@ async def on_ready():
     load_boss_data()
     load_live_config()
 
-    # ชะลอการยิง Sync Commands ชั่วคราวเพื่อป้องกัน Rate Limit ร้อนจัด
     await asyncio.sleep(3)
     try:
         synced = await bot.tree.sync()
@@ -605,7 +604,6 @@ async def check_boss_notifications():
     if changed:
         save_boss_data()
 
-# อัปเดต Live Embed ทุกๆ 60 วินาที เพื่อไม่ให้ถูก Discord เพ่งเล็งยิง API ถี่เกินไป
 @tasks.loop(seconds=60)
 async def update_live_embed():
     if not live_message_config: return
@@ -735,13 +733,16 @@ async def disconnect_voice(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
 # ==========================================
-# ⚔️ 9. Boss Slash Commands (ส่วนคำสั่งจัดการบอส)
+# ⚔️ 9. Boss Slash Commands (อัปเดตคำสั่ง /kill ให้ระบุเวลาได้)
 # ==========================================
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
-@app_commands.describe(boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา")
+@app_commands.describe(
+    boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
+    kill_time="ระบุเวลาที่บอสตาย (เช่น 14:30 หรือ 14:30:00) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน"
+)
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
-async def kill_boss(interaction: discord.Interaction, boss_name: str):
+async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None):
     await interaction.response.defer()
     
     matched_name = None
@@ -755,7 +756,32 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str):
         return
 
     now = datetime.now(TZ_THAI)
-    next_spawn = now + BOSS_RESPAWN_TIMES[matched_name]
+    
+    # 🕒 คำนวณเวลาที่บอสตาย
+    if kill_time:
+        try:
+            time_parts = [int(p) for p in kill_time.strip().split(":")]
+            if len(time_parts) == 2:
+                hh, mm = time_parts
+                ss = 0
+            elif len(time_parts) == 3:
+                hh, mm, ss = time_parts
+            else:
+                raise ValueError
+
+            boss_died_at = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+            
+            # กรณีระบุเวลาเกินเวลาปัจจุบัน (เช่น ใส่ 23:50 ตอน 00:10) แสดงว่าเป็นเวลาของเมื่อวาน
+            if boss_died_at > now:
+                boss_died_at -= timedelta(days=1)
+                
+        except ValueError:
+            await interaction.followup.send("❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอกแบบ **ชั่วโมง:นาที** เช่น `14:30` หรือ `09:15`", ephemeral=True)
+            return
+    else:
+        boss_died_at = now
+
+    next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[matched_name]
 
     boss_schedule[matched_name] = {
         "spawn_time": next_spawn,
@@ -769,14 +795,14 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str):
 
     embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
-    embed.add_field(name="⏱️ เวลาที่ตาย", value=now.strftime("%H:%M:%S น."), inline=True)
+    embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
     embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[matched_name], inline=True)
     embed.add_field(name="🔔 บอสจะเกิดเวลา", value=discord_time_str, inline=False)
     embed.set_footer(text=f"บันทึกโดย {interaction.user.display_name}")
 
     await interaction.followup.send(embed=embed)
 
-    log_details = f"⚔️ **บันทึกคำสั่ง:** `/kill`\n👾 **บอส:** `{matched_name}`\n⏱️ **เวลานับตาย:** {now.strftime('%H:%M:%S น.')}\n🔔 **เวลาเกิดถัดไป:** {next_spawn.strftime('%H:%M:%S น.')}"
+    log_details = f"⚔️ **บันทึกคำสั่ง:** `/kill`\n👾 **บอส:** `{matched_name}`\n⏱️ **เวลานับตาย:** {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 **เวลาเกิดถัดไป:** {next_spawn.strftime('%H:%M:%S น.')}"
     await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", log_details, discord.Color.red())
 
 @bot.tree.command(name="addboss", description="เพิ่มบอสใหม่หรือแก้ไขเวลา คูลดาวน์ / เวลาเตือนล่วงหน้า")
@@ -927,7 +953,7 @@ if __name__ == "__main__":
                 break
             except discord.errors.HTTPException as e:
                 if e.status == 429:
-                    print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพีกและรอ 60 วินาทีก่อนลองรันใหม่...")
+                    print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพักและรอ 60 วินาทีก่อนลองรันใหม่...")
                     time.sleep(60)
                 else:
                     raise e
