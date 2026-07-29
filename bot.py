@@ -7,6 +7,7 @@ import threading
 import requests
 import base64
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from flask import Flask, render_template_string
 from waitress import serve
@@ -504,9 +505,17 @@ async def on_ready():
     load_custom_bosses()
     load_boss_data()
     load_live_config()
+
+    # ชะลอการยิง Sync Commands ชั่วคราวเพื่อป้องกัน Rate Limit ร้อนจัด
+    await asyncio.sleep(3)
     try:
         synced = await bot.tree.sync()
         print(f"ซิงค์ Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง")
+    except discord.errors.HTTPException as e:
+        if e.status == 429:
+            print("⚠️ ชน Global Rate Limit ตอน Sync Commands แต่ระบบจะรันบอทต่อ...")
+        else:
+            print(f"เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
     except Exception as e:
         print(f"เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
     
@@ -596,7 +605,7 @@ async def check_boss_notifications():
     if changed:
         save_boss_data()
 
-# ปรับลูปแก้ไข Live Embed เป็นทุกๆ 60 วินาที เพื่อลดความถี่ในการยิง API ใส่ Discord
+# อัปเดต Live Embed ทุกๆ 60 วินาที เพื่อไม่ให้ถูก Discord เพ่งเล็งยิง API ถี่เกินไป
 @tasks.loop(seconds=60)
 async def update_live_embed():
     if not live_message_config: return
@@ -907,11 +916,23 @@ async def set_live(interaction: discord.Interaction):
     await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", log_details, discord.Color.teal())
 
 # ==========================================
-# 🚀 10. Run Bot
+# 🚀 10. Run Bot (พร้อมระบบ Retry หนี 429 Error)
 # ==========================================
 if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
     if token:
-        bot.run(token)
+        while True:
+            try:
+                bot.run(token)
+                break
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพีกและรอ 60 วินาทีก่อนลองรันใหม่...")
+                    time.sleep(60)
+                else:
+                    raise e
+            except Exception as e:
+                print(f"❌ เกิดข้อผิดพลาดของระบบ: {e}")
+                break
     else:
         print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables! กรุณาตั้งค่าก่อนรันบอท")
