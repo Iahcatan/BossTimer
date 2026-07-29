@@ -436,12 +436,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 def get_ffmpeg_path():
-    """
-    ฟังก์ชันค้นหาตำแหน่งไฟล์ ffmpeg อัตโนมัติ
-    1. ตรวจสอบในโฟลเดอร์เดียวกับ bot.py
-    2. ตรวจสอบในโฟลเดอร์ ffmpeg/bin
-    3. ตรวจสอบจาก System PATH
-    """
     cwd = os.getcwd()
     for filename in ["ffmpeg.exe", "ffmpeg"]:
         local_path = os.path.join(cwd, filename)
@@ -461,11 +455,6 @@ def get_ffmpeg_path():
 
 
 async def speak_in_guild(guild: discord.Guild, text: str):
-    """
-    ฟังก์ชันส่งเสียงพูดแจ้งเตือนลงในห้องเสียงของ Guild
-    - สร้างไฟล์เสียงจาก gTTS โดยตรง ไม่ผ่าน pydub
-    - ค้นหา ffmpeg อัตโนมัติ ป้องกันปัญหาไฟล์ล็อกและหาโปรแกรมไม่พบ
-    """
     if not guild: return
 
     vc = guild.voice_client
@@ -494,7 +483,6 @@ async def speak_in_guild(guild: discord.Guild, text: str):
     tts_filename = f"temp_tts_{guild.id}.mp3"
     
     try:
-        # สร้างไฟล์เสียงพูดจาก gTTS โดยตรง (ไม่ใช้ pydub)
         tts = gTTS(text=text, lang='th')
         tts.save(tts_filename)
 
@@ -554,152 +542,161 @@ async def on_ready():
         check_auto_disconnect.start()
 
 # ==========================================
-# ⏰ 7. Tasks เช็กเวลาเตือน + Live Embed + Auto-Disconnect
+# ⏰ 7. Tasks เช็กเวลาเตือน + Live Embed + Auto-Disconnect (อัปเดต try-except + 60s)
 # ==========================================
-@tasks.loop(seconds=10)
+@tasks.loop(seconds=60)
 async def check_boss_notifications():
-    now = datetime.now(TZ_THAI)
-    changed = False
-    
-    for boss_name, data in list(boss_schedule.items()):
-        spawn_time = data["spawn_time"]
-        channel_id = data.get("channel_id")
-        notified_advance = data.get("notified_advance", False)
+    try:
+        now = datetime.now(TZ_THAI)
+        changed = False
         
-        channel = None
-        if channel_id:
-            channel = bot.get_channel(channel_id)
-            if not channel:
-                try: channel = await bot.fetch_channel(channel_id)
-                except Exception: channel = None
+        for boss_name, data in list(boss_schedule.items()):
+            spawn_time = data["spawn_time"]
+            channel_id = data.get("channel_id")
+            notified_advance = data.get("notified_advance", False)
+            
+            channel = None
+            if channel_id:
+                channel = bot.get_channel(channel_id)
+                if not channel:
+                    try: channel = await bot.fetch_channel(channel_id)
+                    except Exception: channel = None
 
-        if not channel: continue
+            if not channel: continue
 
-        guild = channel.guild if hasattr(channel, "guild") else None
-        mentions = []
-        if guild:
-            for role_name in TARGET_ROLE_NAMES:
-                role = discord.utils.get(guild.roles, name=role_name)
-                if role: mentions.append(role.mention)
-        
-        mention_target = " ".join(mentions) if mentions else ""
+            guild = channel.guild if hasattr(channel, "guild") else None
+            mentions = []
+            if guild:
+                for role_name in TARGET_ROLE_NAMES:
+                    role = discord.utils.get(guild.roles, name=role_name)
+                    if role: mentions.append(role.mention)
+            
+            mention_target = " ".join(mentions) if mentions else ""
 
-        time_left = (spawn_time - now).total_seconds()
-        notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
-        notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
-        
-        if 0 < time_left <= notice_limit and not notified_advance:
-            timestamp_unix = int(spawn_time.timestamp())
-            embed = discord.Embed(
-                title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
-                description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_text}**!\nเวลาเกิด: <t:{timestamp_unix}:F>",
-                color=discord.Color.gold()
-            )
-            try:
-                await channel.send(content=mention_target, embed=embed)
-                if guild:
-                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ค่ะ"))
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    print("⚠️ ชน Rate Limit ในการส่งข้อความเตือนบอส รอรอบถัดไป")
-                    await asyncio.sleep(5)
-            except Exception as e:
-                print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
-                
-            boss_schedule[boss_name]["notified_advance"] = True
-            changed = True
+            time_left = (spawn_time - now).total_seconds()
+            notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
+            notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
+            
+            if 0 < time_left <= notice_limit and not notified_advance:
+                timestamp_unix = int(spawn_time.timestamp())
+                embed = discord.Embed(
+                    title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
+                    description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_text}**!\nเวลาเกิด: <t:{timestamp_unix}:F>",
+                    color=discord.Color.gold()
+                )
+                try:
+                    await channel.send(content=mention_target, embed=embed)
+                    if guild:
+                        asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ค่ะ"))
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:
+                        print("⚠️ ชน Rate Limit ในการส่งข้อความเตือนบอส รอรอบถัดไป")
+                        await asyncio.sleep(5)
+                except Exception as e:
+                    print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
+                    
+                boss_schedule[boss_name]["notified_advance"] = True
+                changed = True
 
-        elif time_left <= 0:
-            embed = discord.Embed(
-                title="⚔️ บอสเกิดแล้ว!",
-                description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
-                color=discord.Color.green()
-            )
-            try:
-                await channel.send(content=mention_target, embed=embed)
-                if guild:
-                    asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วค่ะ"))
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    print("⚠️ ชน Rate Limit ในการส่งข้อความแจ้งบอสเกิด")
-                    await asyncio.sleep(5)
-            except Exception as e:
-                print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
-                
-            del boss_schedule[boss_name]
-            changed = True
+            elif time_left <= 0:
+                embed = discord.Embed(
+                    title="⚔️ บอสเกิดแล้ว!",
+                    description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
+                    color=discord.Color.green()
+                )
+                try:
+                    await channel.send(content=mention_target, embed=embed)
+                    if guild:
+                        asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วค่ะ"))
+                except discord.errors.HTTPException as e:
+                    if e.status == 429:
+                        print("⚠️ ชน Rate Limit ในการส่งข้อความแจ้งบอสเกิด")
+                        await asyncio.sleep(5)
+                except Exception as e:
+                    print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
+                    
+                del boss_schedule[boss_name]
+                changed = True
 
-    if changed:
-        save_boss_data()
+        if changed:
+            save_boss_data()
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'check_boss_notifications': {e}")
 
 @tasks.loop(seconds=60)
 async def update_live_embed():
-    if not live_message_config: return
-    channel_id = live_message_config.get("channel_id")
-    message_id = live_message_config.get("message_id")
+    try:
+        if not live_message_config: return
+        channel_id = live_message_config.get("channel_id")
+        message_id = live_message_config.get("message_id")
 
-    channel = bot.get_channel(channel_id)
-    if not channel:
-        try: channel = await bot.fetch_channel(channel_id)
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            try: channel = await bot.fetch_channel(channel_id)
+            except Exception: return
+
+        try:
+            message = await channel.fetch_message(message_id)
         except Exception: return
 
-    try:
-        message = await channel.fetch_message(message_id)
-    except Exception: return
+        now = datetime.now(TZ_THAI)
+        embed = discord.Embed(
+            title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time",
+            description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`",
+            color=discord.Color.teal()
+        )
 
-    now = datetime.now(TZ_THAI)
-    embed = discord.Embed(
-        title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time",
-        description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`",
-        color=discord.Color.teal()
-    )
+        if not boss_schedule:
+            embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
+        else:
+            sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
+            for boss, data in sorted_bosses:
+                spawn_time = data["spawn_time"]
+                timestamp_unix = int(spawn_time.timestamp())
+                notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
+                embed.add_field(
+                    name=f"👾 {boss}",
+                    value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: <t:{timestamp_unix}:R>\n*(เตือนล่วงหน้า {notice_text})*",
+                    inline=False
+                )
 
-    if not boss_schedule:
-        embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
-    else:
-        sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
-        for boss, data in sorted_bosses:
-            spawn_time = data["spawn_time"]
-            timestamp_unix = int(spawn_time.timestamp())
-            notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
-            embed.add_field(
-                name=f"👾 {boss}",
-                value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: <t:{timestamp_unix}:R>\n*(เตือนล่วงหน้า {notice_text})*",
-                inline=False
-            )
-
-    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
-    try:
-        await message.edit(embed=embed)
-    except discord.errors.HTTPException as e:
-        if e.status == 429:
-            print("⚠️ เกิด Rate Limit ตอนอัปเดต Live Embed บอทจะข้ามไปอัปเดตรอบถัดไป")
-            await asyncio.sleep(10)
+        embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
+        try:
+            await message.edit(embed=embed)
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                print("⚠️ เกิด Rate Limit ตอนอัปเดต Live Embed บอทจะข้ามไปอัปเดตรอบถัดไป")
+                await asyncio.sleep(10)
+        except Exception as e:
+            print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
     except Exception as e:
-        print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
+        print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'update_live_embed': {e}")
 
-@tasks.loop(seconds=15)
+@tasks.loop(seconds=60)
 async def check_auto_disconnect():
-    now = datetime.now(TZ_THAI)
-    for guild in bot.guilds:
-        vc = guild.voice_client
-        if vc and vc.is_connected():
-            human_members = [m for m in vc.channel.members if not m.bot]
-            if len(human_members) == 0:
-                if guild.id not in voice_empty_start:
-                    voice_empty_start[guild.id] = now
+    try:
+        now = datetime.now(TZ_THAI)
+        for guild in bot.guilds:
+            vc = guild.voice_client
+            if vc and vc.is_connected():
+                human_members = [m for m in vc.channel.members if not m.bot]
+                if len(human_members) == 0:
+                    if guild.id not in voice_empty_start:
+                        voice_empty_start[guild.id] = now
+                    else:
+                        elapsed = (now - voice_empty_start[guild.id]).total_seconds()
+                        if elapsed >= 180:
+                            try:
+                                await vc.disconnect()
+                                print(f"🔌 Auto-disconnected จาก {vc.channel.name} เนื่องจากไม่มีสมาชิกอยู่ในห้องเกิน 3 นาที")
+                            except Exception as e:
+                                print(f"❌ ตัดสายไม่สำเร็จ: {e}")
+                            del voice_empty_start[guild.id]
                 else:
-                    elapsed = (now - voice_empty_start[guild.id]).total_seconds()
-                    if elapsed >= 180:
-                        try:
-                            await vc.disconnect()
-                            print(f"🔌 Auto-disconnected จาก {vc.channel.name} เนื่องจากไม่มีสมาชิกอยู่ในห้องเกิน 3 นาที")
-                        except Exception as e:
-                            print(f"❌ ตัดสายไม่สำเร็จ: {e}")
+                    if guild.id in voice_empty_start:
                         del voice_empty_start[guild.id]
-            else:
-                if guild.id in voice_empty_start:
-                    del voice_empty_start[guild.id]
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'check_auto_disconnect': {e}")
 
 async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     choices = [
@@ -761,7 +758,7 @@ async def disconnect_voice(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
 # ==========================================
-# ⚔️ 9. Boss Slash Commands (อัปเดตคำสั่ง /kill ให้ระบุเวลาได้)
+# ⚔️ 9. Boss Slash Commands
 # ==========================================
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
 @app_commands.describe(
@@ -785,7 +782,6 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
     now = datetime.now(TZ_THAI)
     
-    # 🕒 คำนวณเวลาที่บอสตาย
     if kill_time:
         try:
             time_parts = [int(p) for p in kill_time.strip().split(":")]
@@ -799,7 +795,6 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
             boss_died_at = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
             
-            # กรณีระบุเวลาเกินเวลาปัจจุบัน (เช่น ใส่ 23:50 ตอน 00:10) แสดงว่าเป็นเวลาของเมื่อวาน
             if boss_died_at > now:
                 boss_died_at -= timedelta(days=1)
                 
