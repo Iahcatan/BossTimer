@@ -495,10 +495,23 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             executable=ffmpeg_executable,
             options="-vn"
         )
-        vc.play(audio_source)
 
-        while vc.is_playing():
-            await asyncio.sleep(0.5)
+        # -----------------------------------------------------------
+        # 🔧 จุดที่แก้ไข: ใช้ asyncio.Event รอจนกว่าเสียงจะเล่นจบจริงๆ
+        # -----------------------------------------------------------
+        loop = asyncio.get_running_loop()
+        play_finished = asyncio.Event()
+
+        def after_playing(error):
+            if error:
+                print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
+            loop.call_soon_threadsafe(play_finished.set)
+
+        vc.play(audio_source, after=after_playing)
+        
+        # รอให้ Event ถูกแจ้งเตือนว่าเล่นจบแล้ว ก่อนรันต่อ
+        await play_finished.wait()
+        # -----------------------------------------------------------
 
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด: {e}")
