@@ -131,10 +131,8 @@ DATA_FILE = "boss_data.json"
 CUSTOM_BOSSES_FILE = "custom_bosses.json"
 LIVE_CONFIG_FILE = "live_config.json"
 
-# ยศที่ได้รับอนุญาตให้ใช้คำสั่งจัดการบอสได้
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti", "Admin"]
 
-# รายชื่อบอสยอดฮิตสำหรับสร้างปุ่ม Quick Kill ใน /bossmenu
 POPULAR_BOSSES = [
     "Wadangka", "Elemental Queen", "Tank", "Swirl Flame", 
     "Maelstrom", "Twister", "Bigmama", "Faith", "Devilang", "Caligo"
@@ -143,7 +141,6 @@ POPULAR_BOSSES = [
 LOG_CHANNEL_NAME = "boss-logs"
 LIVE_CHANNEL_NAME = "boss-schedule"
 
-# บันทึกเวลาสำหรับ Auto-disconnect
 voice_empty_start = {}
 
 BOSS_RESPAWN_TIMES = {
@@ -417,7 +414,7 @@ def load_boss_data():
         print(f"❌ โหลดข้อมูลไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🤖 6. Discord Bot Setup & Voice Helper (พร้อมเสียงกริ่งเตือน)
+# 🤖 6. Discord Bot Setup & Voice Helper
 # ==========================================
 intents = discord.Intents.default()
 intents.message_content = True
@@ -469,16 +466,14 @@ async def speak_in_guild(guild: discord.Guild, text: str):
     final_filename = f"final_notice_{guild.id}.mp3"
     
     try:
-        # 1. สร้างเสียงพูด gTTS
         tts = gTTS(text=text, lang='th')
         tts.save(tts_filename)
 
-        # 2. ผสมเสียงกริ่งแจ้งเตือน (Chime/Bell Effect) หน้าเสียงพูด
-        bell = AudioSegment.sine(freq=880, duration=150).fade_in(20).fade_out(20) # เสียงปิ๊งแรก
+        bell = AudioSegment.sine(freq=880, duration=150).fade_in(20).fade_out(20)
         bell += AudioSegment.silent(duration=50)
-        bell += AudioSegment.sine(freq=1320, duration=350).fade_in(20).fade_out(50) # เสียงปิ๊งสอง
-        bell = bell - 6 # ปรับความดัง
-        silence = AudioSegment.silent(duration=300) # เว้นจังหวะ 0.3 วินาที
+        bell += AudioSegment.sine(freq=1320, duration=350).fade_in(20).fade_out(50)
+        bell = bell - 6
+        silence = AudioSegment.silent(duration=300)
         speech = AudioSegment.from_file(tts_filename)
         
         combined = bell + silence + speech
@@ -524,7 +519,7 @@ async def on_ready():
         check_auto_disconnect.start()
 
 # ==========================================
-# ⏰ 7. Tasks เช็กเวลาเตือน + Live Embed + Auto-Disconnect (3 นาที)
+# ⏰ 7. Tasks เช็กเวลาเตือน + Live Embed + Auto-Disconnect
 # ==========================================
 @tasks.loop(seconds=10)
 async def check_boss_notifications():
@@ -636,7 +631,6 @@ async def update_live_embed():
     except Exception as e:
         print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
 
-# 🔊 Task Auto-disconnect เมื่อไม่มีคนอยู่ในห้องเสียงเกิน 3 นาที
 @tasks.loop(seconds=15)
 async def check_auto_disconnect():
     now = datetime.now(TZ_THAI)
@@ -649,7 +643,7 @@ async def check_auto_disconnect():
                     voice_empty_start[guild.id] = now
                 else:
                     elapsed = (now - voice_empty_start[guild.id]).total_seconds()
-                    if elapsed >= 180: # 3 นาที (180 วินาที)
+                    if elapsed >= 180:
                         try:
                             await vc.disconnect()
                             print(f"🔌 Auto-disconnected จาก {vc.channel.name} เนื่องจากไม่มีสมาชิกอยู่ในห้องเกิน 3 นาที")
@@ -669,7 +663,7 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     return choices[:25]
 
 # ==========================================
-# 🎛️ 8. Discord Buttons View (สำหรับข้อ 4)
+# 🎛️ 8. Discord Buttons View
 # ==========================================
 class QuickKillButton(discord.ui.Button):
     def __init__(self, boss_name: str):
@@ -682,7 +676,6 @@ class QuickKillButton(discord.ui.Button):
         self.boss_name = boss_name
 
     async def callback(self, interaction: discord.Interaction):
-        # ตรวจสอบสิทธิ์เฉพาะ Admin / ยศที่กำหนดเท่านั้น
         if not check_user_permission(interaction.user):
             roles_str = ", ".join([f"`{r}`" for r in TARGET_ROLE_NAMES])
             await interaction.response.send_message(
@@ -719,7 +712,7 @@ class QuickKillButton(discord.ui.Button):
 
 class BossMenuView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None) # ปุ่มคงอยู่ตลอดเวลา
+        super().__init__(timeout=None)
         for boss_name in POPULAR_BOSSES:
             if boss_name in BOSS_RESPAWN_TIMES:
                 self.add_item(QuickKillButton(boss_name))
@@ -776,130 +769,143 @@ async def disconnect_voice(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
 # ==========================================
-# ⚔️ 10. Boss Slash Commands (รวม Quick Menu Buttons)
+# ⚔️ 10. Boss Slash Commands (ส่วนคำสั่งจัดการบอส)
 # ==========================================
-@bot.tree.command(name="bossmenu", description="แสดงเมรูปุ่มกดบันทึกเวลาบอสยอดฮิตบนมือถือ (Quick Kill)")
+@bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
+@app_commands.describe(boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา")
+@app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
-async def boss_menu(interaction: discord.Interaction):
+async def kill_boss(interaction: discord.Interaction, boss_name: str):
     await interaction.response.defer()
-    embed = discord.Embed(
-        title="🎛️ เมรูปุ่มกดบันทึกเวลาบอส (Quick Kill)",
-        description="กดปุ่มเพื่อบันทึกเวลาบอสตาย ณ วินาทีนี้ทันทีโดยไม่ต้องพิมพ์เวลาเอง\n*(เฉพาะ Admin / ผู้ได้รับอนุญาตเท่านั้น)*",
-        color=discord.Color.purple()
-    )
-    view = BossMenuView()
-    await interaction.followup.send(embed=embed, view=view)
+    
+    matched_name = None
+    for b in BOSS_RESPAWN_TIMES.keys():
+        if b.lower() == boss_name.lower():
+            matched_name = b
+            break
 
-@bot.tree.command(name="setup_live", description="ตั้งค่าและปักหมุดป้ายไฟตารางเวลาบอส Real-time ในห้องนี้")
-@has_allowed_role()
-async def setup_live(interaction: discord.Interaction):
-    await interaction.response.defer()
-    global live_message_config
-
-    embed = discord.Embed(
-        title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time",
-        description="กำลังเริ่มต้นระบบป้ายไฟนับถอยหลัง...",
-        color=discord.Color.teal()
-    )
-    msg = await interaction.channel.send(embed=embed)
-    try:
-        await msg.pin()
-    except Exception:
-        pass
-
-    live_message_config = {
-        "channel_id": interaction.channel_id,
-        "message_id": msg.id
-    }
-    save_live_config()
-
-    await interaction.followup.send("✅ ตั้งค่าและปักหมุดข้อความ Real-time Live Status เรียบร้อยแล้ว! บอทจะคอยอัปเดตข้อความนั้นทุกๆ 30 วินาทีครับ")
-
-@bot.tree.command(name="addboss", description="เพิ่มบอสใหม่เข้าสู่ระบบ")
-@app_commands.describe(boss_name="ชื่อบอส", respawn_hours="ชั่วโมง", respawn_minutes="นาที", notice_minutes="เตือนล่วงหน้า (นาที)")
-@has_allowed_role()
-async def add_boss(interaction: discord.Interaction, boss_name: str, respawn_hours: int, respawn_minutes: int, notice_minutes: int = 5):
-    await interaction.response.defer()
-    if respawn_hours < 0 or respawn_minutes < 0 or notice_minutes < 0:
-        await interaction.followup.send("❌ เวลาต้องเป็นจำนวนเต็มบวก!", ephemeral=True)
+    if not matched_name:
+        await interaction.followup.send(f"❌ ไม่พบชื่อบอส **{boss_name}** ในระบบ! กรุณาตรวจสอบการพิมพ์อีกครั้ง", ephemeral=True)
         return
 
-    total_delta = timedelta(hours=respawn_hours, minutes=respawn_minutes)
-    cd_parts = []
-    if respawn_hours > 0: cd_parts.append(f"{respawn_hours} ชั่วโมง")
-    if respawn_minutes > 0: cd_parts.append(f"{respawn_minutes} นาที")
-    cd_text = " ".join(cd_parts)
+    now = datetime.now(TZ_THAI)
+    next_spawn = now + BOSS_RESPAWN_TIMES[matched_name]
 
-    BOSS_RESPAWN_TIMES[boss_name] = total_delta
-    BOSS_CD_TEXT[boss_name] = cd_text
-    ADVANCE_NOTICE_SECONDS[boss_name] = notice_minutes * 60
-    ADVANCE_NOTICE_TEXT[boss_name] = f"{notice_minutes} นาที"
+    boss_schedule[matched_name] = {
+        "spawn_time": next_spawn,
+        "channel_id": interaction.channel_id,
+        "notified_advance": False
+    }
+    save_boss_data()
+
+    timestamp_unix = int(next_spawn.timestamp())
+    discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
+
+    embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
+    embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
+    embed.add_field(name="⏱️ เวลาที่ตาย", value=now.strftime("%H:%M:%S น."), inline=True)
+    embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[matched_name], inline=True)
+    embed.add_field(name="🔔 บอสจะเกิดเวลา", value=discord_time_str, inline=False)
+    embed.set_footer(text=f"บันทึกโดย {interaction.user.display_name}")
+
+    await interaction.followup.send(embed=embed)
+
+    log_details = f"⚔️ **บันทึกคำสั่ง:** `/kill`\n👾 **บอส:** `{matched_name}`\n⏱️ **เวลานับตาย:** {now.strftime('%H:%M:%S น.')}\n🔔 **เวลาเกิดถัดไป:** {next_spawn.strftime('%H:%M:%S น.')}"
+    await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", log_details, discord.Color.red())
+
+@bot.tree.command(name="bossmenu", description="แสดงเมนูปุ่มกด Quick Kill สำหรับบอสยอดนิยม")
+@has_allowed_role()
+async def boss_menu(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="⚔️ เมนูบันทึกเวลาบอสตายด่วน (Quick Kill Menu)",
+        description="กดปุ่มชื่อบอสล่างนี้เพื่อบันทึกเวลาที่บอสตายได้ทันทีโดยไม่ต้องพิมพ์คำสั่ง!",
+        color=discord.Color.gold()
+    )
+    view = BossMenuView()
+    await interaction.response.send_message(embed=embed, view=view)
+
+@bot.tree.command(name="addboss", description="เพิ่มบอสใหม่หรือแก้ไขเวลา คูลดาวน์ / เวลาเตือนล่วงหน้า")
+@app_commands.describe(
+    name="ชื่อบอส",
+    hours="เวลาคูลดาวน์ (ชั่วโมง)",
+    minutes="เวลาคูลดาวน์ (นาที)",
+    notice_minutes="เวลาที่ต้องการให้เตือนล่วงหน้า (นาที)"
+)
+@has_allowed_role()
+async def add_boss(interaction: discord.Interaction, name: str, hours: int, minutes: int, notice_minutes: int = 5):
+    await interaction.response.defer()
+    
+    total_seconds = (hours * 3600) + (minutes * 60)
+    if total_seconds <= 0:
+        await interaction.followup.send("❌ เวลาคูลดาวน์ต้องมากกว่า 0 นาทีครับ!", ephemeral=True)
+        return
+
+    BOSS_RESPAWN_TIMES[name] = timedelta(seconds=total_seconds)
+    
+    cd_parts = []
+    if hours > 0: cd_parts.append(f"{hours} ชั่วโมง")
+    if minutes > 0: cd_parts.append(f"{minutes} นาที")
+    cd_text = " ".join(cd_parts) if cd_parts else "0 นาที"
+    
+    BOSS_CD_TEXT[name] = cd_text
+    ADVANCE_NOTICE_SECONDS[name] = notice_minutes * 60
+    ADVANCE_NOTICE_TEXT[name] = f"{notice_minutes} นาที"
 
     save_custom_bosses_to_github()
 
-    embed = discord.Embed(title="✅ เพิ่มบอสใหม่เข้าสู่ระบบเรียบร้อย", color=discord.Color.green())
-    embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-    embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=cd_text, inline=True)
-    embed.add_field(name="🔔 แจ้งเตือนล่วงหน้า", value=f"{notice_minutes} นาที", inline=True)
+    embed = discord.Embed(title="✅ เพิ่ม/แก้ไขบอสสำเร็จ", color=discord.Color.green())
+    embed.add_field(name="👾 ชื่อบอส", value=f"`{name}`", inline=True)
+    embed.add_field(name="⏳ คูลดาวน์", value=cd_text, inline=True)
+    embed.add_field(name="🔔 เตือนล่วงหน้า", value=f"{notice_minutes} นาที", inline=True)
+    
     await interaction.followup.send(embed=embed)
 
-    log_details = f"➕ **เพิ่มบอสใหม่:** `{boss_name}`\n⏳ **Cooldown:** {cd_text}\n🔔 **เตือนล่วงหน้า:** {notice_minutes} นาที"
-    await send_audit_log(interaction.guild, interaction.user, "เพิ่มบอสใหม่ (/addboss)", log_details, discord.Color.green())
+    log_details = f"➕ **เพิ่ม/แก้ไขบอส:** `{name}`\n⏳ **คูลดาวน์:** {cd_text}\n🔔 **เตือนล่วงหน้า:** {notice_minutes} นาที"
+    await send_audit_log(interaction.guild, interaction.user, "เพิ่ม/แก้ไขบอส (/addboss)", log_details, discord.Color.green())
 
-@bot.tree.command(name="kill", description="บันทึกเวลาบอสตาย (เช่น 17:05)")
-@app_commands.describe(boss_name="เลือกชื่อบอส", kill_time="รูปแบบ HH:MM เช่น 17:05")
+@bot.tree.command(name="delboss", description="ลบบอสออกจากตารางนับถอยหลัง")
+@app_commands.describe(boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการลบ")
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
-async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str):
+async def del_boss(interaction: discord.Interaction, boss_name: str):
     await interaction.response.defer()
-    try:
-        if boss_name not in BOSS_RESPAWN_TIMES:
-            await interaction.followup.send(f"❌ ไม่พบชื่อบอส `{boss_name}` ในฐานข้อมูล!", ephemeral=True)
-            return
 
-        try:
-            hours, minutes = map(int, kill_time.split(":"))
-            if not (0 <= hours <= 23 and 0 <= minutes <= 59): raise ValueError
-            now = datetime.now(TZ_THAI)
-            killed_at = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
-            if killed_at > now: killed_at -= timedelta(days=1)
-        except ValueError:
-            await interaction.followup.send("❌ กรุณากรอกเวลาให้ถูกต้องตามรูปแบบ `ชั่วโมง:นาที` เช่น `17:05`", ephemeral=True)
-            return
-
-        next_spawn = killed_at + BOSS_RESPAWN_TIMES[boss_name]
-        boss_schedule[boss_name] = {
-            "spawn_time": next_spawn,
-            "channel_id": interaction.channel_id,
-            "notified_advance": False
-        }
+    if boss_name in boss_schedule:
+        del boss_schedule[boss_name]
         save_boss_data()
-
-        timestamp_unix = int(next_spawn.timestamp())
-        discord_time_str = f"`{next_spawn.strftime('%H:%M:%S น.')}` (<t:{timestamp_unix}:R>)"
-
-        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายเรียบร้อย", color=discord.Color.red())
-        embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-        embed.add_field(name="⏱️ เวลาที่ตาย", value=killed_at.strftime("%H:%M:%S น."), inline=True)
-        embed.add_field(name="⏳ เวลาเกิดใหม่ (CD)", value=BOSS_CD_TEXT[boss_name], inline=True)
-        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=discord_time_str, inline=False)
+        
+        embed = discord.Embed(
+            title="🗑️ ลบบอสสำเร็จ",
+            description=f"ทำการลบข้อมูลเวลาของบอส **{boss_name}** ออกจากระบบเรียบร้อยแล้ว",
+            color=discord.Color.orange()
+        )
         await interaction.followup.send(embed=embed)
 
-        log_details = f"⚔️ **บอสตาย:** `{boss_name}`\n⏱️ **เวลานับตาย:** {killed_at.strftime('%H:%M:%S น.')}\n🔔 **เวลาเกิดถัดไป:** {next_spawn.strftime('%H:%M:%S น.')}"
-        await send_audit_log(interaction.guild, interaction.user, "ลงเวลาบอสตาย (/kill)", log_details, discord.Color.red())
+        log_details = f"🗑️ **ลบบอสออกจากตาราง:** `{boss_name}`"
+        await send_audit_log(interaction.guild, interaction.user, "ลบบอส (/delboss)", log_details, discord.Color.orange())
+    else:
+        await interaction.followup.send(f"❌ ไม่พบบอส **{boss_name}** ในตารางนับถอยหลังขณะนี้", ephemeral=True)
 
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในคำสั่ง kill: {e}")
-        await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาดระบบ: `{e}`", ephemeral=True)
-
-@bot.tree.command(name="list", description="ดูตารางเวลาเกิดของบอสทั้งหมด")
-async def list_bosses(interaction: discord.Interaction):
+@bot.tree.command(name="status", description="เช็กสถานะเวลาบอสทั้งหมดที่กำลังนับถอยหลัง")
+async def boss_status(interaction: discord.Interaction):
     await interaction.response.defer()
+
     if not boss_schedule:
-        await interaction.followup.send("📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในขณะนี้", ephemeral=True)
+        embed = discord.Embed(
+            title="📜 ตารางเวลาบอส",
+            description="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ\nใช้คำสั่ง `/kill [ชื่อบอส]` หรือ `/bossmenu` เพื่อเริ่มบันทึกเวลาได้เลยครับ",
+            color=discord.Color.blue()
+        )
+        await interaction.followup.send(embed=embed)
         return
 
-    embed = discord.Embed(title="📜 ตารางเวลาเกิดบอสล่าสุด", color=discord.Color.blue())
+    now = datetime.now(TZ_THAI)
+    embed = discord.Embed(
+        title="📜 ตารางเวลาบอสเกิดทั้งหมด",
+        description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`",
+        color=discord.Color.blue()
+    )
+
     sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
     for boss, data in sorted_bosses:
         spawn_time = data["spawn_time"]
@@ -907,69 +913,44 @@ async def list_bosses(interaction: discord.Interaction):
         notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
         embed.add_field(
             name=f"👾 {boss}",
-            value=f"เกิดเวลา: `{spawn_time.strftime('%H:%M:%S น.')}`\nนับถอยหลัง: <t:{timestamp_unix}:R>\n*(เตือนล่วงหน้า {notice_text})*",
+            value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: <t:{timestamp_unix}:R>\n*(เตือนล่วงหน้า {notice_text})*",
             inline=False
         )
+
     await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="clear", description="ลบเวลาบอสออกจากตาราง")
-@app_commands.autocomplete(boss_name=boss_autocomplete)
+@bot.tree.command(name="setlive", description="ตั้งค่าป้ายไฟนับถอยหลังเวลาบอสเกิด Real-time ในช่องนี้")
 @has_allowed_role()
-async def clear_boss(interaction: discord.Interaction, boss_name: str):
+async def set_live(interaction: discord.Interaction):
     await interaction.response.defer()
-    if boss_name in boss_schedule:
-        del boss_schedule[boss_name]
-        save_boss_data()
-        await interaction.followup.send(f"🗑️ ลบเวลาของบอส `{boss_name}` ออกจากตารางเรียบร้อยแล้ว!")
 
-        log_details = f"🗑️ **ลบตารางเวลาบอส:** `{boss_name}`"
-        await send_audit_log(interaction.guild, interaction.user, "ลบเวลาบอส (/clear)", log_details, discord.Color.orange())
-    else:
-        await interaction.followup.send(f"❌ ไม่พบข้อมูลการลงเวลาของบอส `{boss_name}`", ephemeral=True)
+    now = datetime.now(TZ_THAI)
+    embed = discord.Embed(
+        title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time",
+        description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`",
+        color=discord.Color.teal()
+    )
+    embed.add_field(name="📌 สถานะ", value="กำลังเริ่มต้นระบบ...", inline=False)
+    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 30 วินาที")
 
-@bot.tree.command(name="info", description="ดูรายชื่อบอสและระยะเวลารีดาวน์ทั้งหมด")
-async def boss_info(interaction: discord.Interaction):
-    await interaction.response.defer()
-    try:
-        embeds = []
-        embed = discord.Embed(
-            title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (Respawn Time)", 
-            color=discord.Color.green()
-        )
-        
-        field_count = 0
-        for boss, cd_text in BOSS_CD_TEXT.items():
-            notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
-            embed.add_field(
-                name=f"👾 {boss}", 
-                value=f"⏳ **{cd_text}** (เตือนล่วงหน้า {notice_text})", 
-                inline=False
-            )
-            field_count += 1
-            
-            if field_count == 25:
-                embeds.append(embed)
-                embed = discord.Embed(
-                    title="ℹ️ รายชื่อบอสและเวลารีดาวน์ (ต่อ)", 
-                    color=discord.Color.green()
-                )
-                field_count = 0
-                
-        if field_count > 0:
-            embeds.append(embed)
+    msg = await interaction.followup.send(embed=embed)
 
-        await interaction.followup.send(embeds=embeds[:10])
-        
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในคำสั่ง info: {e}")
-        await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาดระบบ: `{e}`", ephemeral=True)
+    global live_message_config
+    live_message_config = {
+        "channel_id": interaction.channel_id,
+        "message_id": msg.id
+    }
+    save_live_config()
+
+    log_details = f"📌 **ตั้งค่า Live Embed ในช่อง:** <#{interaction.channel_id}>\nMessage ID: `{msg.id}`"
+    await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", log_details, discord.Color.teal())
 
 # ==========================================
-# 🚀 11. รันบอท Discord
+# 🚀 11. Run Bot
 # ==========================================
 if __name__ == "__main__":
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if TOKEN:
-        bot.run(TOKEN)
+    token = os.environ.get("DISCORD_TOKEN")
+    if token:
+        bot.run(token)
     else:
-        print("❌ ไม่พบ Discord Token!")
+        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables! กรุณาตั้งค่าก่อนรันบอท")
