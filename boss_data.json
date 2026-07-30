@@ -37,6 +37,6 @@
   "Wadangka": {
     "spawn_time": "2026-07-31T01:44:00+07:00",
     "channel_id": 1526638825198059620,
-    "notified_advance": false
+    "notified_advance": true
   }
 }
