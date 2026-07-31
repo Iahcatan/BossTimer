@@ -13,7 +13,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask, render_template_string
 from waitress import serve
-from gtts import gTTS
+import edge_tts  # เปลี่ยนจาก gTTS มาใช้ edge-tts เพื่อแก้ปัญหา 429 Too Many Requests
 import imageio_ffmpeg
 
 # ==========================================
@@ -140,6 +140,9 @@ LOG_CHANNEL_NAME = "boss-logs"
 LIVE_CHANNEL_NAME = "boss-schedule"
 
 voice_empty_start = {}
+
+# ตั้งค่าเสียงอ่านภาษาไทยของ Microsoft Edge TTS
+VOICE_THAI = "th-TH-PremwadeeNeural"
 
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
@@ -491,8 +494,9 @@ async def speak_in_guild(guild: discord.Guild, text: str):
     tts_filename = f"temp_tts_{guild.id}.mp3"
     
     try:
-        tts = gTTS(text=text, lang='th')
-        tts.save(tts_filename)
+        # เปลี่ยนมาใช้ edge-tts เพื่อป้องกันปัญหาติด Rate Limit 429
+        communicate = edge_tts.Communicate(text, VOICE_THAI)
+        await communicate.save(tts_filename)
 
         if vc.is_playing():
             vc.stop()
