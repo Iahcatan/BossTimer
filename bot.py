@@ -6,6 +6,7 @@ import base64
 import asyncio
 import time
 import shutil
+import traceback
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
@@ -13,6 +14,7 @@ from discord.ext import commands, tasks
 from flask import Flask, render_template_string
 from waitress import serve
 from gtts import gTTS
+import imageio_ffmpeg
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -436,6 +438,12 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 def get_ffmpeg_path():
+    try:
+        # ใช้ FFmpeg จาก imageio-ffmpeg เป็นอันดับแรก
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception as e:
+        print(f"⚠️ ไม่สามารถโหลด FFmpeg จาก imageio-ffmpeg ได้: {e}")
+
     cwd = os.getcwd()
     for filename in ["ffmpeg.exe", "ffmpeg"]:
         local_path = os.path.join(cwd, filename)
@@ -508,7 +516,8 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         await play_finished.wait()
 
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด: {e}")
+        print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด:")
+        traceback.print_exc()
 
     finally:
         if should_disconnect and vc and vc.is_connected():
@@ -525,6 +534,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
+    print(f"🔊 ใช้ FFmpeg จากตำแหน่ง: {get_ffmpeg_path()}")
     load_custom_bosses()
     load_boss_data()
     load_live_config()
