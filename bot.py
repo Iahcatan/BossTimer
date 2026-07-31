@@ -496,8 +496,8 @@ async def speak_in_guild(guild: discord.Guild, text: str):
     tts_filename = f"temp_tts_{guild.id}.mp3"
     
     try:
-        # เปลี่ยนมาใช้ edge-tts พร้อมปรับลดความเร็วลง -15%
-        communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-15%")
+        # ใช้ edge-tts พร้อมปรับ pitch="+20%" เพื่อโทนเสียงที่น่ารัก/สดใสขึ้น และปรับ rate="-10%"
+        communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-10%", pitch="+20%")
         await communicate.save(tts_filename)
 
         if vc.is_playing():
