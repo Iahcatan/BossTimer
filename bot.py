@@ -7,6 +7,7 @@ import asyncio
 import time
 import shutil
 import traceback
+import logging
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
@@ -15,6 +16,12 @@ from flask import Flask, render_template_string
 from waitress import serve
 import edge_tts  # เปลี่ยนจาก gTTS มาใช้ edge-tts เพื่อแก้ปัญหา 429 Too Many Requests
 import imageio_ffmpeg
+
+# ==========================================
+# ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
+# ==========================================
+logging.getLogger('discord.player').setLevel(logging.WARNING)
+logging.getLogger('discord.voice_state').setLevel(logging.WARNING)
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -507,6 +514,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         audio_source = discord.FFmpegPCMAudio(
             tts_filename,
             executable=ffmpeg_executable,
+            before_options="-loglevel error",
             options="-vn"
         )
 
