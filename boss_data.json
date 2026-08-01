@@ -12,6 +12,6 @@
   "Faith": {
     "spawn_time": "2026-08-01T07:42:00+07:00",
     "channel_id": 1526638825198059620,
-    "notified_advance": false
+    "notified_advance": true
   }
 }
