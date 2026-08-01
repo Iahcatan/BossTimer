@@ -150,8 +150,9 @@ LIVE_CHANNEL_NAME = "boss-schedule"
 voice_empty_start = {}
 voice_locks = {}
 
-# ตัวแปรสถานะการแจ้งเตือน BF
+# ตัวแปรสถานะการแจ้งเตือน BF และการแจ้งเตือนเข้าห้องเสียง
 bf_notify_enabled = True
+ppl_notify_enabled = True  # สถานะสำหรับควบคุมการแจ้งเตือนเสียงสมาชิกเข้าห้อง
 last_bf_notified_hour = -1
 
 # ตั้งค่าเสียงอ่านภาษาไทยของ Microsoft Edge TTS
@@ -625,10 +626,15 @@ async def speak_in_guild(guild: discord.Guild, text: str):
                     pass
 
 # ==========================================
-# 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง (เพิ่มใหม่)
+# 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
 # ==========================================
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    global ppl_notify_enabled
+    # 0. ตรวจสอบสถานะว่าเปิดการแจ้งเตือน /ppl หรือไม่
+    if not ppl_notify_enabled:
+        return
+
     # 1. ไม่ทำงานหากคนที่ย้าย/เข้าห้องเป็นบอท
     if member.bot:
         return
@@ -930,6 +936,42 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
         interaction.user,
         "ตั้งค่าการแจ้งเตือน BF (/notify)",
         f"เปลี่ยนสถานะการแจ้งเตือน BF เป็น: `{status.value.upper()}`",
+        color
+    )
+
+# --- เพิ่มคำสั่ง /ppl ควบคุมการแจ้งเตือนสมาชิกเข้าห้องเสียง ---
+@bot.tree.command(name="ppl", description="เปิดหรือปิดระบบแจ้งเตือนเสียงต้อนรับสมาชิกเข้าห้องเสียง")
+@app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
+@app_commands.choices(status=[
+    app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
+    app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
+])
+@has_allowed_role()
+async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
+    await interaction.response.defer()
+    global ppl_notify_enabled
+
+    if status.value == "on":
+        ppl_notify_enabled = True
+        msg = "🟢 **เปิด** ระบบแจ้งเตือนต้อนรับสมาชิกเข้าห้องเสียงเรียบร้อยแล้ว!"
+        color = discord.Color.green()
+    else:
+        ppl_notify_enabled = False
+        msg = "🔴 **ปิด** ระบบแจ้งเตือนต้อนรับสมาชิกเข้าห้องเสียงเรียบร้อยแล้ว!"
+        color = discord.Color.red()
+
+    embed = discord.Embed(
+        title="⚙️ ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้องเสียง",
+        description=msg,
+        color=color
+    )
+    await interaction.followup.send(embed=embed)
+
+    await send_audit_log(
+        interaction.guild,
+        interaction.user,
+        "ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)",
+        f"เปลี่ยนสถานะการแจ้งเตือนต้อนรับสมาชิกเป็น: `{status.value.upper()}`",
         color
     )
 
