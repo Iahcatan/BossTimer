@@ -685,12 +685,13 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             traceback.print_exc()
 
         finally:
-            # ตรวจสอบการตัดสายเฉพาะเมื่อไม่มีสมาชิกเหลืออยู่ในห้องเสียงแล้ว
+            # ✅ แก้ไขจุดนี้: หากบอทเพิ่งเข้ามาเพื่อพูด (should_disconnect = True) ให้ตัดสายออกจากห้องทันทีเมื่อพูดจบ
             if should_disconnect and vc and vc.is_connected():
                 await asyncio.sleep(0.5)
-                human_members = [m for m in vc.channel.members if not m.bot] if vc.channel else []
-                if len(human_members) == 0:
+                try:
                     await vc.disconnect()
+                except Exception as e:
+                    print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
             
             if os.path.exists(tts_filename):
                 try:
