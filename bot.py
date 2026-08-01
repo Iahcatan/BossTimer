@@ -624,6 +624,27 @@ async def speak_in_guild(guild: discord.Guild, text: str):
                 except Exception:
                     pass
 
+# ==========================================
+# 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง (เพิ่มใหม่)
+# ==========================================
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    # 1. ไม่ทำงานหากคนที่ย้าย/เข้าห้องเป็นบอท
+    if member.bot:
+        return
+
+    # 2. เช็กว่าผู้ใช้เพิ่งกดเข้าห้องเสียง (หรือย้ายมาจากห้องอื่น)
+    if before.channel != after.channel and after.channel is not None:
+        # 3. ดึงชื่อแสดงผล และ ชื่อห้องเสียงอัตโนมัติ
+        user_name = member.display_name
+        channel_name = after.channel.name
+        
+        # 4. กำหนดข้อความทักทายระบุชื่อผู้ใช้และชื่อห้อง
+        greeting_text = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
+        
+        # เรียกใช้ระบบอ่านเสียงภาษาไทย
+        asyncio.create_task(speak_in_guild(member.guild, greeting_text))
+
 
 @bot.event
 async def on_ready():
