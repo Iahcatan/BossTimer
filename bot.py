@@ -712,25 +712,19 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     # 2. เช็กว่าผู้ใช้เพิ่งกดเข้าห้องเสียง (หรือย้ายมาจากห้องอื่น)
     if before.channel != after.channel and after.channel is not None:
         
-        # 3. เช็กระบบทักทายคนพิเศษ (VIP)
-        if vip_config.get("enabled", False):
-            # หากเปิดใช้ VIP จะงดการทักทายปกติ และจะทักเฉพาะคนพิเศษเท่านั้น
-            if member.id == vip_config.get("user_id"):
-                greeting_text = vip_config.get("message", "")
-                if greeting_text:
-                    asyncio.create_task(speak_in_guild(member.guild, greeting_text))
-            return  # ปิดการทักทายปกติทั้งหมดเมื่อเปิดระบบ VIP
-
-        # 4. หากไม่ได้เปิด VIP ให้ตรวจระบบทักทายสมาชิกทั่วไป (/ppl)
-        if not ppl_notify_enabled:
-            return
-
-        # 💡 ล้างอักขระพิเศษและอีโมจิออกจากชื่อสมาชิกและชื่อห้องเพื่อให้อ่านได้ราบรื่น
-        user_name = clean_display_name(member.display_name)
-        channel_name = clean_display_name(after.channel.name)
-        greeting_text = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
+        # 3. เช็กว่าเป็นคนพิเศษ (VIP) หรือไม่
+        if vip_config.get("enabled", False) and member.id == vip_config.get("user_id"):
+            greeting_text = vip_config.get("message", "")
+            if greeting_text:
+                asyncio.create_task(speak_in_guild(member.guild, greeting_text))
         
-        asyncio.create_task(speak_in_guild(member.guild, greeting_text))
+        # 4. หากไม่ใช่ VIP ให้เช็กการทักทายสมาชิกปกติ (ถ้าเปิด /ppl อยู่)
+        elif ppl_notify_enabled:
+            user_name = clean_display_name(member.display_name)
+            channel_name = clean_display_name(after.channel.name)
+            greeting_text = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
+            
+            asyncio.create_task(speak_in_guild(member.guild, greeting_text))
 
 
 @bot.event
@@ -1056,7 +1050,7 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
         color
     )
 
-@bot.tree.command(name="vip", description="[Admin Only] เปิด/ปิดและตั้งค่าระบบทักทายคนพิเศษ (ปิดการทักทายปกติ)")
+@bot.tree.command(name="vip", description="[Admin Only] เปิด/ปิดและตั้งค่าระบบทักทายคนพิเศษ (พร้อมทักทายคนทั่วไป)")
 @app_commands.describe(
     status="เลือกเปิด (on) หรือปิด (off) ระบบทักทายคนพิเศษ",
     user="เลือกสมาชิกคนพิเศษ (จำเป็นต้องระบุเมื่อเลือกเปิด)",
@@ -1094,7 +1088,7 @@ async def toggle_vip_greet(
 
         embed = discord.Embed(
             title="🌟 เปิดใช้งานระบบทักทายคนพิเศษ (VIP)",
-            description=f"🟢 **สถานะ:** เปิดใช้งาน\n👤 **คนพิเศษ:** {user.mention}\n💬 **คำทักทาย:** \"{message}\"\n\n*(หมายเหตุ: ระบบทักทายแบบปกติจะถูกปิดทำงานอัตโนมัติ)*",
+            description=f"🟢 **สถานะ:** เปิดใช้งาน\n👤 **คนพิเศษ:** {user.mention}\n💬 **คำทักทาย:** \"{message}\"\n\n*(หมายเหตุ: บอทจะทัก VIP ด้วยข้อความพิเศษนี้ และทักสมาชิกทั่วไปตามปกติหาก `/ppl` เปิดอยู่)*",
             color=discord.Color.gold()
         )
         await interaction.followup.send(embed=embed)
@@ -1118,7 +1112,7 @@ async def toggle_vip_greet(
 
         embed = discord.Embed(
             title="⚙️ ปิดระบบทักทายคนพิเศษ (VIP)",
-            description="🔴 **สถานะ:** ปิดใช้งาน และยกเลิกข้อมูลคนพิเศษเดิมเรียบร้อยแล้ว\n*(ระบบจะกลับไปใช้การทักทายแบบปกติหาก `/ppl` เปิดอยู่)*",
+            description="🔴 **สถานะ:** ปิดใช้งาน และยกเลิกข้อมูลคนพิเศษเดิมเรียบร้อยแล้ว\n*(ระบบจะยังคงทักทายสมาชิกทั่วไปตามปกติหาก `/ppl` เปิดอยู่)*",
             color=discord.Color.red()
         )
         await interaction.followup.send(embed=embed)
