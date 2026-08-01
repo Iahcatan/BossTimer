@@ -361,6 +361,27 @@ def save_live_config():
     except Exception as e:
         print(f"❌ เซฟ live_config ไม่สำเร็จ: {e}")
 
+    # 🟢 เพิ่มการ backup ขึ้น GitHub เพื่อป้องกันข้อมูลป้ายไฟหายเวลาบอตรีสตาร์ท
+    github_token = os.environ.get("GITHUB_TOKEN")
+    repo_name = os.environ.get("GITHUB_REPO")
+
+    if github_token and repo_name:
+        try:
+            url = f"https://api.github.com/repos/{repo_name}/contents/{LIVE_CONFIG_FILE}"
+            headers = {"Authorization": f"token {github_token}"}
+            res = requests.get(url, headers=headers)
+            sha = res.json().get("sha", "") if res.status_code == 200 else None
+
+            content_b64 = base64.b64encode(json.dumps(live_message_config, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
+            payload = {"message": "Auto-update live_config.json via Discord Bot", "content": content_b64}
+            if sha: payload["sha"] = sha
+
+            put_res = requests.put(url, headers=headers, json=payload)
+            if put_res.status_code in [200, 201]:
+                print("✅ อัปเดต live_config.json ขึ้น GitHub สำเร็จถาวร!")
+        except Exception as e:
+            print(f"❌ อัปเดต live_config ขึ้น GitHub ไม่สำเร็จ: {e}")
+
 def load_live_config():
     global live_message_config
     if not os.path.exists(LIVE_CONFIG_FILE): return
