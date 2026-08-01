@@ -140,6 +140,7 @@ TZ_THAI = timezone(timedelta(hours=7))
 DATA_FILE = "boss_data.json"
 CUSTOM_BOSSES_FILE = "custom_bosses.json"
 LIVE_CONFIG_FILE = "live_config.json"
+VIP_CONFIG_FILE = "vip_config.json"
 
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti", "Admin"]
 BF_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]  # ยศสำหรับแท็กแจ้งเตือน BF
@@ -152,7 +153,8 @@ voice_locks = {}
 
 # ตัวแปรสถานะการแจ้งเตือน BF และการแจ้งเตือนเข้าห้องเสียง
 bf_notify_enabled = True
-ppl_notify_enabled = True  # สถานะสำหรับควบคุมการแจ้งเตือนเสียงสมาชิกเข้าห้อง
+ppl_notify_enabled = True  # สถานะสำหรับควบคุมการแจ้งเตือนเสียงสมาชิกเข้าห้องแบบปกติ
+vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""} # ข้อมูลทักทายคนพิเศษ
 last_bf_notified_hour = -1
 
 # ตั้งค่าเสียงอ่านภาษาไทยของ Microsoft Edge TTS
@@ -362,6 +364,42 @@ def has_allowed_role():
 # ==========================================
 # 💾 5. ระบบบันทึก/โหลดไฟล์ JSON & GitHub
 # ==========================================
+def save_vip_config():
+    try:
+        with open(VIP_CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(vip_config, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"❌ เซฟ vip_config ไม่สำเร็จ: {e}")
+
+    github_token = os.environ.get("GITHUB_TOKEN")
+    repo_name = os.environ.get("GITHUB_REPO")
+
+    if github_token and repo_name:
+        try:
+            url = f"https://api.github.com/repos/{repo_name}/contents/{VIP_CONFIG_FILE}"
+            headers = {"Authorization": f"token {github_token}"}
+            res = requests.get(url, headers=headers)
+            sha = res.json().get("sha", "") if res.status_code == 200 else None
+
+            content_b64 = base64.b64encode(json.dumps(vip_config, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
+            payload = {"message": "Auto-update vip_config.json via Discord Bot", "content": content_b64}
+            if sha: payload["sha"] = sha
+
+            put_res = requests.put(url, headers=headers, json=payload)
+            if put_res.status_code in [200, 201]:
+                print("✅ อัปเดต vip_config.json ขึ้น GitHub สำเร็จถาวร!")
+        except Exception as e:
+            print(f"❌ อัปเดต vip_config ขึ้น GitHub ไม่สำเร็จ: {e}")
+
+def load_vip_config():
+    global vip_config
+    if not os.path.exists(VIP_CONFIG_FILE): return
+    try:
+        with open(VIP_CONFIG_FILE, "r", encoding="utf-8") as f:
+            vip_config = json.load(f)
+    except Exception as e:
+        print(f"❌ โหลด vip_config ไม่สำเร็จ: {e}")
+
 def save_live_config():
     try:
         with open(LIVE_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -513,7 +551,17 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.CheckFailure):
+    if isinstance(error, app_commands.MissingPermissions):
+        embed = discord.Embed(
+            title="🚫 ปฏิเสธการเข้าถึง",
+            description="คำสั่งนี้อนุญาตเฉพาะ **Administrator (ผู้ดูแลระบบ)** เท่านั้นครับ!",
+            color=discord.Color.red()
+        )
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+    elif isinstance(error, app_commands.CheckFailure):
         roles_str = ", ".join([f"`{r}`" for r in TARGET_ROLE_NAMES])
         embed = discord.Embed(
             title="🚫 ปฏิเสธการเข้าถึง",
@@ -630,10 +678,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
 # ==========================================
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    global ppl_notify_enabled
-    # 0. ตรวจสอบสถานะว่าเปิดการแจ้งเตือน /ppl หรือไม่
-    if not ppl_notify_enabled:
-        return
+    global ppl_notify_enabled, vip_config
 
     # 1. ไม่ทำงานหากคนที่ย้าย/เข้าห้องเป็นบอท
     if member.bot:
@@ -641,14 +686,24 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
     # 2. เช็กว่าผู้ใช้เพิ่งกดเข้าห้องเสียง (หรือย้ายมาจากห้องอื่น)
     if before.channel != after.channel and after.channel is not None:
-        # 3. ดึงชื่อแสดงผล และ ชื่อห้องเสียงอัตโนมัติ
+        
+        # 3. เช็กระบบทักทายคนพิเศษ (VIP)
+        if vip_config.get("enabled", False):
+            # หากเปิดใช้ VIP จะงดการทักทายปกติ และจะทักเฉพาะคนพิเศษเท่านั้น
+            if member.id == vip_config.get("user_id"):
+                greeting_text = vip_config.get("message", "")
+                if greeting_text:
+                    asyncio.create_task(speak_in_guild(member.guild, greeting_text))
+            return  # ปิดการทักทายปกติทั้งหมดเมื่อเปิดระบบ VIP
+
+        # 4. หากไม่ได้เปิด VIP ให้ตรวจระบบทักทายสมาชิกทั่วไป (/ppl)
+        if not ppl_notify_enabled:
+            return
+
         user_name = member.display_name
         channel_name = after.channel.name
-        
-        # 4. กำหนดข้อความทักทายระบุชื่อผู้ใช้และชื่อห้อง
         greeting_text = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
         
-        # เรียกใช้ระบบอ่านเสียงภาษาไทย
         asyncio.create_task(speak_in_guild(member.guild, greeting_text))
 
 
@@ -659,6 +714,7 @@ async def on_ready():
     load_custom_bosses()
     load_boss_data()
     load_live_config()
+    load_vip_config()
 
     await asyncio.sleep(3)
     try:
@@ -939,8 +995,7 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
         color
     )
 
-# --- เพิ่มคำสั่ง /ppl ควบคุมการแจ้งเตือนสมาชิกเข้าห้องเสียง ---
-@bot.tree.command(name="ppl", description="เปิดหรือปิดระบบแจ้งเตือนเสียงต้อนรับสมาชิกเข้าห้องเสียง")
+@bot.tree.command(name="ppl", description="เปิดหรือปิดระบบแจ้งเตือนเสียงต้อนรับสมาชิกเข้าห้องเสียง (ทั่วไป)")
 @app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
 @app_commands.choices(status=[
     app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
@@ -974,6 +1029,83 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
         f"เปลี่ยนสถานะการแจ้งเตือนต้อนรับสมาชิกเป็น: `{status.value.upper()}`",
         color
     )
+
+# --- ✨ [เพิ่มใหม่] คำสั่ง /vip ตั้งค่าและทักทายคนพิเศษ (Admin Only) ---
+@bot.tree.command(name="vip", description="[Admin Only] เปิด/ปิดและตั้งค่าระบบทักทายคนพิเศษ (ปิดการทักทายปกติ)")
+@app_commands.describe(
+    status="เลือกเปิด (on) หรือปิด (off) ระบบทักทายคนพิเศษ",
+    user="เลือกสมาชิกคนพิเศษ (จำเป็นต้องระบุเมื่อเลือกเปิด)",
+    message="ข้อความพูดทักทายคนพิเศษ (จำเป็นต้องระบุเมื่อเลือกเปิด)"
+)
+@app_commands.choices(status=[
+    app_commands.Choice(name="เปิดระบบทักทายคนพิเศษ (on)", value="on"),
+    app_commands.Choice(name="ปิดระบบทักทายคนพิเศษ (off)", value="off")
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def toggle_vip_greet(
+    interaction: discord.Interaction, 
+    status: app_commands.Choice[str], 
+    user: discord.Member = None, 
+    message: str = None
+):
+    await interaction.response.defer()
+    global vip_config
+
+    if status.value == "on":
+        if not user or not message:
+            await interaction.followup.send(
+                "❌ **ข้อมูลไม่ครบถ้วน!** กรุณาระบุทั้ง **user** (คนพิเศษ) และ **message** (ข้อความทักทาย) เมื่อต้องการเปิดใช้งานครับ",
+                ephemeral=True
+            )
+            return
+
+        vip_config = {
+            "enabled": True,
+            "user_id": user.id,
+            "user_name": user.display_name,
+            "message": message
+        }
+        save_vip_config()
+
+        embed = discord.Embed(
+            title="🌟 เปิดใช้งานระบบทักทายคนพิเศษ (VIP)",
+            description=f"🟢 **สถานะ:** เปิดใช้งาน\n👤 **คนพิเศษ:** {user.mention}\n💬 **คำทักทาย:** \"{message}\"\n\n*(หมายเหตุ: ระบบทักทายแบบปกติจะถูกปิดทำงานอัตโนมัติ)*",
+            color=discord.Color.gold()
+        )
+        await interaction.followup.send(embed=embed)
+
+        await send_audit_log(
+            interaction.guild,
+            interaction.user,
+            "เปิดระบบทักทายคนพิเศษ (/vip)",
+            f"👤 คนพิเศษ: `{user.display_name}` ({user.id})\n💬 ข้อความ: {message}",
+            discord.Color.gold()
+        )
+
+    else: # status.value == "off"
+        # เมื่อปิด ให้ยกเลิกข้อมูลเก่าทั้งหมด
+        vip_config = {
+            "enabled": False,
+            "user_id": None,
+            "user_name": "",
+            "message": ""
+        }
+        save_vip_config()
+
+        embed = discord.Embed(
+            title="⚙️ ปิดระบบทักทายคนพิเศษ (VIP)",
+            description="🔴 **สถานะ:** ปิดใช้งาน และยกเลิกข้อมูลคนพิเศษเดิมเรียบร้อยแล้ว\n*(ระบบจะกลับไปใช้การทักทายแบบปกติหาก `/ppl` เปิดอยู่)*",
+            color=discord.Color.red()
+        )
+        await interaction.followup.send(embed=embed)
+
+        await send_audit_log(
+            interaction.guild,
+            interaction.user,
+            "ปิดระบบทักทายคนพิเศษ (/vip)",
+            "ยกเลิกข้อมูลและปิดระบบทักทายคนพิเศษเรียบร้อยแล้ว",
+            discord.Color.red()
+        )
 
 @bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
 async def join_voice(interaction: discord.Interaction):
