@@ -260,6 +260,55 @@ ADVANCE_NOTICE_TEXT = {
     "Barslaf": "30 นาที", "Billiard": "5 นาที"
 }
 
+# Dictionary สำหรับคำอ่านภาษาไทยของบอสแต่ละตัว (ใช้เฉพาะตอนออกเสียงพูด TTS)
+BOSS_PRONUNCIATION = {
+    "Wadangka": "วาดังการ์",
+    "Elemental Queen": "เอเลเมนทัล ควีน",
+    "Tank": "แท้งก์",
+    "Swirl Flame": "สเวิร์ล เฟลม",
+    "Maelstrom": "เมลสตรอม",
+    "Twister": "ทวิสเตอร์",
+    "Bigmama": "บิ๊กมาม่า",
+    "Chief Magief": "ชีฟ มาเกียฟ",
+    "Faith": "เฟธ",
+    "Apapa": "อาปาป้า",
+    "Corrupt Forest Keeper": "คอร์รัปต์ ฟอเรสต์ คีปเปอร์",
+    "Recluse": "เรคลูซ",
+    "Blackskull": "แบล็กสกัลป์",
+    "Sleepy Kooii": "สลีปปี้ คูอี",
+    "Awaken Kooii": "อเวเคน คูอี",
+    "Eeheehee": "อีฮีฮี",
+    "Ooheeheek": "โอฮีฮีก",
+    "Oohehe": "โอเฮเฮ้",
+    "Guardian Imp": "การ์เดียน อิมป์",
+    "Devilang": "เดวิลแลง",
+    "Blackjuno": "แบล็กจูโน่",
+    "Blacksky": "แบล็กสกาย",
+    "Red Fox": "เรดฟ็อกซ์",
+    "7tailfox": "เซเว่นเทลฟ็อกซ์",
+    "777Tailfox": "ทริปเปิลเซเว่นเทลฟ็อกซ์",
+    "Sunrise Flower": "ซันไรส์ ฟลาวเวอร์",
+    "Magma Senior Thief": "แมกม่า ซีเนียร์ ธีฟ",
+    "Bbinikjoe": "บีนิกโจ",
+    "Bigmouse": "บิ๊กเมาส์",
+    "Caligo": "คาลิโก้",
+    "Poison Root Flower": "พอยซัน รูท ฟลาวเวอร์",
+    "Contaminated Queen Bee": "คอนทามิเนตเต็ด ควีนบี",
+    "Rotten Pudding": "รอตเทน พุดดิ้ง",
+    "Swamp Flower Monster": "สแวมป์ ฟลาวเวอร์ มอนสเตอร์",
+    "Ukpana": "อุคปาน่า",
+    "Darlene the Witch": "ดาร์ลีน เดอะ วิทช์",
+    "Illust": "อิลลัสต์",
+    "Actaemon": "แอคธีมอน",
+    "Aiyo's Protector": "ไอโย โปรเตกเตอร์",
+    "Glucose": "กลูโคส",
+    "Overload": "โอเวอร์โหลด",
+    "Soul Lich": "โซล ลิช",
+    "Platanista": "พลานิสต้า",
+    "Barslaf": "บาร์สลาฟ",
+    "Billiard": "บิลเลียด"
+}
+
 boss_schedule = {}
 live_message_config = {}
 
@@ -608,6 +657,9 @@ async def check_boss_notifications():
             notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
             notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
             
+            # 🔊 แปลงชื่อบอสเป็นคำอ่านภาษาไทยสำหรับการออกเสียง TTS
+            spoken_name = BOSS_PRONUNCIATION.get(boss_name, boss_name)
+            
             if 0 < time_left <= notice_limit and not notified_advance:
                 embed = discord.Embed(
                     title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
@@ -617,7 +669,7 @@ async def check_boss_notifications():
                 try:
                     await channel.send(content=mention_target, embed=embed)
                     if guild:
-                        asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} จะเกิดในอีก {notice_text} ค่ะ"))
+                        asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"))
                 except discord.errors.HTTPException as e:
                     if e.status == 429:
                         print("⚠️ ชน Rate Limit ในการส่งข้อความเตือนบอส รอรอบถัดไป")
@@ -637,7 +689,7 @@ async def check_boss_notifications():
                 try:
                     await channel.send(content=mention_target, embed=embed)
                     if guild:
-                        asyncio.create_task(speak_in_guild(guild, f"บอส {boss_name} เกิดแล้วค่ะ"))
+                        asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ"))
                 except discord.errors.HTTPException as e:
                     if e.status == 429:
                         print("⚠️ ชน Rate Limit ในการส่งข้อความแจ้งบอสเกิด")
