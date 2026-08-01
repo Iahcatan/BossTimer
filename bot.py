@@ -147,6 +147,7 @@ LOG_CHANNEL_NAME = "boss-logs"
 LIVE_CHANNEL_NAME = "boss-schedule"
 
 voice_empty_start = {}
+voice_locks = {}
 
 # ตั้งค่าเสียงอ่านภาษาไทยของ Microsoft Edge TTS
 VOICE_THAI = "th-TH-PremwadeeNeural"
@@ -198,6 +199,9 @@ BOSS_RESPAWN_TIMES = {
     "Barslaf": timedelta(hours=48),
     "Billiard": timedelta(hours=7, minutes=55, seconds=3)
 }
+
+# บันทึกรายชื่อบอสตั้งต้นไว้สำหรับเปรียบเทียบหา Custom Bosses
+DEFAULT_BOSS_NAMES = set(BOSS_RESPAWN_TIMES.keys())
 
 BOSS_CD_TEXT = {
     "Wadangka": "2 ชั่วโมง 30 นาที", "Elemental Queen": "2 ชั่วโมง 30 นาที",
@@ -361,7 +365,6 @@ def save_live_config():
     except Exception as e:
         print(f"❌ เซฟ live_config ไม่สำเร็จ: {e}")
 
-    # 🟢 เพิ่มการ backup ขึ้น GitHub เพื่อป้องกันข้อมูลป้ายไฟหายเวลาบอตรีสตาร์ท
     github_token = os.environ.get("GITHUB_TOKEN")
     repo_name = os.environ.get("GITHUB_REPO")
 
@@ -392,10 +395,9 @@ def load_live_config():
         print(f"❌ โหลด live_config ไม่สำเร็จ: {e}")
 
 def save_custom_bosses_to_github():
-    default_bosses = list(BOSS_RESPAWN_TIMES.keys())
     custom_data = {}
     for name in list(BOSS_RESPAWN_TIMES.keys()):
-        if name not in default_bosses:
+        if name not in DEFAULT_BOSS_NAMES:
             custom_data[name] = {
                 "total_seconds": int(BOSS_RESPAWN_TIMES[name].total_seconds()),
                 "cd_text": BOSS_CD_TEXT[name],
@@ -485,8 +487,11 @@ def load_boss_data():
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             saved_data = json.load(f)
             for boss_name, data in saved_data.items():
+                st = datetime.fromisoformat(data["spawn_time"])
+                if st.tzinfo is None:
+                    st = st.replace(tzinfo=TZ_THAI)
                 boss_schedule[boss_name] = {
-                    "spawn_time": datetime.fromisoformat(data["spawn_time"]),
+                    "spawn_time": st,
                     "channel_id": data.get("channel_id"),
                     "notified_advance": data.get("notified_advance", False)
                 }
@@ -521,7 +526,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 def get_ffmpeg_path():
     try:
-        # ใช้ FFmpeg จาก imageio-ffmpeg เป็นอันดับแรก
         return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception as e:
         print(f"⚠️ ไม่สามารถโหลด FFmpeg จาก imageio-ffmpeg ได้: {e}")
@@ -547,72 +551,75 @@ def get_ffmpeg_path():
 async def speak_in_guild(guild: discord.Guild, text: str):
     if not guild: return
 
-    vc = guild.voice_client
-    should_disconnect = False
+    if guild.id not in voice_locks:
+        voice_locks[guild.id] = asyncio.Lock()
 
-    if not vc or not vc.is_connected():
-        target_vc = None
-        for channel in guild.voice_channels:
-            human_members = [m for m in channel.members if not m.bot]
-            if len(human_members) > 0:
-                target_vc = channel
-                break
-        
-        if target_vc:
-            try:
-                vc = await target_vc.connect(reconnect=True)
-                should_disconnect = True
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                print(f"❌ เชื่อมต่อห้องเสียงไม่สำเร็จ: {e}")
+    async with voice_locks[guild.id]:
+        vc = guild.voice_client
+        should_disconnect = False
+
+        if not vc or not vc.is_connected():
+            target_vc = None
+            for channel in guild.voice_channels:
+                human_members = [m for m in channel.members if not m.bot]
+                if len(human_members) > 0:
+                    target_vc = channel
+                    break
+            
+            if target_vc:
+                try:
+                    vc = await target_vc.connect(reconnect=True)
+                    should_disconnect = True
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    print(f"❌ เชื่อมต่อห้องเสียงไม่สำเร็จ: {e}")
+                    return
+            else:
+                print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
                 return
-        else:
-            print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
-            return
 
-    tts_filename = f"temp_tts_{guild.id}.mp3"
-    
-    try:
-        # ใช้ edge-tts พร้อมปรับ pitch="+20Hz" เพื่อเพิ่มความแหลมของเสียง และปรับ rate="-30%" สำหรับเน้นฟังช้าๆ ชัดๆ ทุกคำ
-        communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-30%", pitch="+20Hz")
-        await communicate.save(tts_filename)
-
-        if vc.is_playing():
-            vc.stop()
-
-        ffmpeg_executable = get_ffmpeg_path()
-        audio_source = discord.FFmpegPCMAudio(
-            tts_filename,
-            executable=ffmpeg_executable,
-            before_options="-loglevel error",
-            options="-vn"
-        )
-
-        loop = asyncio.get_running_loop()
-        play_finished = asyncio.Event()
-
-        def after_playing(error):
-            if error:
-                print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
-            loop.call_soon_threadsafe(play_finished.set)
-
-        vc.play(audio_source, after=after_playing)
-        await play_finished.wait()
-
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด:")
-        traceback.print_exc()
-
-    finally:
-        if should_disconnect and vc and vc.is_connected():
-            await asyncio.sleep(0.5)
-            await vc.disconnect()
+        tts_filename = f"temp_tts_{guild.id}.mp3"
         
-        if os.path.exists(tts_filename):
-            try:
-                os.remove(tts_filename)
-            except Exception:
-                pass
+        try:
+            communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-30%", pitch="+20Hz")
+            await communicate.save(tts_filename)
+
+            if vc.is_playing():
+                vc.stop()
+
+            ffmpeg_executable = get_ffmpeg_path()
+            audio_source = discord.FFmpegPCMAudio(
+                tts_filename,
+                executable=ffmpeg_executable,
+                before_options="-loglevel error",
+                options="-vn"
+            )
+
+            loop = asyncio.get_running_loop()
+            play_finished = asyncio.Event()
+
+            def after_playing(error):
+                if error:
+                    print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
+                loop.call_soon_threadsafe(play_finished.set)
+
+            vc.play(audio_source, after=after_playing)
+            await play_finished.wait()
+
+        except Exception as e:
+            print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด:")
+            traceback.print_exc()
+
+        finally:
+            if should_disconnect and vc and vc.is_connected():
+                await asyncio.sleep(0.5)
+                await vc.disconnect()
+            
+            if os.path.exists(tts_filename):
+                try:
+                    os.remove(tts_filename)
+                except Exception:
+                    pass
 
 
 @bot.event
@@ -678,7 +685,6 @@ async def check_boss_notifications():
             notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
             notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
             
-            # 🔊 แปลงชื่อบอสเป็นคำอ่านภาษาไทยสำหรับการออกเสียง TTS
             spoken_name = BOSS_PRONUNCIATION.get(boss_name, boss_name)
             
             if 0 < time_left <= notice_limit and not notified_advance:
@@ -1002,18 +1008,24 @@ async def add_boss(
 async def del_boss(interaction: discord.Interaction, boss_name: str):
     await interaction.response.defer()
 
-    if boss_name in boss_schedule:
-        del boss_schedule[boss_name]
+    matched_key = None
+    for k in boss_schedule.keys():
+        if k.lower() == boss_name.lower():
+            matched_key = k
+            break
+
+    if matched_key:
+        del boss_schedule[matched_key]
         save_boss_data()
         
         embed = discord.Embed(
             title="🗑️ ลบบอสสำเร็จ",
-            description=f"ทำการลบข้อมูลเวลาของบอส **{boss_name}** ออกจากระบบเรียบร้อยแล้ว",
+            description=f"ทำการลบข้อมูลเวลาของบอส **{matched_key}** ออกจากระบบเรียบร้อยแล้ว",
             color=discord.Color.orange()
         )
         await interaction.followup.send(embed=embed)
 
-        log_details = f"🗑️ **ลบบอสออกจากตาราง:** `{boss_name}`"
+        log_details = f"🗑️ **ลบบอสออกจากตาราง:** `{matched_key}`"
         await send_audit_log(interaction.guild, interaction.user, "ลบบอส (/delboss)", log_details, discord.Color.orange())
     else:
         await interaction.followup.send(f"❌ ไม่พบบอส **{boss_name}** ในตารางนับถอยหลังขณะนี้", ephemeral=True)
