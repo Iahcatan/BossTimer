@@ -8,6 +8,7 @@ import time
 import shutil
 import traceback
 import logging
+import re  # 💡 เพิ่ม re สำหรับล้างตัวอักษรพิเศษและอีโมจิ
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
@@ -600,9 +601,20 @@ def get_ffmpeg_path():
     return "ffmpeg"
 
 
+def clean_display_name(name: str) -> str:
+    """ฟังก์ชั่นทำความสะอาดชื่อสมาชิกและชื่อห้อง ลบอีโมจิและอักขระพิเศษ"""
+    if not name:
+        return "สมาชิก"
+    # กรองเอาเฉพาะ ตัวอักษรไทย อังกฤษ ตัวเลข และช่องว่าง
+    cleaned = re.sub(r'[^\w\s\u0E00-\u0E7F]', '', name)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned if cleaned else "สมาชิก"
+
+
 async def speak_in_guild(guild: discord.Guild, text: str):
     if not guild: return
 
+    # จัดทำระบบคิวเสียง (Queue) ด้วย Lock ต่อ Guild เพื่อให้พูดต่อกันทีละคน
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
 
@@ -630,11 +642,21 @@ async def speak_in_guild(guild: discord.Guild, text: str):
                 print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
                 return
 
-        tts_filename = f"temp_tts_{guild.id}.mp3"
+        # สร้างชื่อไฟล์ TTS แยกเฉพาะคิวด้วย Timestamp เพื่อป้องกันชื่อไฟล์ชนกัน
+        tts_filename = f"temp_tts_{guild.id}_{int(time.time() * 1000)}.mp3"
         
         try:
-            communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-30%", pitch="+20Hz")
-            await communicate.save(tts_filename)
+            # 💡 [ครอบ try...except ช่วงแปลงเสียง TTS]
+            try:
+                communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-30%", pitch="+20Hz")
+                await communicate.save(tts_filename)
+            except Exception as tts_err:
+                print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS ('{text}'): {tts_err}")
+                return
+
+            if not os.path.exists(tts_filename) or os.path.getsize(tts_filename) == 0:
+                print("⚠️ ไฟล์เสียง TTS ไม่สมบูรณ์หรือข้ามการเล่น")
+                return
 
             if vc.is_playing():
                 vc.stop()
@@ -663,9 +685,12 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             traceback.print_exc()
 
         finally:
+            # ตรวจสอบการตัดสายเฉพาะเมื่อไม่มีสมาชิกเหลืออยู่ในห้องเสียงแล้ว
             if should_disconnect and vc and vc.is_connected():
                 await asyncio.sleep(0.5)
-                await vc.disconnect()
+                human_members = [m for m in vc.channel.members if not m.bot] if vc.channel else []
+                if len(human_members) == 0:
+                    await vc.disconnect()
             
             if os.path.exists(tts_filename):
                 try:
@@ -700,8 +725,9 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         if not ppl_notify_enabled:
             return
 
-        user_name = member.display_name
-        channel_name = after.channel.name
+        # 💡 ล้างอักขระพิเศษและอีโมจิออกจากชื่อสมาชิกและชื่อห้องเพื่อให้อ่านได้ราบรื่น
+        user_name = clean_display_name(member.display_name)
+        channel_name = clean_display_name(after.channel.name)
         greeting_text = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
         
         asyncio.create_task(speak_in_guild(member.guild, greeting_text))
@@ -1030,7 +1056,6 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
         color
     )
 
-# --- ✨ [เพิ่มใหม่] คำสั่ง /vip ตั้งค่าและทักทายคนพิเศษ (Admin Only) ---
 @bot.tree.command(name="vip", description="[Admin Only] เปิด/ปิดและตั้งค่าระบบทักทายคนพิเศษ (ปิดการทักทายปกติ)")
 @app_commands.describe(
     status="เลือกเปิด (on) หรือปิด (off) ระบบทักทายคนพิเศษ",
@@ -1083,7 +1108,6 @@ async def toggle_vip_greet(
         )
 
     else: # status.value == "off"
-        # เมื่อปิด ให้ยกเลิกข้อมูลเก่าทั้งหมด
         vip_config = {
             "enabled": False,
             "user_id": None,
