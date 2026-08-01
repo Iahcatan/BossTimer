@@ -142,12 +142,17 @@ CUSTOM_BOSSES_FILE = "custom_bosses.json"
 LIVE_CONFIG_FILE = "live_config.json"
 
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti", "Admin"]
+BF_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]  # ยศสำหรับแท็กแจ้งเตือน BF
 
 LOG_CHANNEL_NAME = "boss-logs"
 LIVE_CHANNEL_NAME = "boss-schedule"
 
 voice_empty_start = {}
 voice_locks = {}
+
+# ตัวแปรสถานะการแจ้งเตือน BF
+bf_notify_enabled = True
+last_bf_notified_hour = -1
 
 # ตั้งค่าเสียงอ่านภาษาไทยของ Microsoft Edge TTS
 VOICE_THAI = "th-TH-PremwadeeNeural"
@@ -200,7 +205,6 @@ BOSS_RESPAWN_TIMES = {
     "Billiard": timedelta(hours=7, minutes=55, seconds=3)
 }
 
-# บันทึกรายชื่อบอสตั้งต้นไว้สำหรับเปรียบเทียบหา Custom Bosses
 DEFAULT_BOSS_NAMES = set(BOSS_RESPAWN_TIMES.keys())
 
 BOSS_CD_TEXT = {
@@ -264,7 +268,6 @@ ADVANCE_NOTICE_TEXT = {
     "Barslaf": "30 นาที", "Billiard": "5 นาที"
 }
 
-# Dictionary สำหรับคำอ่านภาษาไทยของบอสแต่ละตัว (ใช้เฉพาะตอนออกเสียงพูด TTS)
 BOSS_PRONUNCIATION = {
     "Wadangka": "วาดังการ์",
     "Elemental Queen": "เอเลเมนทัล ควีน",
@@ -644,14 +647,59 @@ async def on_ready():
     
     if not check_boss_notifications.is_running():
         check_boss_notifications.start()
+    if not check_bf_notifications.is_running():
+        check_bf_notifications.start()
     if not update_live_embed.is_running():
         update_live_embed.start()
     if not check_auto_disconnect.is_running():
         check_auto_disconnect.start()
 
 # ==========================================
-# ⏰ 7. Tasks เช็กเวลาเตือน + Live Embed + Auto-Disconnect
+# ⏰ 7. Tasks เช็กเวลาเตือน + BF + Live Embed + Auto-Disconnect
 # ==========================================
+@tasks.loop(seconds=30)
+async def check_bf_notifications():
+    global last_bf_notified_hour, bf_notify_enabled
+    if not bf_notify_enabled:
+        return
+
+    try:
+        now = datetime.now(TZ_THAI)
+        # BF เปิดชั่วโมงคู่ (08:00, 10:00, 12:00...) เตือนตอนนาทีที่ 57 ของชั่วโมงคี่
+        if now.hour % 2 == 1 and now.minute == 57:
+            if last_bf_notified_hour != now.hour:
+                last_bf_notified_hour = now.hour
+                
+                next_bf_hour = (now.hour + 1) % 24
+                next_bf_time = f"{next_bf_hour:02d}:00"
+                
+                for guild in bot.guilds:
+                    mentions = []
+                    for role_name in BF_ROLE_NAMES:
+                        role = discord.utils.get(guild.roles, name=role_name)
+                        if role: mentions.append(role.mention)
+                    mention_target = " ".join(mentions) if mentions else ""
+
+                    channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+                    if not channel:
+                        channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+                    
+                    if channel:
+                        embed = discord.Embed(
+                            title="⚔️ แจ้งเตือนสงคราม Battlefield (BF)!",
+                            description=f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
+                            color=discord.Color.red()
+                        )
+                        try:
+                            await channel.send(content=mention_target, embed=embed)
+                        except Exception as e:
+                            print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {e}")
+                    
+                    spoken_text = "แบทเทิ้ลฟิลด์กำลังจะเริ่มในอีก 3 นาทีค่ะ"
+                    asyncio.create_task(speak_in_guild(guild, spoken_text))
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
+
 @tasks.loop(seconds=60)
 async def check_boss_notifications():
     try:
@@ -827,8 +875,43 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     return choices[:25]
 
 # ==========================================
-# 🔊 8. Voice Commands
+# 🔊 8. Voice & Notify Commands
 # ==========================================
+@bot.tree.command(name="notify", description="เปิดหรือปิดระบบแจ้งเตือนสงคราม Battlefield (BF)")
+@app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
+@app_commands.choices(status=[
+    app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
+    app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
+])
+@has_allowed_role()
+async def toggle_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
+    await interaction.response.defer()
+    global bf_notify_enabled
+
+    if status.value == "on":
+        bf_notify_enabled = True
+        msg = "🟢 **เปิด** ระบบแจ้งเตือน Battlefield (BF) เรียบร้อยแล้ว!"
+        color = discord.Color.green()
+    else:
+        bf_notify_enabled = False
+        msg = "🔴 **ปิด** ระบบแจ้งเตือน Battlefield (BF) เรียบร้อยแล้ว!"
+        color = discord.Color.red()
+
+    embed = discord.Embed(
+        title="⚙️ ตั้งค่าการแจ้งเตือน BF",
+        description=msg,
+        color=color
+    )
+    await interaction.followup.send(embed=embed)
+
+    await send_audit_log(
+        interaction.guild,
+        interaction.user,
+        "ตั้งค่าการแจ้งเตือน BF (/notify)",
+        f"เปลี่ยนสถานะการแจ้งเตือน BF เป็น: `{status.value.upper()}`",
+        color
+    )
+
 @bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
 async def join_voice(interaction: discord.Interaction):
     await interaction.response.defer()
