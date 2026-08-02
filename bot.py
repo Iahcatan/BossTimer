@@ -803,6 +803,12 @@ async def check_boss_notifications():
                     try: channel = await bot.fetch_channel(channel_id)
                     except Exception: channel = None
 
+            # 🛠️ ตรวจสอบสิทธิ์ส่งข้อความและ Embed ในช่องสัญญาณ
+            if channel and hasattr(channel, "guild") and channel.guild and channel.guild.me:
+                permissions = channel.permissions_for(channel.guild.me)
+                if not (permissions.send_messages and permissions.embed_links):
+                    channel = None  # บังคับให้เป็น None เพื่อให้ข้ามการทำงานไปที่ continue
+
             if not channel: continue
 
             guild = channel.guild if hasattr(channel, "guild") else None
