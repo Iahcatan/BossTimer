@@ -9,6 +9,7 @@ import traceback
 import logging
 import re
 import uuid
+import sqlite3
 import aiohttp
 from datetime import datetime, timedelta, timezone
 import discord
@@ -30,6 +31,57 @@ logging.getLogger('discord.voice_state').setLevel(logging.WARNING)
 # ==========================================
 schedule_lock = threading.Lock()
 is_bot_ready = False
+
+# ==========================================
+# 🗄️ Database Utility (SQLite Persistent Storage)
+# ==========================================
+DB_FILE = "bot_database.db"
+
+def init_db():
+    """เริ่มต้นสร้างตาราง Database สำหรับเก็บสถานะบอทหากยังไม่มี"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+        print("✅ บันทึก/เชื่อมต่อ Database (SQLite) สำเร็จ")
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดในการตั้งค่า Database: {e}")
+
+def set_db_value(key: str, value):
+    """บันทึกข้อมูลแบบ Key-Value ลงใน Database"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        val_str = json.dumps(value, ensure_ascii=False)
+        cursor.execute(
+            "INSERT INTO bot_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, val_str)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"❌ บันทึกข้อมูลลง Database ไม่สำเร็จ ({key}): {e}")
+
+def get_db_value(key: str, default=None):
+    """ดึงข้อมูลจาก Database ผ่าน Key"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM bot_settings WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return json.loads(row[0])
+    except Exception as e:
+        print(f"❌ ดึงข้อมูลจาก Database ไม่สำเร็จ ({key}): {e}")
+    return default
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -350,7 +402,7 @@ def has_allowed_role():
     return app_commands.check(predicate)
 
 # ==========================================
-# 💾 5. ระบบบันทึก/โหลดไฟล์ JSON & Helper Sync GitHub (อ่าน + เขียน)
+# 💾 5. ระบบบันทึก/โหลดไฟล์ JSON & SQLite Persistent Storage
 # ==========================================
 def save_json_local(filename: str, data: dict):
     try:
@@ -427,33 +479,56 @@ async def fetch_github_file(filename: str) -> dict:
     
     return {}
 
+async def load_bot_settings():
+    """โหลดค่าสถานะการตั้งค่าจาก Database เมื่อเริ่มระบบ"""
+    global bf_notify_enabled, ppl_notify_enabled
+    bf_notify_enabled = get_db_value("bf_notify_enabled", True)
+    ppl_notify_enabled = get_db_value("ppl_notify_enabled", True)
+    print("✅ โหลดสถานะการแจ้งเตือนจาก Database เรียบร้อย")
+
 async def save_vip_config():
+    await asyncio.to_thread(set_db_value, "vip_config", vip_config)
     await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, vip_config)
     await sync_github_file(VIP_CONFIG_FILE, vip_config, "Auto-update vip_config.json via Discord Bot")
 
 async def load_vip_config():
     global vip_config
+    db_data = get_db_value("vip_config", None)
+    if db_data is not None:
+        vip_config = db_data
+        return
+
     data = await fetch_github_file(VIP_CONFIG_FILE)
     if not data and os.path.exists(VIP_CONFIG_FILE):
         try:
             with open(VIP_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception: pass
-    if data: vip_config = data
+    if data: 
+        vip_config = data
+        set_db_value("vip_config", vip_config)
 
 async def save_live_config():
+    await asyncio.to_thread(set_db_value, "live_message_config", live_message_config)
     await asyncio.to_thread(save_json_local, LIVE_CONFIG_FILE, live_message_config)
     await sync_github_file(LIVE_CONFIG_FILE, live_message_config, "Auto-update live_config.json via Discord Bot")
 
 async def load_live_config():
     global live_message_config
+    db_data = get_db_value("live_message_config", None)
+    if db_data is not None:
+        live_message_config = db_data
+        return
+
     data = await fetch_github_file(LIVE_CONFIG_FILE)
     if not data and os.path.exists(LIVE_CONFIG_FILE):
         try:
             with open(LIVE_CONFIG_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception: pass
-    if data: live_message_config = data
+    if data: 
+        live_message_config = data
+        set_db_value("live_message_config", live_message_config)
 
 async def save_custom_bosses_to_github():
     custom_data = {}
@@ -466,16 +541,19 @@ async def save_custom_bosses_to_github():
                 "notice_text": ADVANCE_NOTICE_TEXT[name]
             }
 
+    await asyncio.to_thread(set_db_value, "custom_bosses", custom_data)
     await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, custom_data)
     await sync_github_file(CUSTOM_BOSSES_FILE, custom_data, "Auto-update custom_bosses.json via Discord Bot")
 
 async def load_custom_bosses():
-    custom_data = await fetch_github_file(CUSTOM_BOSSES_FILE)
-    if not custom_data and os.path.exists(CUSTOM_BOSSES_FILE):
-        try:
-            with open(CUSTOM_BOSSES_FILE, "r", encoding="utf-8") as f:
-                custom_data = json.load(f)
-        except Exception: pass
+    custom_data = get_db_value("custom_bosses", None)
+    if custom_data is None:
+        custom_data = await fetch_github_file(CUSTOM_BOSSES_FILE)
+        if not custom_data and os.path.exists(CUSTOM_BOSSES_FILE):
+            try:
+                with open(CUSTOM_BOSSES_FILE, "r", encoding="utf-8") as f:
+                    custom_data = json.load(f)
+            except Exception: pass
 
     if custom_data:
         for boss_name, data in custom_data.items():
@@ -483,6 +561,7 @@ async def load_custom_bosses():
             BOSS_CD_TEXT[boss_name] = data["cd_text"]
             ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
             ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
+        set_db_value("custom_bosses", custom_data)
 
 async def save_boss_data():
     with schedule_lock:
@@ -494,17 +573,20 @@ async def save_boss_data():
                 "notified_advance": data.get("notified_advance", False)
             }
     
+    await asyncio.to_thread(set_db_value, "boss_schedule", data_to_save)
     await asyncio.to_thread(save_json_local, DATA_FILE, data_to_save)
     await sync_github_file(DATA_FILE, data_to_save, "Auto-update boss_data.json via Discord Bot")
 
 async def load_boss_data():
     global boss_schedule
-    saved_data = await fetch_github_file(DATA_FILE)
-    if not saved_data and os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                saved_data = json.load(f)
-        except Exception: pass
+    saved_data = get_db_value("boss_schedule", None)
+    if saved_data is None:
+        saved_data = await fetch_github_file(DATA_FILE)
+        if not saved_data and os.path.exists(DATA_FILE):
+            try:
+                with open(DATA_FILE, "r", encoding="utf-8") as f:
+                    saved_data = json.load(f)
+            except Exception: pass
 
     if saved_data:
         with schedule_lock:
@@ -517,6 +599,7 @@ async def load_boss_data():
                     "channel_id": data.get("channel_id"),
                     "notified_advance": data.get("notified_advance", False)
                 }
+        set_db_value("boss_schedule", saved_data)
         print(f"✅ โหลดตารางบอสสำเร็จ {len(boss_schedule)} รายการ")
 
 # ==========================================
@@ -704,7 +787,11 @@ async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
     print(f"🔊 ใช้ FFmpeg จากตำแหน่ง: {get_ffmpeg_path()}")
 
-    # โหลดข้อมูลแบบ Async จาก GitHub / Local
+    # เริ่มต้นเชื่อมต่อและสร้าง Database SQLite
+    init_db()
+
+    # โหลดข้อมูลแบบ Async จาก Database / GitHub / Local
+    await load_bot_settings()
     await load_custom_bosses()
     await load_boss_data()
     await load_live_config()
@@ -994,6 +1081,8 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
         msg = "🔴 **ปิด** ระบบแจ้งเตือน Battlefield (BF) เรียบร้อยแล้ว!"
         color = discord.Color.red()
 
+    set_db_value("bf_notify_enabled", bf_notify_enabled)
+
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือน BF", description=msg, color=color)
     await interaction.followup.send(embed=embed)
     await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือน BF (/notify)", f"เปลี่ยนสถานะเป็น: `{status.value.upper()}`", color)
@@ -1021,6 +1110,8 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
         ppl_notify_enabled = False
         msg = "🔴 **ปิด** ระบบแจ้งเตือนต้อนรับสมาชิกเข้าห้องเสียงเรียบร้อยแล้ว!"
         color = discord.Color.red()
+
+    set_db_value("ppl_notify_enabled", ppl_notify_enabled)
 
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้องเสียง", description=msg, color=color)
     await interaction.followup.send(embed=embed)
