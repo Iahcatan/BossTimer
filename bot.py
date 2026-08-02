@@ -8,15 +8,19 @@ import time
 import shutil
 import traceback
 import logging
-import re  # 💡 เพิ่ม re สำหรับล้างตัวอักษรพิเศษและอีโมจิ
+import re
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask, render_template_string
 from waitress import serve
-import edge_tts  # เปลี่ยนจาก gTTS มาใช้ edge-tts เพื่อแก้ปัญหา 429 Too Many Requests
+import edge_tts
 import imageio_ffmpeg
+
+# 💡 เพิ่ม Library สำหรับรับเสียงเรียลไทม์ และ Google Cloud Speech-to-Text
+from google.cloud import speech
+from discord.ext import voice_recv
 
 # ==========================================
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
@@ -144,7 +148,7 @@ LIVE_CONFIG_FILE = "live_config.json"
 VIP_CONFIG_FILE = "vip_config.json"
 
 TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti", "Admin"]
-BF_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]  # ยศสำหรับแท็กแจ้งเตือน BF
+BF_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
 
 LOG_CHANNEL_NAME = "boss-logs"
 LIVE_CHANNEL_NAME = "boss-schedule"
@@ -152,14 +156,21 @@ LIVE_CHANNEL_NAME = "boss-schedule"
 voice_empty_start = {}
 voice_locks = {}
 
-# ตัวแปรสถานะการแจ้งเตือน BF และการแจ้งเตือนเข้าห้องเสียง
 bf_notify_enabled = True
-ppl_notify_enabled = True  # สถานะสำหรับควบคุมการแจ้งเตือนเสียงสมาชิกเข้าห้องแบบปกติ
-vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""} # ข้อมูลทักทายคนพิเศษ
+ppl_notify_enabled = True
+vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
 last_bf_notified_hour = -1
 
-# ตั้งค่าเสียงอ่านภาษาไทยของ Microsoft Edge TTS
 VOICE_THAI = "th-TH-PremwadeeNeural"
+
+# 🎙️ ตั้งค่า Google Cloud Speech Client & สถานะรับคำสั่งเสียง
+try:
+    speech_client = speech.SpeechClient()
+except Exception as e:
+    print(f"⚠️ ไม่สามารถตั้งค่า Google Cloud Speech Client ได้: {e}")
+    speech_client = None
+
+user_listening_state = {}  # {user_id: timestamp_last_wake_word}
 
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
@@ -517,7 +528,7 @@ def save_boss_data():
             payload = {"message": "Auto-update boss_data.json via Discord Bot", "content": content_b64}
             if sha: payload["sha"] = sha
 
-            put_res = requests.put(url, headers=headers, json=payload)
+            put_res = requests.put(url, requests=headers, json=payload)
             if put_res.status_code in [200, 201]:
                 print("✅ อัปเดตข้อมูลตารางบอสขึ้น GitHub สำเร็จถาวร!")
         except Exception as e:
@@ -602,10 +613,8 @@ def get_ffmpeg_path():
 
 
 def clean_display_name(name: str) -> str:
-    """ฟังก์ชั่นทำความสะอาดชื่อสมาชิกและชื่อห้อง ลบอีโมจิและอักขระพิเศษ"""
     if not name:
         return "สมาชิก"
-    # กรองเอาเฉพาะ ตัวอักษรไทย อังกฤษ ตัวเลข และช่องว่าง
     cleaned = re.sub(r'[^\w\s\u0E00-\u0E7F]', '', name)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned if cleaned else "สมาชิก"
@@ -614,7 +623,6 @@ def clean_display_name(name: str) -> str:
 async def speak_in_guild(guild: discord.Guild, text: str):
     if not guild: return
 
-    # จัดทำระบบคิวเสียง (Queue) ด้วย Lock ต่อ Guild เพื่อให้พูดต่อกันทีละคน
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
 
@@ -632,7 +640,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             
             if target_vc:
                 try:
-                    vc = await target_vc.connect(reconnect=True)
+                    vc = await target_vc.connect(cls=voice_recv.VoiceRecvClient, reconnect=True)
                     should_disconnect = True
                     await asyncio.sleep(0.5)
                 except Exception as e:
@@ -642,11 +650,9 @@ async def speak_in_guild(guild: discord.Guild, text: str):
                 print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
                 return
 
-        # สร้างชื่อไฟล์ TTS แยกเฉพาะคิวด้วย Timestamp เพื่อป้องกันชื่อไฟล์ชนกัน
         tts_filename = f"temp_tts_{guild.id}_{int(time.time() * 1000)}.mp3"
         
         try:
-            # 💡 [ครอบ try...except ช่วงแปลงเสียง TTS]
             try:
                 communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-30%", pitch="+20Hz")
                 await communicate.save(tts_filename)
@@ -685,7 +691,6 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             traceback.print_exc()
 
         finally:
-            # ✅ แก้ไขจุดนี้: หากบอทเพิ่งเข้ามาเพื่อพูด (should_disconnect = True) ให้ตัดสายออกจากห้องทันทีเมื่อพูดจบ
             if should_disconnect and vc and vc.is_connected():
                 await asyncio.sleep(0.5)
                 try:
@@ -700,26 +705,175 @@ async def speak_in_guild(guild: discord.Guild, text: str):
                     pass
 
 # ==========================================
+# 🎙️ 6.1 Voice Command Receiver & Google STT Integration
+# ==========================================
+
+async def process_voice_kill_command(guild: discord.Guild, user: discord.Member, text: str):
+    """ฟังก์ชันประมวลผลคำสั่ง /kill จากเสียงพูด"""
+    text_clean = text.lower().strip()
+    
+    # ลบคำสั่งนำหน้า เช่น "คิล" หรือ "kill"
+    command_body = re.sub(r'^(คิล|kill)\s*', '', text_clean)
+    parts = command_body.split()
+
+    if not parts:
+        return
+
+    raw_boss_input = parts[0]
+    time_input = " ".join(parts[1:]) if len(parts) > 1 else None
+
+    # จับคู่ชื่อบอสจากคำอ่านภาษาไทยหรือชื่อภาษาอังกฤษ
+    matched_boss_key = None
+    for key, pronunciation in BOSS_PRONUNCIATION.items():
+        if raw_boss_input in pronunciation.lower() or raw_boss_input in key.lower():
+            matched_boss_key = key
+            break
+
+    if not matched_boss_key:
+        for key in BOSS_RESPAWN_TIMES.keys():
+            if raw_boss_input in key.lower():
+                matched_boss_key = key
+                break
+
+    if not matched_boss_key:
+        print(f"⚠️ ไม่พบชื่อบอสจากเสียง: {raw_boss_input}")
+        return
+
+    now = datetime.now(TZ_THAI)
+    boss_died_at = now
+
+    # แปลงเวลาจากการพูด เช่น "14 30" หรือ "14:30"
+    if time_input:
+        digits = re.findall(r'\d+', time_input)
+        if len(digits) >= 2:
+            hh, mm = int(digits[0]), int(digits[1])
+            try:
+                boss_died_at = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                if boss_died_at > now:
+                    boss_died_at -= timedelta(days=1)
+            except ValueError:
+                boss_died_at = now
+
+    next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[matched_boss_key]
+
+    target_channel_id = live_message_config.get("channel_id")
+    if not target_channel_id and guild.text_channels:
+        target_channel_id = guild.text_channels[0].id
+
+    boss_schedule[matched_boss_key] = {
+        "spawn_time": next_spawn,
+        "channel_id": target_channel_id,
+        "notified_advance": False
+    }
+    save_boss_data()
+
+    thai_boss_name = BOSS_PRONUNCIATION.get(matched_boss_key, matched_boss_key)
+    formatted_spawn_time = next_spawn.strftime("%H:%M")
+
+    # 🔊 บอทส่งเสียงตอบกลับ: "บันทึกเวลา วาดังการ์ เรียบร้อยแล้วค่ะ เกิดอีกที 17:00 น."
+    speech_response = f"บันทึกเวลา {thai_boss_name} เรียบร้อยแล้วค่ะ เกิดอีกที {formatted_spawn_time} น."
+    asyncio.create_task(speak_in_guild(guild, speech_response))
+
+    # บันทึก Audit Log
+    log_details = f"🎙️ **สั่งงานด้วยเสียง (/kill):**\n👾 **บอส:** `{matched_boss_key}`\n⏱️ **เวลานับตาย:** {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 **เวลาเกิดถัดไป:** {next_spawn.strftime('%H:%M:%S น.')}"
+    await send_audit_log(guild, user, "บันทึกเวลาบอสตายด้วยเสียง", log_details, discord.Color.purple())
+
+
+async def handle_recognized_speech(guild: discord.Guild, user: discord.Member, transcript: str):
+    """จัดการข้อความที่แปลงได้จากเสียง"""
+    if not transcript: return
+    text = transcript.strip()
+    text_lower = text.lower()
+
+    print(f"🎙️ ได้ยินเสียงจาก [{user.display_name}]: {text}")
+
+    # คำเรียก Wake Word: "เฮ้ SKY NET", "สกายเน็ต", "sky net"
+    wake_words = ["เฮ้ sky net", "เฮ้ skynet", "เฮ้ สกายเน็ต", "สกายเน็ต", "sky net", "skynet"]
+    is_wake_word = any(w in text_lower for w in wake_words)
+
+    if is_wake_word:
+        # บันทึกเวลาที่เรียก Wake Word และขานรับ "ค่ะบอส"
+        user_listening_state[user.id] = time.time()
+        asyncio.create_task(speak_in_guild(guild, "ค่ะบอส"))
+        return
+
+    # เช็กว่าผู้ใช้เรียก "เฮ้ SKY NET" ไว้ภายใน 15 วินาทีก่อนหน้าหรือไม่
+    last_called = user_listening_state.get(user.id, 0)
+    if time.time() - last_called <= 15:
+        if text_lower.startswith("คิล") or text_lower.startswith("kill"):
+            # รีเซ็ตสถานะการฟัง
+            user_listening_state[user.id] = 0
+            await process_voice_kill_command(guild, user, text)
+
+
+class DiscordVoiceSink(voice_recv.AudioSink):
+    """ตัวดักจับ Stream เสียง PCM จาก Voice Channel ส่งไปแปลงภาษาที่ Google STT"""
+    def __init__(self, guild: discord.Guild):
+        super().__init__()
+        self.guild = guild
+        self.user_buffers = {}
+
+    def want_user(self, user):
+        return not user.bot
+
+    def write(self, user, data):
+        if not speech_client: return
+        if user.id not in self.user_buffers:
+            self.user_buffers[user.id] = bytearray()
+
+        # สะสม Buffer เสียง PCM 48kHz
+        self.user_buffers[user.id].extend(data.pcm)
+
+        # เมื่อสะสมเสียงได้ระดับหนึ่ง (ประมาณ 2-3 วินาที) นำไปแปลงข้อความ
+        if len(self.user_buffers[user.id]) >= 48000 * 2 * 2 * 2:
+            pcm_bytes = bytes(self.user_buffers[user.id])
+            self.user_buffers[user.id].clear()
+
+            asyncio.run_coroutine_threadsafe(
+                self.transcribe_and_process(user, pcm_bytes),
+                bot.loop
+            )
+
+    async def transcribe_and_process(self, user: discord.Member, pcm_data: bytes):
+        loop = asyncio.get_running_loop()
+        try:
+            # รันการแปลงเสียงผ่าน Google STT ใน Background Thread
+            def recognize():
+                audio = speech.RecognitionAudio(content=pcm_data)
+                config = speech.RecognitionConfig(
+                    encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
+                    sample_rate_hertz=48000,
+                    language_code="th-TH",
+                    speech_contexts=[speech.SpeechContext(phrases=["เฮ้ SKY NET", "สกายเน็ต", "คิล", "วาดังการ์", "เอเลเมนทัล ควีน"])]
+                )
+                response = speech_client.recognize(config=config, audio=audio)
+                for result in response.results:
+                    return result.alternatives[0].transcript
+                return ""
+
+            transcript = await loop.run_in_executor(None, recognize)
+            if transcript:
+                await handle_recognized_speech(self.guild, user, transcript)
+        except Exception as e:
+            print(f"❌ เกิดข้อผิดพลาดใน Google STT: {e}")
+
+# ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
 # ==========================================
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     global ppl_notify_enabled, vip_config
 
-    # 1. ไม่ทำงานหากคนที่ย้าย/เข้าห้องเป็นบอท
     if member.bot:
         return
 
-    # 2. เช็กว่าผู้ใช้เพิ่งกดเข้าห้องเสียง (หรือย้ายมาจากห้องอื่น)
     if before.channel != after.channel and after.channel is not None:
         
-        # 3. เช็กว่าเป็นคนพิเศษ (VIP) หรือไม่
         if vip_config.get("enabled", False) and member.id == vip_config.get("user_id"):
             greeting_text = vip_config.get("message", "")
             if greeting_text:
                 asyncio.create_task(speak_in_guild(member.guild, greeting_text))
         
-        # 4. หากไม่ใช่ VIP ให้เช็กการทักทายสมาชิกปกติ (ถ้าเปิด /ppl อยู่)
         elif ppl_notify_enabled:
             user_name = clean_display_name(member.display_name)
             channel_name = clean_display_name(after.channel.name)
@@ -769,7 +923,6 @@ async def check_bf_notifications():
 
     try:
         now = datetime.now(TZ_THAI)
-        # BF เปิดชั่วโมงคู่ (08:00, 10:00, 12:00...) เตือนตอนนาทีที่ 57 ของชั่วโมงคี่
         if now.hour % 2 == 1 and now.minute == 57:
             if last_bf_notified_hour != now.hour:
                 last_bf_notified_hour = now.hour
@@ -1102,7 +1255,7 @@ async def toggle_vip_greet(
             discord.Color.gold()
         )
 
-    else: # status.value == "off"
+    else:
         vip_config = {
             "enabled": False,
             "user_id": None,
@@ -1126,7 +1279,7 @@ async def toggle_vip_greet(
             discord.Color.red()
         )
 
-@bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
+@bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน และเริ่มดักฟังคำสั่งเสียง")
 async def join_voice(interaction: discord.Interaction):
     await interaction.response.defer()
     if not interaction.user.voice or not interaction.user.voice.channel:
@@ -1137,13 +1290,19 @@ async def join_voice(interaction: discord.Interaction):
     guild = interaction.guild
 
     if guild.voice_client is not None:
-        await guild.voice_client.move_to(voice_channel)
+        vc = guild.voice_client
+        await vc.move_to(voice_channel)
     else:
-        await voice_channel.connect()
+        # 🎙️ ใช้ VoiceRecvClient เพื่อรองรับการฟังเสียงเข้า
+        vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
+
+    # ผูกตัวดักจับ Stream เสียงเข้ากับ Voice Connection
+    if hasattr(vc, 'listen'):
+        vc.listen(DiscordVoiceSink(guild))
 
     embed = discord.Embed(
         title="🔊 เชื่อมต่อห้องเสียงสำเร็จ",
-        description=f"บอทเข้าสู่ห้องเสียง **{voice_channel.name}** เรียบร้อยแล้ว!\nระบบพร้อมส่งเสียงแจ้งเตือนภาษาไทยเมื่อถึงเวลาครับ (มีระบบ Auto-disconnect เมื่อไม่มีคนในห้อง 3 นาที)",
+        description=f"บอทเข้าสู่ห้องเสียง **{voice_channel.name}** เรียบร้อยแล้ว!\n🎙️ **พูด 'เฮ้ SKY NET' เพื่อเริ่มสั่งงานด้วยเสียงได้ทันที!**",
         color=discord.Color.green()
     )
     await interaction.followup.send(embed=embed)
