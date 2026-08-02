@@ -630,7 +630,7 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         
         try:
             try:
-                communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-30%", pitch="+20Hz")
+                communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-20%", pitch="+10Hz")
                 await communicate.save(tts_filename)
             except Exception as tts_err:
                 print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS ('{text}'): {tts_err}")
@@ -777,7 +777,7 @@ async def check_bf_notifications():
                         except Exception as e:
                             print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {e}")
                     
-                    spoken_text = "แบทเทิ้ลฟิลด์กำลังจะเริ่มในอีก 3 นาทีค่ะ"
+                    spoken_text = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
                     asyncio.create_task(speak_in_guild(guild, spoken_text))
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
