@@ -1,21 +1,22 @@
 import os
 import json
 import threading
-import requests
 import base64
 import asyncio
 import time
 import shutil
 import traceback
 import logging
-import re  # 💡 ใช้ re สำหรับล้างตัวอักษรพิเศษและอีโมจิ
+import re
+import uuid
+import aiohttp  # 💡 ใช้ aiohttp สำหรับ async HTTP requests เพื่อแก้ปัญหา Blocking I/O
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask, render_template_string
 from waitress import serve
-import edge_tts  # ใช้ edge-tts แทน gTTS ป้องกัน 429 Too Many Requests
+import edge_tts
 import imageio_ffmpeg
 
 # ==========================================
@@ -23,6 +24,11 @@ import imageio_ffmpeg
 # ==========================================
 logging.getLogger('discord.player').setLevel(logging.WARNING)
 logging.getLogger('discord.voice_state').setLevel(logging.WARNING)
+
+# ==========================================
+# 🔒 Thread Safety Lock สำหรับแชร์ข้อมูลระหว่าง Flask & Bot
+# ==========================================
+schedule_lock = threading.Lock()
 
 # ==========================================
 # 🌐 1. Web Dashboard & Server สำหรับ Render
@@ -102,7 +108,10 @@ def dashboard():
     now = datetime.now(TZ_THAI)
     boss_list = []
     
-    schedule_copy = boss_schedule.copy()
+    # 🔒 ใช้ schedule_lock เพื่อ Thread Safety เมื่ออ่านข้อมูล boss_schedule จาก Flask Thread
+    with schedule_lock:
+        schedule_copy = boss_schedule.copy()
+        
     sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
     
     for boss_name, data in sorted_bosses:
@@ -143,8 +152,14 @@ CUSTOM_BOSSES_FILE = "custom_bosses.json"
 LIVE_CONFIG_FILE = "live_config.json"
 VIP_CONFIG_FILE = "vip_config.json"
 
-TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti", "Admin"]
-BF_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]  # ยศสำหรับแท็กแจ้งเตือน BF
+# 🔑 เปลี่ยนจากการเช็คด้วย Role Name เป็น Role ID (ดึงจาก Env Variable หรือใช้ ID ค่าเริ่มต้น)
+DEFAULT_TARGET_ROLE_IDS = []  # ใส่ Role IDs ที่ต้องการ เช่น [123456789012345678, 987654321098765432]
+env_target_roles = os.environ.get("TARGET_ROLE_IDS", "")
+TARGET_ROLE_IDS = [int(r.strip()) for r in env_target_roles.split(",") if r.strip().isdigit()] if env_target_roles else DEFAULT_TARGET_ROLE_IDS
+
+DEFAULT_BF_ROLE_IDS = []
+env_bf_roles = os.environ.get("BF_ROLE_IDS", "")
+BF_ROLE_IDS = [int(r.strip()) for r in env_bf_roles.split(",") if r.strip().isdigit()] if env_bf_roles else DEFAULT_BF_ROLE_IDS
 
 LOG_CHANNEL_NAME = "boss-logs"
 LIVE_CHANNEL_NAME = "boss-schedule"
@@ -154,11 +169,13 @@ voice_locks = {}
 
 # ตัวแปรสถานะการแจ้งเตือน BF และการแจ้งเตือนเข้าห้องเสียง
 bf_notify_enabled = True
-ppl_notify_enabled = True  # สถานะสำหรับควบคุมการแจ้งเตือนเสียงสมาชิกเข้าห้องแบบปกติ
-vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""} # ข้อมูลทักทายคนพิเศษ
+ppl_notify_enabled = True
+vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
 last_bf_notified_hour = -1
 
-# ตั้งค่าเสียงอ่านภาษาไทยของ Microsoft Edge TTS
+# ตัวแปร Cache สำหรับลดการดึงข้อมูล Discord API ซ้ำซ้อน
+cached_live_message = None
+
 VOICE_THAI = "th-TH-PremwadeeNeural"
 
 BOSS_RESPAWN_TIMES = {
@@ -347,13 +364,15 @@ async def send_audit_log(guild: discord.Guild, user: discord.User, action: str, 
         print(f"❌ ส่ง Audit Log ไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🛡️ 4. Check สำหรับตรวจสอบสิทธิ์ผู้ใช้งาน
+# 🛡️ 4. Check สำหรับตรวจสอบสิทธิ์ผู้ใช้งาน (ใช้ Role ID / Permissions)
 # ==========================================
 def check_user_permission(member: discord.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
-    user_role_names = [role.name for role in member.roles]
-    return any(role_name in user_role_names for role_name in TARGET_ROLE_NAMES)
+    if not TARGET_ROLE_IDS:
+        return True  # หากไม่ได้ตั้งค่า TARGET_ROLE_IDS ไว้ จะอนุญาตให้ใช้งานได้
+    user_role_ids = [role.id for role in member.roles]
+    return any(role_id in TARGET_ROLE_IDS for role_id in user_role_ids)
 
 def has_allowed_role():
     async def predicate(interaction: discord.Interaction) -> bool:
@@ -363,34 +382,59 @@ def has_allowed_role():
     return app_commands.check(predicate)
 
 # ==========================================
-# 💾 5. ระบบบันทึก/โหลดไฟล์ JSON & GitHub
+# 💾 5. ระบบบันทึก/โหลดไฟล์ JSON & Helper Refactoring GitHub Sync
 # ==========================================
-def save_vip_config():
+def save_json_local(filename: str, data: dict):
+    """Helper function สำหรับเซฟ JSON ลง Local ดิสก์"""
     try:
-        with open(VIP_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(vip_config, f, ensure_ascii=False, indent=2)
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"❌ เซฟ vip_config ไม่สำเร็จ: {e}")
+        print(f"❌ เซฟ {filename} ลง local ไม่สำเร็จ: {e}")
 
+async def sync_github_file(filename: str, data: dict, commit_message: str):
+    """🛠️ Helper Function ซิงค์ข้อมูลขึ้น GitHub แบบ Non-blocking (aiohttp)"""
     github_token = os.environ.get("GITHUB_TOKEN")
     repo_name = os.environ.get("GITHUB_REPO")
 
-    if github_token and repo_name:
-        try:
-            url = f"https://api.github.com/repos/{repo_name}/contents/{VIP_CONFIG_FILE}"
-            headers = {"Authorization": f"token {github_token}"}
-            res = requests.get(url, headers=headers)
-            sha = res.json().get("sha", "") if res.status_code == 200 else None
+    if not (github_token and repo_name):
+        return
 
-            content_b64 = base64.b64encode(json.dumps(vip_config, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
-            payload = {"message": "Auto-update vip_config.json via Discord Bot", "content": content_b64}
-            if sha: payload["sha"] = sha
+    url = f"https://api.github.com/repos/{repo_name}/contents/{filename}"
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
 
-            put_res = requests.put(url, headers=headers, json=payload)
-            if put_res.status_code in [200, 201]:
-                print("✅ อัปเดต vip_config.json ขึ้น GitHub สำเร็จถาวร!")
-        except Exception as e:
-            print(f"❌ อัปเดต vip_config ขึ้น GitHub ไม่สำเร็จ: {e}")
+    try:
+        json_str = json.dumps(data, ensure_ascii=False, indent=2)
+        content_b64 = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+
+        async with aiohttp.ClientSession() as session:
+            sha = None
+            async with session.get(url, headers=headers) as res:
+                if res.status == 200:
+                    res_json = await res.json()
+                    sha = res_json.get("sha")
+
+            payload = {
+                "message": commit_message,
+                "content": content_b64
+            }
+            if sha:
+                payload["sha"] = sha
+
+            async with session.put(url, headers=headers, json=payload) as put_res:
+                if put_res.status in [200, 201]:
+                    print(f"✅ อัปเดต {filename} ขึ้น GitHub สำเร็จถาวร!")
+                else:
+                    print(f"❌ อัปเดต {filename} ขึ้น GitHub ไม่สำเร็จ (Status: {put_res.status})")
+    except Exception as e:
+        print(f"❌ อัปเดต {filename} ขึ้น GitHub ไม่สำเร็จ: {e}")
+
+async def save_vip_config():
+    await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, vip_config)
+    await sync_github_file(VIP_CONFIG_FILE, vip_config, "Auto-update vip_config.json via Discord Bot")
 
 def load_vip_config():
     global vip_config
@@ -401,32 +445,9 @@ def load_vip_config():
     except Exception as e:
         print(f"❌ โหลด vip_config ไม่สำเร็จ: {e}")
 
-def save_live_config():
-    try:
-        with open(LIVE_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(live_message_config, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ เซฟ live_config ไม่สำเร็จ: {e}")
-
-    github_token = os.environ.get("GITHUB_TOKEN")
-    repo_name = os.environ.get("GITHUB_REPO")
-
-    if github_token and repo_name:
-        try:
-            url = f"https://api.github.com/repos/{repo_name}/contents/{LIVE_CONFIG_FILE}"
-            headers = {"Authorization": f"token {github_token}"}
-            res = requests.get(url, headers=headers)
-            sha = res.json().get("sha", "") if res.status_code == 200 else None
-
-            content_b64 = base64.b64encode(json.dumps(live_message_config, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
-            payload = {"message": "Auto-update live_config.json via Discord Bot", "content": content_b64}
-            if sha: payload["sha"] = sha
-
-            put_res = requests.put(url, headers=headers, json=payload)
-            if put_res.status_code in [200, 201]:
-                print("✅ อัปเดต live_config.json ขึ้น GitHub สำเร็จถาวร!")
-        except Exception as e:
-            print(f"❌ อัปเดต live_config ขึ้น GitHub ไม่สำเร็จ: {e}")
+async def save_live_config():
+    await asyncio.to_thread(save_json_local, LIVE_CONFIG_FILE, live_message_config)
+    await sync_github_file(LIVE_CONFIG_FILE, live_message_config, "Auto-update live_config.json via Discord Bot")
 
 def load_live_config():
     global live_message_config
@@ -437,7 +458,7 @@ def load_live_config():
     except Exception as e:
         print(f"❌ โหลด live_config ไม่สำเร็จ: {e}")
 
-def save_custom_bosses_to_github():
+async def save_custom_bosses_to_github():
     custom_data = {}
     for name in list(BOSS_RESPAWN_TIMES.keys()):
         if name not in DEFAULT_BOSS_NAMES:
@@ -448,31 +469,8 @@ def save_custom_bosses_to_github():
                 "notice_text": ADVANCE_NOTICE_TEXT[name]
             }
 
-    try:
-        with open(CUSTOM_BOSSES_FILE, "w", encoding="utf-8") as f:
-            json.dump(custom_data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ เซฟลง local ไม่สำเร็จ: {e}")
-
-    github_token = os.environ.get("GITHUB_TOKEN")
-    repo_name = os.environ.get("GITHUB_REPO")
-
-    if github_token and repo_name:
-        try:
-            url = f"https://api.github.com/repos/{repo_name}/contents/{CUSTOM_BOSSES_FILE}"
-            headers = {"Authorization": f"token {github_token}"}
-            res = requests.get(url, headers=headers)
-            sha = res.json().get("sha", "") if res.status_code == 200 else None
-
-            content_b64 = base64.b64encode(json.dumps(custom_data, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
-            payload = {"message": "Auto-update custom_bosses.json via Discord Bot", "content": content_b64}
-            if sha: payload["sha"] = sha
-
-            put_res = requests.put(url, headers=headers, json=payload)
-            if put_res.status_code in [200, 201]:
-                print("✅ อัปเดตไฟล์ custom_bosses.json บน GitHub สำเร็จถาวร!")
-        except Exception as e:
-            print(f"❌ อัปเดตขึ้น GitHub ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, custom_data)
+    await sync_github_file(CUSTOM_BOSSES_FILE, custom_data, "Auto-update custom_bosses.json via Discord Bot")
 
 def load_custom_bosses():
     if not os.path.exists(CUSTOM_BOSSES_FILE): return
@@ -487,41 +485,18 @@ def load_custom_bosses():
     except Exception as e:
         print(f"❌ โหลดข้อมูล custom_bosses ไม่สำเร็จ: {e}")
 
-def save_boss_data():
-    global boss_schedule
-    data_to_save = {}
-    for boss_name, data in boss_schedule.items():
-        data_to_save[boss_name] = {
-            "spawn_time": data["spawn_time"].isoformat(),
-            "channel_id": data["channel_id"],
-            "notified_advance": data.get("notified_advance", False)
-        }
+async def save_boss_data():
+    with schedule_lock:
+        data_to_save = {}
+        for boss_name, data in boss_schedule.items():
+            data_to_save[boss_name] = {
+                "spawn_time": data["spawn_time"].isoformat(),
+                "channel_id": data["channel_id"],
+                "notified_advance": data.get("notified_advance", False)
+            }
     
-    try:
-        with open(DATA_FILE, "w", encoding="utf-8") as f:
-            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"❌ บันทึกข้อมูล Local ไม่สำเร็จ: {e}")
-
-    github_token = os.environ.get("GITHUB_TOKEN")
-    repo_name = os.environ.get("GITHUB_REPO")
-
-    if github_token and repo_name:
-        try:
-            url = f"https://api.github.com/repos/{repo_name}/contents/{DATA_FILE}"
-            headers = {"Authorization": f"token {github_token}"}
-            res = requests.get(url, headers=headers)
-            sha = res.json().get("sha", "") if res.status_code == 200 else None
-
-            content_b64 = base64.b64encode(json.dumps(data_to_save, ensure_ascii=False, indent=2).encode('utf-8')).decode('utf-8')
-            payload = {"message": "Auto-update boss_data.json via Discord Bot", "content": content_b64}
-            if sha: payload["sha"] = sha
-
-            put_res = requests.put(url, headers=headers, json=payload)
-            if put_res.status_code in [200, 201]:
-                print("✅ อัปเดตข้อมูลตารางบอสขึ้น GitHub สำเร็จถาวร!")
-        except Exception as e:
-            print(f"❌ อัปเดตข้อมูลตารางบอสขึ้น GitHub ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(save_json_local, DATA_FILE, data_to_save)
+    await sync_github_file(DATA_FILE, data_to_save, "Auto-update boss_data.json via Discord Bot")
 
 def load_boss_data():
     global boss_schedule
@@ -529,15 +504,16 @@ def load_boss_data():
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             saved_data = json.load(f)
-            for boss_name, data in saved_data.items():
-                st = datetime.fromisoformat(data["spawn_time"])
-                if st.tzinfo is None:
-                    st = st.replace(tzinfo=TZ_THAI)
-                boss_schedule[boss_name] = {
-                    "spawn_time": st,
-                    "channel_id": data.get("channel_id"),
-                    "notified_advance": data.get("notified_advance", False)
-                }
+            with schedule_lock:
+                for boss_name, data in saved_data.items():
+                    st = datetime.fromisoformat(data["spawn_time"])
+                    if st.tzinfo is None:
+                        st = st.replace(tzinfo=TZ_THAI)
+                    boss_schedule[boss_name] = {
+                        "spawn_time": st,
+                        "channel_id": data.get("channel_id"),
+                        "notified_advance": data.get("notified_advance", False)
+                    }
     except Exception as e:
         print(f"❌ โหลดข้อมูลไม่สำเร็จ: {e}")
 
@@ -563,10 +539,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         else:
             await interaction.response.send_message(embed=embed, ephemeral=True)
     elif isinstance(error, app_commands.CheckFailure):
-        roles_str = ", ".join([f"`{r}`" for r in TARGET_ROLE_NAMES])
         embed = discord.Embed(
             title="🚫 ปฏิเสธการเข้าถึง",
-            description=f"คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้!\nอนุญาตเฉพาะผู้ที่มีบทบาท: {roles_str} เท่านั้นครับ",
+            description="คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้!\nอนุญาตเฉพาะผู้ได้รับสิทธิ์หรือมีบทบาทที่กำหนดเท่านั้นครับ",
             color=discord.Color.red()
         )
         if interaction.response.is_done():
@@ -605,7 +580,6 @@ def clean_display_name(name: str) -> str:
     """ฟังก์ชั่นทำความสะอาดชื่อสมาชิกและชื่อห้อง ลบอีโมจิและอักขระพิเศษ"""
     if not name:
         return "สมาชิก"
-    # กรองเอาเฉพาะ ตัวอักษรไทย อังกฤษ ตัวเลข และช่องว่าง
     cleaned = re.sub(r'[^\w\s\u0E00-\u0E7F]', '', name)
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned if cleaned else "สมาชิก"
@@ -622,7 +596,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         vc = guild.voice_client
         should_disconnect = False
 
-        # หากไม่ได้ระบุห้องเป้าหมาย ให้ค้นหาห้องที่มีสมาชิกอยู่
         if target_channel is None:
             for channel in guild.voice_channels:
                 human_members = [m for m in channel.members if not m.bot]
@@ -634,7 +607,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
             print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
             return
 
-        # เชื่อมต่อเข้าห้องเสียงใหม่หรือย้ายห้องเสียงหากเชื่อมต่ออยู่อีกห้อง
         if not vc or not vc.is_connected():
             try:
                 vc = await target_channel.connect(reconnect=True)
@@ -652,8 +624,9 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
                     print(f"❌ ย้ายห้องเสียงไม่สำเร็จ: {e}")
                     return
 
-        # สร้างชื่อไฟล์ TTS แยกเฉพาะคิวด้วย Timestamp เพื่อป้องกันชื่อไฟล์ชนกัน
-        tts_filename = f"temp_tts_{guild.id}_{int(time.time() * 1000)}.mp3"
+        # 🔊 จัดการไฟล์ชั่วคราว TTS ด้วย UUID เพื่อป้องกันการชนกันของชื่อไฟล์
+        unique_id = uuid.uuid4().hex
+        tts_filename = f"temp_tts_{guild.id}_{unique_id}.mp3"
         
         try:
             try:
@@ -694,7 +667,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
             traceback.print_exc()
 
         finally:
-            # หากบอทเพิ่งเข้ามาเพื่อพูด (should_disconnect = True) ให้ตัดสายออกจากห้องเมื่อพูดจบ
             if should_disconnect and vc and vc.is_connected():
                 await asyncio.sleep(0.5)
                 try:
@@ -702,6 +674,7 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
             
+            # ลบไฟล์ชั่วคราวเสมอเมื่อจบการทำงาน
             if os.path.exists(tts_filename):
                 try:
                     os.remove(tts_filename)
@@ -715,20 +688,16 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     global ppl_notify_enabled, vip_config
 
-    # 1. ไม่ทำงานหากคนที่ย้าย/เข้าห้องเป็นบอท
     if member.bot:
         return
 
-    # 2. เช็กว่าผู้ใช้เพิ่งกดเข้าห้องเสียง (หรือย้ายมาจากห้องอื่น)
     if before.channel != after.channel and after.channel is not None:
         
-        # 3. เช็กว่าเป็นคนพิเศษ (VIP) หรือไม่
         if vip_config.get("enabled", False) and member.id == vip_config.get("user_id"):
             greeting_text = vip_config.get("message", "")
             if greeting_text:
                 asyncio.create_task(speak_in_guild(member.guild, greeting_text, target_channel=after.channel))
         
-        # 4. หากไม่ใช่ VIP ให้เช็กการทักทายสมาชิกปกติ (ถ้าเปิด /ppl อยู่)
         elif ppl_notify_enabled:
             user_name = clean_display_name(member.display_name)
             channel_name = clean_display_name(after.channel.name)
@@ -778,7 +747,6 @@ async def check_bf_notifications():
 
     try:
         now = datetime.now(TZ_THAI)
-        # BF เปิดชั่วโมงคู่ (08:00, 10:00, 12:00...) เตือนตอนนาทีที่ 57 ของชั่วโมงคี่
         if now.hour % 2 == 1 and now.minute == 57:
             if last_bf_notified_hour != now.hour:
                 last_bf_notified_hour = now.hour
@@ -788,8 +756,9 @@ async def check_bf_notifications():
                 
                 for guild in bot.guilds:
                     mentions = []
-                    for role_name in BF_ROLE_NAMES:
-                        role = discord.utils.get(guild.roles, name=role_name)
+                    # แท็กยศด้วย Role ID
+                    for role_id in BF_ROLE_IDS:
+                        role = guild.get_role(role_id)
                         if role: mentions.append(role.mention)
                     mention_target = " ".join(mentions) if mentions else ""
 
@@ -819,7 +788,10 @@ async def check_boss_notifications():
         now = datetime.now(TZ_THAI)
         changed = False
         
-        for boss_name, data in list(boss_schedule.items()):
+        with schedule_lock:
+            schedule_copy = boss_schedule.copy()
+        
+        for boss_name, data in list(schedule_copy.items()):
             spawn_time = data["spawn_time"]
             channel_id = data.get("channel_id")
             notified_advance = data.get("notified_advance", False)
@@ -836,8 +808,8 @@ async def check_boss_notifications():
             guild = channel.guild if hasattr(channel, "guild") else None
             mentions = []
             if guild:
-                for role_name in TARGET_ROLE_NAMES:
-                    role = discord.utils.get(guild.roles, name=role_name)
+                for role_id in TARGET_ROLE_IDS:
+                    role = guild.get_role(role_id)
                     if role: mentions.append(role.mention)
             
             mention_target = " ".join(mentions) if mentions else ""
@@ -865,7 +837,9 @@ async def check_boss_notifications():
                 except Exception as e:
                     print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
-                boss_schedule[boss_name]["notified_advance"] = True
+                with schedule_lock:
+                    if boss_name in boss_schedule:
+                        boss_schedule[boss_name]["notified_advance"] = True
                 changed = True
 
             elif time_left <= 0:
@@ -885,29 +859,36 @@ async def check_boss_notifications():
                 except Exception as e:
                     print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
-                del boss_schedule[boss_name]
+                with schedule_lock:
+                    if boss_name in boss_schedule:
+                        del boss_schedule[boss_name]
                 changed = True
 
         if changed:
-            save_boss_data()
+            await save_boss_data()
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'check_boss_notifications': {e}")
 
 @tasks.loop(seconds=60)
 async def update_live_embed():
+    """⚡ ปรับปรุงการอัปเดต Live Embed โดยใช้ Caching ป้องกันการเรียก fetch_message ซ้ำซ้อน"""
+    global cached_live_message
     try:
         if not live_message_config: return
         channel_id = live_message_config.get("channel_id")
         message_id = live_message_config.get("message_id")
+        if not channel_id or not message_id: return
 
-        channel = bot.get_channel(channel_id)
-        if not channel:
-            try: channel = await bot.fetch_channel(channel_id)
+        # ดึงข้อความและบันทึกใส่ Caching เฉพาะรอบแรกหรือเมื่อ Cache หลุด
+        if cached_live_message is None or cached_live_message.id != message_id:
+            channel = bot.get_channel(channel_id)
+            if not channel:
+                try: channel = await bot.fetch_channel(channel_id)
+                except Exception: return
+
+            try:
+                cached_live_message = await channel.fetch_message(message_id)
             except Exception: return
-
-        try:
-            message = await channel.fetch_message(message_id)
-        except Exception: return
 
         now = datetime.now(TZ_THAI)
         embed = discord.Embed(
@@ -916,10 +897,13 @@ async def update_live_embed():
             color=discord.Color.teal()
         )
 
-        if not boss_schedule:
+        with schedule_lock:
+            schedule_copy = boss_schedule.copy()
+
+        if not schedule_copy:
             embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
         else:
-            sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
+            sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
             for boss, data in sorted_bosses:
                 spawn_time = data["spawn_time"]
                 time_left_sec = (spawn_time - now).total_seconds()
@@ -943,11 +927,15 @@ async def update_live_embed():
 
         embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
         try:
-            await message.edit(embed=embed)
+            await cached_live_message.edit(embed=embed)
+        except discord.NotFound:
+            cached_live_message = None  # ล้าง Cache หากข้อความถูกลบ
         except discord.errors.HTTPException as e:
             if e.status == 429:
                 print("⚠️ เกิด Rate Limit ตอนอัปเดต Live Embed บอทจะข้ามไปอัปเดตรอบถัดไป")
                 await asyncio.sleep(10)
+            else:
+                cached_live_message = None
         except Exception as e:
             print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
     except Exception as e:
@@ -1032,7 +1020,6 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
     app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
 ])
 async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
-    # 🔒 ตรวจสอบว่าเป็นเจ้าของเซิร์ฟเวอร์ (Server Owner) หรือไม่
     if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
         embed = discord.Embed(
             title="🚫 ปฏิเสธการเข้าถึง",
@@ -1103,7 +1090,7 @@ async def toggle_vip_greet(
             "user_name": user.display_name,
             "message": message
         }
-        save_vip_config()
+        await save_vip_config()
 
         embed = discord.Embed(
             title="🌟 เปิดใช้งานระบบทักทายคนพิเศษ (VIP)",
@@ -1120,14 +1107,14 @@ async def toggle_vip_greet(
             discord.Color.gold()
         )
 
-    else: # status.value == "off"
+    else:
         vip_config = {
             "enabled": False,
             "user_id": None,
             "user_name": "",
             "message": ""
         }
-        save_vip_config()
+        await save_vip_config()
 
         embed = discord.Embed(
             title="⚙️ ปิดระบบทักทายคนพิเศษ (VIP)",
@@ -1241,12 +1228,14 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
     next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[matched_name]
 
-    boss_schedule[matched_name] = {
-        "spawn_time": next_spawn,
-        "channel_id": interaction.channel_id,
-        "notified_advance": False
-    }
-    save_boss_data()
+    # 🔒 ใช้ schedule_lock เมื่อเพิ่ม/แก้ไขข้อมูลลง boss_schedule
+    with schedule_lock:
+        boss_schedule[matched_name] = {
+            "spawn_time": next_spawn,
+            "channel_id": interaction.channel_id,
+            "notified_advance": False
+        }
+    await save_boss_data()
 
     discord_time_str = f"**{next_spawn.strftime('%H:%M:%S น.')}**"
 
@@ -1304,7 +1293,7 @@ async def add_boss(
     ADVANCE_NOTICE_SECONDS[matched_name] = notice_minutes * 60
     ADVANCE_NOTICE_TEXT[matched_name] = f"{notice_minutes} นาที"
 
-    save_custom_bosses_to_github()
+    await save_custom_bosses_to_github()
 
     embed = discord.Embed(title="✅ เพิ่ม/แก้ไขบอสสำเร็จ", color=discord.Color.green())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
@@ -1324,14 +1313,17 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
     await interaction.response.defer()
 
     matched_key = None
-    for k in boss_schedule.keys():
-        if k.lower() == boss_name.lower():
-            matched_key = k
-            break
+    with schedule_lock:
+        for k in boss_schedule.keys():
+            if k.lower() == boss_name.lower():
+                matched_key = k
+                break
+
+        if matched_key:
+            del boss_schedule[matched_key]
 
     if matched_key:
-        del boss_schedule[matched_key]
-        save_boss_data()
+        await save_boss_data()
         
         embed = discord.Embed(
             title="🗑️ ลบบอสสำเร็จ",
@@ -1349,7 +1341,10 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
 async def boss_status(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    if not boss_schedule:
+    with schedule_lock:
+        schedule_copy = boss_schedule.copy()
+
+    if not schedule_copy:
         embed = discord.Embed(
             title="📜 ตารางเวลาบอส",
             description="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ\nใช้คำสั่ง `/kill [ชื่อบอส]` เพื่อเริ่มบันทึกเวลาได้เลยครับ",
@@ -1365,7 +1360,7 @@ async def boss_status(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
 
-    sorted_bosses = sorted(boss_schedule.items(), key=lambda x: x[1]["spawn_time"])
+    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
     for boss, data in sorted_bosses:
         spawn_time = data["spawn_time"]
         time_left_sec = (spawn_time - now).total_seconds()
@@ -1405,12 +1400,13 @@ async def set_live(interaction: discord.Interaction):
 
     msg = await interaction.followup.send(embed=embed)
 
-    global live_message_config
+    global live_message_config, cached_live_message
     live_message_config = {
         "channel_id": interaction.channel_id,
         "message_id": msg.id
     }
-    save_live_config()
+    cached_live_message = msg  # ตั้งค่า Cache ล่วงหน้าทันทีที่สร้าง
+    await save_live_config()
 
     log_details = f"📌 **ตั้งค่า Live Embed ในช่อง:** <#{interaction.channel_id}>\nMessage ID: `{msg.id}`"
     await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", log_details, discord.Color.teal())
