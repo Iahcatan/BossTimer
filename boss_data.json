@@ -7,6 +7,6 @@
   "Yu": {
     "spawn_time": "2026-08-03T01:01:00+07:00",
     "channel_id": 1526638825198059620,
-    "notified_advance": false
+    "notified_advance": true
   }
 }
