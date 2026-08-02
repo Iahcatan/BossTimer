@@ -1022,8 +1022,17 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
     app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
     app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
 ])
-@has_allowed_role()
 async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
+    # 🔒 ตรวจสอบว่าเป็นเจ้าของเซิร์ฟเวอร์ (Server Owner) หรือไม่
+    if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
+        embed = discord.Embed(
+            title="🚫 ปฏิเสธการเข้าถึง",
+            description="คำสั่งนี้อนุญาตเฉพาะ **เจ้าของเซิร์ฟเวอร์ (Server Owner)** เท่านั้นครับ!",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
     await interaction.response.defer()
     global ppl_notify_enabled
 
