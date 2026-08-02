@@ -8,14 +8,14 @@ import time
 import shutil
 import traceback
 import logging
-import re  # 💡 เพิ่ม re สำหรับล้างตัวอักษรพิเศษและอีโมจิ
+import re  # 💡 ใช้ re สำหรับล้างตัวอักษรพิเศษและอีโมจิ
 from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask, render_template_string
 from waitress import serve
-import edge_tts  # เปลี่ยนจาก gTTS มาใช้ edge-tts เพื่อแก้ปัญหา 429 Too Many Requests
+import edge_tts  # ใช้ edge-tts แทน gTTS ป้องกัน 429 Too Many Requests
 import imageio_ffmpeg
 
 # ==========================================
@@ -611,7 +611,7 @@ def clean_display_name(name: str) -> str:
     return cleaned if cleaned else "สมาชิก"
 
 
-async def speak_in_guild(guild: discord.Guild, text: str):
+async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discord.VoiceChannel = None):
     if not guild: return
 
     # จัดทำระบบคิวเสียง (Queue) ด้วย Lock ต่อ Guild เพื่อให้พูดต่อกันทีละคน
@@ -622,31 +622,40 @@ async def speak_in_guild(guild: discord.Guild, text: str):
         vc = guild.voice_client
         should_disconnect = False
 
-        if not vc or not vc.is_connected():
-            target_vc = None
+        # หากไม่ได้ระบุห้องเป้าหมาย ให้ค้นหาห้องที่มีสมาชิกอยู่
+        if target_channel is None:
             for channel in guild.voice_channels:
                 human_members = [m for m in channel.members if not m.bot]
                 if len(human_members) > 0:
-                    target_vc = channel
+                    target_channel = channel
                     break
-            
-            if target_vc:
+
+        if not target_channel:
+            print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
+            return
+
+        # เชื่อมต่อเข้าห้องเสียงใหม่หรือย้ายห้องเสียงหากเชื่อมต่ออยู่อีกห้อง
+        if not vc or not vc.is_connected():
+            try:
+                vc = await target_channel.connect(reconnect=True)
+                should_disconnect = True
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                print(f"❌ เชื่อมต่อห้องเสียงไม่สำเร็จ: {e}")
+                return
+        else:
+            if vc.channel != target_channel:
                 try:
-                    vc = await target_vc.connect(reconnect=True)
-                    should_disconnect = True
+                    await vc.move_to(target_channel)
                     await asyncio.sleep(0.5)
                 except Exception as e:
-                    print(f"❌ เชื่อมต่อห้องเสียงไม่สำเร็จ: {e}")
+                    print(f"❌ ย้ายห้องเสียงไม่สำเร็จ: {e}")
                     return
-            else:
-                print("⚠️ ไม่พบห้องเสียงที่มีคนอยู่ บอทจึงไม่ได้เข้าเตือนด้วยเสียง")
-                return
 
         # สร้างชื่อไฟล์ TTS แยกเฉพาะคิวด้วย Timestamp เพื่อป้องกันชื่อไฟล์ชนกัน
         tts_filename = f"temp_tts_{guild.id}_{int(time.time() * 1000)}.mp3"
         
         try:
-            # 💡 [ครอบ try...except ช่วงแปลงเสียง TTS]
             try:
                 communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-30%", pitch="+20Hz")
                 await communicate.save(tts_filename)
@@ -685,7 +694,7 @@ async def speak_in_guild(guild: discord.Guild, text: str):
             traceback.print_exc()
 
         finally:
-            # ✅ แก้ไขจุดนี้: หากบอทเพิ่งเข้ามาเพื่อพูด (should_disconnect = True) ให้ตัดสายออกจากห้องทันทีเมื่อพูดจบ
+            # หากบอทเพิ่งเข้ามาเพื่อพูด (should_disconnect = True) ให้ตัดสายออกจากห้องเมื่อพูดจบ
             if should_disconnect and vc and vc.is_connected():
                 await asyncio.sleep(0.5)
                 try:
@@ -717,7 +726,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         if vip_config.get("enabled", False) and member.id == vip_config.get("user_id"):
             greeting_text = vip_config.get("message", "")
             if greeting_text:
-                asyncio.create_task(speak_in_guild(member.guild, greeting_text))
+                asyncio.create_task(speak_in_guild(member.guild, greeting_text, target_channel=after.channel))
         
         # 4. หากไม่ใช่ VIP ให้เช็กการทักทายสมาชิกปกติ (ถ้าเปิด /ppl อยู่)
         elif ppl_notify_enabled:
@@ -725,7 +734,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             channel_name = clean_display_name(after.channel.name)
             greeting_text = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
             
-            asyncio.create_task(speak_in_guild(member.guild, greeting_text))
+            asyncio.create_task(speak_in_guild(member.guild, greeting_text, target_channel=after.channel))
 
 
 @bot.event
