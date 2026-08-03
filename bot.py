@@ -203,6 +203,7 @@ DATA_FILE = "boss_data.json"
 CUSTOM_BOSSES_FILE = "custom_bosses.json"
 LIVE_CONFIG_FILE = "live_config.json"
 VIP_CONFIG_FILE = "vip_config.json"
+SETTINGS_FILE = "bot_settings.json"
 
 DEFAULT_TARGET_ROLE_IDS = []
 env_target_roles = os.environ.get("TARGET_ROLE_IDS", "")
@@ -479,12 +480,48 @@ async def fetch_github_file(filename: str) -> dict:
     
     return {}
 
+async def save_bot_settings():
+    """บันทึกสถานะการตั้งค่าลงทั้ง SQLite, Local JSON และ GitHub เพื่อป้องกันข้อมูลลืมเมื่อบอท Restart"""
+    settings_data = {
+        "bf_notify_enabled": bf_notify_enabled,
+        "ppl_notify_enabled": ppl_notify_enabled
+    }
+    await asyncio.to_thread(set_db_value, "bf_notify_enabled", bf_notify_enabled)
+    await asyncio.to_thread(set_db_value, "ppl_notify_enabled", ppl_notify_enabled)
+    await asyncio.to_thread(save_json_local, SETTINGS_FILE, settings_data)
+    await sync_github_file(SETTINGS_FILE, settings_data, "Auto-update bot_settings.json via Discord Bot")
+
 async def load_bot_settings():
-    """โหลดค่าสถานะการตั้งค่าจาก Database เมื่อเริ่มระบบ"""
+    """โหลดค่าสถานะการตั้งค่าจาก Database / GitHub เมื่อเริ่มระบบ"""
     global bf_notify_enabled, ppl_notify_enabled
-    bf_notify_enabled = get_db_value("bf_notify_enabled", True)
-    ppl_notify_enabled = get_db_value("ppl_notify_enabled", True)
-    print("✅ โหลดสถานะการแจ้งเตือนจาก Database เรียบร้อย")
+    
+    # 1. ลองโหลดจาก Database ในเครื่องก่อน
+    db_bf = get_db_value("bf_notify_enabled", None)
+    db_ppl = get_db_value("ppl_notify_enabled", None)
+    
+    if db_bf is not None and db_ppl is not None:
+        bf_notify_enabled = db_bf
+        ppl_notify_enabled = db_ppl
+        print("✅ โหลดสถานะการแจ้งเตือนจาก Database เรียบร้อย")
+        return
+
+    # 2. ถ้า DB หาย (เช่น บน Cloud/Render) ให้ดึงจาก GitHub / Local JSON
+    data = await fetch_github_file(SETTINGS_FILE)
+    if not data and os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception: pass
+
+    if data:
+        bf_notify_enabled = data.get("bf_notify_enabled", True)
+        ppl_notify_enabled = data.get("ppl_notify_enabled", True)
+        set_db_value("bf_notify_enabled", bf_notify_enabled)
+        set_db_value("ppl_notify_enabled", ppl_notify_enabled)
+        print("✅ โหลดสถานะการแจ้งเตือนจาก GitHub/JSON สำรองเรียบร้อย")
+    else:
+        bf_notify_enabled = get_db_value("bf_notify_enabled", True)
+        ppl_notify_enabled = get_db_value("ppl_notify_enabled", True)
 
 async def save_vip_config():
     await asyncio.to_thread(set_db_value, "vip_config", vip_config)
@@ -1081,7 +1118,7 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
         msg = "🔴 **ปิด** ระบบแจ้งเตือน Battlefield (BF) เรียบร้อยแล้ว!"
         color = discord.Color.red()
 
-    set_db_value("bf_notify_enabled", bf_notify_enabled)
+    await save_bot_settings()
 
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือน BF", description=msg, color=color)
     await interaction.followup.send(embed=embed)
@@ -1111,7 +1148,7 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
         msg = "🔴 **ปิด** ระบบแจ้งเตือนต้อนรับสมาชิกเข้าห้องเสียงเรียบร้อยแล้ว!"
         color = discord.Color.red()
 
-    set_db_value("ppl_notify_enabled", ppl_notify_enabled)
+    await save_bot_settings()
 
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้องเสียง", description=msg, color=color)
     await interaction.followup.send(embed=embed)
