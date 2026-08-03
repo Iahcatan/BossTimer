@@ -1099,34 +1099,48 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     return choices[:25]
 
 # ==========================================
-# 🎛️ 8. Quick Actions (Discord Buttons & UI)
+# 🎛️ 8. Dynamic Boss Select & Quick Actions
 # ==========================================
 class BossSelect(discord.ui.Select):
-    def __init__(self):
-        # ดึงรายชื่อบอส 25 ตัวแรกมาแสดงใน Dropdown Menu
+    def __init__(self, boss_chunk: list, placeholder: str, custom_id: str, row: int):
         options = [
-            discord.SelectOption(label=boss, value=boss, default=(boss == "Wadangka"))
-            for boss in list(BOSS_RESPAWN_TIMES.keys())[:25]
+            discord.SelectOption(label=boss, value=boss)
+            for boss in boss_chunk
         ]
         super().__init__(
-            placeholder="เลือกบอสที่ต้องการ (ค่าเริ่มต้น: Wadangka)",
+            placeholder=placeholder,
             min_values=1,
             max_values=1,
             options=options,
-            custom_id="select_boss_quick"
+            custom_id=custom_id,
+            row=row
         )
 
     async def callback(self, interaction: discord.Interaction):
         self.view.selected_boss = self.values[0]
-        await interaction.response.send_message(f"🎯 เลือกบอส: **{self.values[0]}** เรียบร้อยแล้ว สามารถกดปุ่มสั่งการได้ทันที", ephemeral=True)
+        await interaction.response.send_message(
+            f"🎯 เลือกบอส: **{self.values[0]}** เรียบร้อยแล้ว สามารถกดปุ่มสั่งการด้านล่างได้ทันที", 
+            ephemeral=True
+        )
 
 class QuickActionsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.selected_boss = "Wadangka"
-        self.add_item(BossSelect())
+        
+        all_bosses = list(BOSS_RESPAWN_TIMES.keys())
+        self.selected_boss = all_bosses[0] if all_bosses else "Wadangka"
+        
+        chunk_size = 25
+        chunks = [all_bosses[i:i + chunk_size] for i in range(0, len(all_bosses), chunk_size)]
+        chunks = chunks[:4]  # จำกัด Dropdown ไม่เกิน 4 แถว เพื่อเว้นแถวที่ 4 ไว้ใส่ปุ่มกด
+        
+        for index, chunk in enumerate(chunks):
+            start_num = (index * chunk_size) + 1
+            end_num = start_num + len(chunk) - 1
+            placeholder = f"🔻 เลือกบอส (ลำดับ {start_num}-{end_num})"
+            self.add_item(BossSelect(chunk, placeholder, f"select_boss_quick_{index}", row=index))
 
-    @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick")
+    @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick", row=4)
     async def boss_killed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
             await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
@@ -1155,7 +1169,7 @@ class QuickActionsView(discord.ui.View):
         await interaction.followup.send(embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "กดปุ่มบอสตาย (Quick Action)", f"👾 บอส: `{boss_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
 
-    @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick")
+    @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=4)
     async def call_people_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
             await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
