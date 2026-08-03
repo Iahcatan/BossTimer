@@ -834,6 +834,9 @@ async def on_ready():
     await load_live_config()
     await load_vip_config()
 
+    # ลงทะเบียน Persistent View สำหรับปุ่ม Quick Actions
+    bot.add_view(QuickActionsView())
+
     await asyncio.sleep(3)
     try:
         synced = await bot.tree.sync()
@@ -1096,7 +1099,112 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     return choices[:25]
 
 # ==========================================
-# 🔊 8. Voice & Notify Commands
+# 🎛️ 8. Quick Actions (Discord Buttons & UI)
+# ==========================================
+class BossSelect(discord.ui.Select):
+    def __init__(self):
+        # ดึงรายชื่อบอส 25 ตัวแรกมาแสดงใน Dropdown Menu
+        options = [
+            discord.SelectOption(label=boss, value=boss, default=(boss == "Wadangka"))
+            for boss in list(BOSS_RESPAWN_TIMES.keys())[:25]
+        ]
+        super().__init__(
+            placeholder="เลือกบอสที่ต้องการ (ค่าเริ่มต้น: Wadangka)",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id="select_boss_quick"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_boss = self.values[0]
+        await interaction.response.send_message(f"🎯 เลือกบอส: **{self.values[0]}** เรียบร้อยแล้ว สามารถกดปุ่มสั่งการได้ทันที", ephemeral=True)
+
+class QuickActionsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.selected_boss = "Wadangka"
+        self.add_item(BossSelect())
+
+    @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick")
+    async def boss_killed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_user_permission(interaction.user):
+            await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        boss_name = self.selected_boss
+        now = datetime.now(TZ_THAI)
+        next_spawn = now + BOSS_RESPAWN_TIMES[boss_name]
+
+        with schedule_lock:
+            boss_schedule[boss_name] = {
+                "spawn_time": next_spawn,
+                "channel_id": interaction.channel_id,
+                "notified_advance": False
+            }
+        await save_boss_data()
+
+        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
+        embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
+        embed.add_field(name="⏱️ เวลาที่ตาย", value=now.strftime("%H:%M:%S น."), inline=True)
+        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[boss_name], inline=True)
+        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
+        embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {interaction.user.display_name}")
+
+        await interaction.followup.send(embed=embed)
+        await send_audit_log(interaction.guild, interaction.user, "กดปุ่มบอสตาย (Quick Action)", f"👾 บอส: `{boss_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
+
+    @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick")
+    async def call_people_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not check_user_permission(interaction.user):
+            await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        guild = interaction.guild
+
+        mentions = []
+        if guild:
+            for role_id in TARGET_ROLE_IDS:
+                role = guild.get_role(role_id)
+                if role: mentions.append(role.mention)
+
+        mention_target = " ".join(mentions) if mentions else "@everyone"
+
+        embed = discord.Embed(
+            title="🔔 เรียกสมาชิกคนลุยบอส!",
+            description=f"📢 {interaction.user.mention} เรียกสมาชิกลุยบอส **{self.selected_boss}** ด่วน!",
+            color=discord.Color.gold()
+        )
+        await interaction.followup.send(content=mention_target, embed=embed)
+
+        spoken_boss = BOSS_PRONUNCIATION.get(self.selected_boss, self.selected_boss)
+        spoken_text = f"เรียกคนลุยบอส {spoken_boss} ด่วนค่ะ"
+        if guild:
+            asyncio.create_task(speak_in_guild(guild, spoken_text))
+
+        await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{self.selected_boss}`", discord.Color.gold())
+
+@bot.tree.command(name="panel", description="ส่งข้อความ Interactive Embed พร้อมปุ่มกด Quick Actions ในช่องนี้")
+@has_allowed_role()
+async def send_quick_panel(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    embed = discord.Embed(
+        title="⚡ Quick Actions - แผงควบคุมเวลาบอส",
+        description="เลือกชื่อบอสจากเมนูด้านล่าง แล้วกดปุ่มสั่งการได้ทันทีโดยไม่ต้องพิมพ์คำสั่ง:\n\n"
+                    "• **⚔️ บอสตายแล้ว**: บันทึกเวลานับถอยหลังของบอสทันที\n"
+                    "• **🔔 เรียกคน**: แท็กยศคนลุยบอส + ส่งเสียง TTS ประกาศตามในห้องเสียง",
+        color=discord.Color.dark_purple()
+    )
+    embed.set_footer(text="ระบบปุ่มกดอัตโนมัติ 24/7 • Boss Control Panel")
+
+    view = QuickActionsView()
+    await interaction.followup.send(embed=embed, view=view)
+
+# ==========================================
+# 🔊 9. Voice & Notify Commands
 # ==========================================
 @bot.tree.command(name="notify", description="เปิดหรือปิดระบบแจ้งเตือนสงคราม Battlefield (BF)")
 @app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
@@ -1233,7 +1341,7 @@ async def disconnect_voice(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
 # ==========================================
-# ⚔️ 9. Boss Slash Commands
+# ⚔️ 10. Boss Slash Commands
 # ==========================================
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
 @app_commands.describe(
@@ -1424,7 +1532,7 @@ async def set_live(interaction: discord.Interaction):
     await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", f"📌 ช่อง: <#{interaction.channel_id}>\nMessage ID: `{msg.id}`", discord.Color.teal())
 
 # ==========================================
-# 🚀 10. Run Bot
+# 🚀 11. Run Bot
 # ==========================================
 if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
