@@ -1355,8 +1355,96 @@ async def disconnect_voice(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
 # ==========================================
-# ⚔️ 10. Boss Slash Commands
+# ⚔️ 10. Boss Slash Commands & Time Calculation Helper
 # ==========================================
+def generate_boss_time_summary():
+    """Helper คำนวณสรุปเวลาบอสที่เหลือทั้งหมด โดยเรียงตามลำดับเวลาเกิดจากน้อยไปมาก"""
+    now = datetime.now(TZ_THAI)
+    with schedule_lock:
+        schedule_copy = boss_schedule.copy()
+
+    if not schedule_copy:
+        return None, "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ"
+
+    # เรียงลำดับจากน้อยไปมาก (เวลาเกิดก่อนขึ้นก่อน)
+    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
+
+    embed = discord.Embed(
+        title="⌛ สรุปเวลาที่เหลือของบอสทุกตัว (เรียงจากน้อยไปมาก)",
+        description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`",
+        color=discord.Color.purple()
+    )
+
+    tts_lines = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
+
+    for boss, data in sorted_bosses:
+        spawn_time = data["spawn_time"]
+        time_left_sec = (spawn_time - now).total_seconds()
+        spoken_name = BOSS_PRONUNCIATION.get(boss, boss)
+
+        if time_left_sec <= 0:
+            time_left_str = "เกิดแล้ว!"
+            tts_lines.append(f"บอส {spoken_name} เกิดแล้วค่ะ")
+        else:
+            m, s = divmod(int(time_left_sec), 60)
+            h, m = divmod(m, 60)
+
+            parts = []
+            if h > 0:
+                parts.append(f"{h} ชม.")
+            if m > 0 or h > 0:
+                parts.append(f"{m} นาที")
+            parts.append(f"{s} วินาที")
+
+            time_left_str = f"อีก {' '.join(parts)}"
+
+            if h > 0:
+                tts_time = f"{h} ชั่วโมง {m} นาที"
+            elif m > 0:
+                tts_time = f"{m} นาที"
+            else:
+                tts_time = f"{s} วินาที"
+
+            tts_lines.append(f"บอส {spoken_name} เหลืออีก {tts_time}")
+
+        embed.add_field(
+            name=f"👾 {boss}",
+            value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**",
+            inline=False
+        )
+
+    tts_text = " ".join(tts_lines)
+    return embed, tts_text
+
+@bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
+async def boss_time_slash(interaction: discord.Interaction):
+    await interaction.response.defer()
+    embed, tts_text = generate_boss_time_summary()
+
+    if embed is None:
+        await interaction.followup.send(tts_text)
+        return
+
+    await interaction.followup.send(embed=embed)
+
+    target_channel = interaction.user.voice.channel if (isinstance(interaction.user, discord.Member) and interaction.user.voice) else None
+    asyncio.create_task(speak_in_guild(interaction.guild, tts_text, target_channel=target_channel))
+    await send_audit_log(interaction.guild, interaction.user, "เช็กเวลาบอสพร้อม TTS (/time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
+
+@bot.command(name="time")
+async def boss_time_prefix(ctx: commands.Context):
+    embed, tts_text = generate_boss_time_summary()
+
+    if embed is None:
+        await ctx.send(tts_text)
+        return
+
+    await ctx.send(embed=embed)
+
+    target_channel = ctx.author.voice.channel if (isinstance(ctx.author, discord.Member) and ctx.author.voice) else None
+    asyncio.create_task(speak_in_guild(ctx.guild, tts_text, target_channel=target_channel))
+    await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
+
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
 @app_commands.describe(
     boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
