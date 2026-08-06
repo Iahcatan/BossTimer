@@ -27,7 +27,7 @@
   "Twister": {
     "spawn_time": "2026-08-06T21:25:20+07:00",
     "channel_id": 1526638825198059620,
-    "notified_advance": false
+    "notified_advance": true
   },
   "Swirl Flame": {
     "spawn_time": "2026-08-06T21:30:20+07:00",
