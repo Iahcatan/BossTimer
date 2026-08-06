@@ -19,11 +19,6 @@
     "channel_id": 1526638825198059620,
     "notified_advance": false
   },
-  "Twister": {
-    "spawn_time": "2026-08-06T23:26:20+07:00",
-    "channel_id": 1526638825198059620,
-    "notified_advance": true
-  },
   "Swirl Flame": {
     "spawn_time": "2026-08-06T23:29:25+07:00",
     "channel_id": 1526638825198059620,
@@ -32,7 +27,7 @@
   "Maelstrom": {
     "spawn_time": "2026-08-06T23:30:44+07:00",
     "channel_id": 1526638825198059620,
-    "notified_advance": false
+    "notified_advance": true
   },
   "Wadangka": {
     "spawn_time": "2026-08-07T01:43:00+07:00",
