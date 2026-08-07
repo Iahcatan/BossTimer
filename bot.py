@@ -709,89 +709,85 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         voice_locks[guild.id] = asyncio.Lock()
 
     async with voice_locks[guild.id]:
-        vc = guild.voice_client
-        should_disconnect = False
-
-        if target_channel is None:
-            for channel in guild.voice_channels:
-                human_members = [m for m in channel.members if not m.bot]
-                if len(human_members) > 0:
-                    target_channel = channel
-                    break
-
-        if not target_channel:
-            return
-
-        if not vc or not vc.is_connected():
-            try:
-                vc = await target_channel.connect(reconnect=True)
-                should_disconnect = True
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                print(f"❌ เชื่อมต่อห้องเสียงไม่สำเร็จ: {e}")
-                return
+        # กำหนดรายการห้องเสียงที่จะเข้าไปพูด
+        if target_channel:
+            target_channels = [target_channel]
         else:
-            if vc.channel != target_channel:
-                try:
-                    await vc.move_to(target_channel)
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    print(f"❌ ย้ายห้องเสียงไม่สำเร็จ: {e}")
-                    return
+            # ค้นหาห้องเสียงทั้งหมดที่มีสมาชิก (ที่ไม่ใช่บอท) สถิตอยู่
+            target_channels = [
+                channel for channel in guild.voice_channels
+                if any(not m.bot for m in channel.members)
+            ]
+
+        if not target_channels:
+            return
 
         unique_id = uuid.uuid4().hex
         tts_filename = f"temp_tts_{guild.id}_{unique_id}.mp3"
-        
-        try:
-            try:
-                communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-20%", pitch="+10Hz")
-                await communicate.save(tts_filename)
-            except Exception as tts_err:
-                print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS ('{text}'): {tts_err}")
-                return
 
+        # แปลงข้อความ TTS เป็นไฟล์เสียงครั้งเดียวเพื่อใช้กับทุกห้อง
+        try:
+            communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-20%", pitch="+10Hz")
+            await communicate.save(tts_filename)
             if not os.path.exists(tts_filename) or os.path.getsize(tts_filename) == 0:
                 return
+        except Exception as tts_err:
+            print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS ('{text}'): {tts_err}")
+            return
 
-            if vc.is_playing():
-                vc.stop()
+        ffmpeg_executable = get_ffmpeg_path()
 
-            ffmpeg_executable = get_ffmpeg_path()
-            audio_source = discord.FFmpegPCMAudio(
-                tts_filename,
-                executable=ffmpeg_executable,
-                before_options="-loglevel error",
-                options="-vn"
-            )
+        # วนลูปเข้าไปพูดในทุกห้องเสียงที่มีสมาชิกอยู่
+        for channel in target_channels:
+            vc = guild.voice_client
+            try:
+                if not vc or not vc.is_connected():
+                    vc = await channel.connect(reconnect=True)
+                    await asyncio.sleep(0.5)
+                else:
+                    if vc.channel != channel:
+                        await vc.move_to(channel)
+                        await asyncio.sleep(0.5)
 
-            loop = asyncio.get_running_loop()
-            play_finished = asyncio.Event()
+                if vc.is_playing():
+                    vc.stop()
 
-            def after_playing(error):
-                if error:
-                    print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
-                loop.call_soon_threadsafe(play_finished.set)
+                audio_source = discord.FFmpegPCMAudio(
+                    tts_filename,
+                    executable=ffmpeg_executable,
+                    before_options="-loglevel error",
+                    options="-vn"
+                )
 
-            vc.play(audio_source, after=after_playing)
-            await play_finished.wait()
+                loop = asyncio.get_running_loop()
+                play_finished = asyncio.Event()
 
-        except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดในการเล่นเสียงพูด:")
-            traceback.print_exc()
+                def after_playing(error):
+                    if error:
+                        print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
+                    loop.call_soon_threadsafe(play_finished.set)
 
-        finally:
-            if should_disconnect and vc and vc.is_connected():
-                await asyncio.sleep(0.5)
-                try:
-                    await vc.disconnect()
-                except Exception as e:
-                    print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
-            
-            if os.path.exists(tts_filename):
-                try:
-                    os.remove(tts_filename)
-                except Exception:
-                    pass
+                vc.play(audio_source, after=after_playing)
+                await play_finished.wait()
+                await asyncio.sleep(0.5)  # พักครึ่งวินาทีก่อนย้ายไปห้องถัดไป
+
+            except Exception as e:
+                print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
+
+        # หลังพูดจบครบทุกห้องแล้ว ทำการตัดสายการเชื่อมต่อ
+        vc = guild.voice_client
+        if vc and vc.is_connected():
+            try:
+                await vc.disconnect()
+            except Exception as e:
+                print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
+
+        # ลบไฟล์เสียงชั่วคราว
+        if os.path.exists(tts_filename):
+            try:
+                os.remove(tts_filename)
+            except Exception:
+                pass
 
 # ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
