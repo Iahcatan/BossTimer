@@ -9,3 +9,4 @@ imageio-ffmpeg
 python-dotenv
 pytz
 pydub
+firebase-admin
