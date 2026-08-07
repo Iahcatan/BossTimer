@@ -20,6 +20,26 @@ from waitress import serve
 import edge_tts
 import imageio_ffmpeg
 
+# 🔥 Firebase Admin SDK Setup
+import firebase_admin
+from firebase_admin import credentials, db
+
+# ==========================================
+# 🔥 0. เชื่อมต่อ Firebase Realtime Database
+# ==========================================
+FIREBASE_KEY_PATH = "firebase-key.json"
+DATABASE_URL = "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
+
+if not firebase_admin._apps:
+    if os.path.exists(FIREBASE_KEY_PATH):
+        cred = credentials.Certificate(FIREBASE_KEY_PATH)
+        firebase_admin.initialize_app(cred, {
+            'databaseURL': DATABASE_URL
+        })
+        print("✅ เชื่อมต่อ Firebase Realtime Database สำเร็จ!")
+    else:
+        print(f"⚠️ ไม่พบไฟล์ {FIREBASE_KEY_PATH} ในโฟลเดอร์บอท! กรุณาตรวจสอบไฟล์ Service Account Key")
+
 # ==========================================
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
@@ -27,7 +47,7 @@ logging.getLogger('discord.player').setLevel(logging.WARNING)
 logging.getLogger('discord.voice_state').setLevel(logging.WARNING)
 
 # ==========================================
-# 🔒 Thread Safety Lock สำหรับแชร์ข้อมูลระหว่าง Flask & Bot
+# 🔒 Thread Safety Lock สำหรับแชร์ข้อมูล
 # ==========================================
 schedule_lock = threading.Lock()
 is_bot_ready = False
@@ -38,7 +58,6 @@ is_bot_ready = False
 DB_FILE = "bot_database.db"
 
 def init_db():
-    """เริ่มต้นสร้างตาราง Database สำหรับเก็บสถานะบอทหากยังไม่มี"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -55,7 +74,6 @@ def init_db():
         print(f"❌ เกิดข้อผิดพลาดในการตั้งค่า Database: {e}")
 
 def set_db_value(key: str, value):
-    """บันทึกข้อมูลแบบ Key-Value ลงใน Database"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -70,7 +88,6 @@ def set_db_value(key: str, value):
         print(f"❌ บันทึกข้อมูลลง Database ไม่สำเร็จ ({key}): {e}")
 
 def get_db_value(key: str, default=None):
-    """ดึงข้อมูลจาก Database ผ่าน Key"""
     try:
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -417,7 +434,7 @@ def has_allowed_role():
     return app_commands.check(predicate)
 
 # ==========================================
-# 💾 5. ระบบบันทึก/โหลดไฟล์ JSON & SQLite Persistent Storage
+# 💾 5. ระบบบันทึก/โหลดไฟล์ Firebase & Local Storage
 # ==========================================
 def save_json_local(filename: str, data: dict):
     try:
@@ -426,160 +443,148 @@ def save_json_local(filename: str, data: dict):
     except Exception as e:
         print(f"❌ เซฟ {filename} ลง local ไม่สำเร็จ: {e}")
 
-async def sync_github_file(filename: str, data: dict, commit_message: str):
-    github_token = os.environ.get("GITHUB_TOKEN")
-    repo_name = os.environ.get("GITHUB_REPO")
-
-    if not (github_token and repo_name):
-        return
-
-    url = f"https://api.github.com/repos/{repo_name}/contents/{filename}"
-    headers = {
-        "Authorization": f"token {github_token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
-
-    try:
-        json_str = json.dumps(data, ensure_ascii=False, indent=2)
-        content_b64 = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
-
-        async with aiohttp.ClientSession() as session:
-            sha = None
-            async with session.get(url, headers=headers) as res:
-                if res.status == 200:
-                    res_json = await res.json()
-                    sha = res_json.get("sha")
-
-            payload = {
-                "message": commit_message,
-                "content": content_b64
+async def save_boss_data():
+    """บันทึกตารางบอสลง Firebase Realtime Database และ Local"""
+    with schedule_lock:
+        data_to_save = {}
+        for boss_name, data in boss_schedule.items():
+            st = data["spawn_time"]
+            spawn_ms = int(st.timestamp() * 1000)
+            data_to_save[boss_name] = {
+                "spawn_time": st.isoformat(),
+                "spawnTimeMs": spawn_ms,
+                "channel_id": data.get("channel_id"),
+                "notified_advance": data.get("notified_advance", False),
+                "noticeMinutes": int(ADVANCE_NOTICE_SECONDS.get(boss_name, 300) / 60)
             }
-            if sha:
-                payload["sha"] = sha
-
-            async with session.put(url, headers=headers, json=payload) as put_res:
-                if put_res.status in [200, 201]:
-                    print(f"✅ อัปเดต {filename} ขึ้น GitHub สำเร็จถาวร!")
-                else:
-                    print(f"❌ อัปเดต {filename} ขึ้น GitHub ไม่สำเร็จ (Status: {put_res.status})")
+    
+    # Save to Firebase Realtime Database
+    try:
+        ref_boss = db.reference('boss_schedule')
+        ref_boss.set(data_to_save)
     except Exception as e:
-        print(f"❌ อัปเดต {filename} ขึ้น GitHub ไม่สำเร็จ: {e}")
+        print(f"❌ บันทึกตารางบอสลง Firebase ไม่สำเร็จ: {e}")
 
-async def fetch_github_file(filename: str) -> dict:
-    """🛠️ Helper Function ดึงไฟล์จาก GitHub เมื่อเริ่มรันบอทเพื่อป้องกันข้อมูลหาย"""
-    github_token = os.environ.get("GITHUB_TOKEN")
-    repo_name = os.environ.get("GITHUB_REPO")
+    await asyncio.to_thread(set_db_value, "boss_schedule", data_to_save)
+    await asyncio.to_thread(save_json_local, DATA_FILE, data_to_save)
 
-    if not (github_token and repo_name):
-        return {}
+async def load_boss_data():
+    """โหลดตารางบอสจาก Firebase Realtime Database เมื่อเริ่มระบบ"""
+    global boss_schedule
+    saved_data = None
+    try:
+        ref_boss = db.reference('boss_schedule')
+        saved_data = ref_boss.get()
+    except Exception as e:
+        print(f"⚠️ ดึงข้อมูลบอสจาก Firebase ไม่สำเร็จ: {e}")
 
-    url = f"https://api.github.com/repos/{repo_name}/contents/{filename}"
-    headers = {
-        "Authorization": f"token {github_token}",
-        "Accept": "application/vnd.github.v3+json"
-    }
+    if not saved_data:
+        saved_data = get_db_value("boss_schedule", None)
+
+    if saved_data:
+        with schedule_lock:
+            boss_schedule.clear()
+            for boss_name, data in saved_data.items():
+                if isinstance(data, dict) and "spawn_time" in data:
+                    st = datetime.fromisoformat(data["spawn_time"])
+                    if st.tzinfo is None:
+                        st = st.replace(tzinfo=TZ_THAI)
+                    boss_schedule[boss_name] = {
+                        "spawn_time": st,
+                        "channel_id": data.get("channel_id"),
+                        "notified_advance": data.get("notified_advance", False)
+                    }
+        print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
+
+def start_firebase_listener(loop):
+    """ฟังก์ชัน Real-time Listener คอยซิงค์ข้อมูลจาก Firebase เมื่อฝั่ง Web มีการเปลี่ยนแปลง"""
+    def listener(event):
+        if not is_bot_ready:
+            return
+        
+        try:
+            ref_boss = db.reference('boss_schedule')
+            snapshot = ref_boss.get()
+            with schedule_lock:
+                boss_schedule.clear()
+                if snapshot and isinstance(snapshot, dict):
+                    for boss_name, data in snapshot.items():
+                        if isinstance(data, dict) and "spawn_time" in data:
+                            st = datetime.fromisoformat(data["spawn_time"])
+                            if st.tzinfo is None:
+                                st = st.replace(tzinfo=TZ_THAI)
+                            boss_schedule[boss_name] = {
+                                "spawn_time": st,
+                                "channel_id": data.get("channel_id"),
+                                "notified_advance": data.get("notified_advance", False)
+                            }
+        except Exception as e:
+            print(f"❌ เกิดข้อผิดพลาดใน Firebase Listener: {e}")
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as res:
-                if res.status == 200:
-                    res_json = await res.json()
-                    content_b64 = res_json.get("content", "")
-                    json_str = base64.b64decode(content_b64).decode('utf-8')
-                    data = json.loads(json_str)
-                    save_json_local(filename, data)
-                    return data
+        ref_boss = db.reference('boss_schedule')
+        ref_boss.listen(listener)
+        print("🟢 Firebase Listener พร้อมทำงานเรียบร้อย!")
     except Exception as e:
-        print(f"⚠️ ไม่สามารถดึง {filename} จาก GitHub ได้: {e}")
-    
-    return {}
+        print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
 
 async def save_bot_settings():
-    """บันทึกสถานะการตั้งค่าลงทั้ง SQLite, Local JSON และ GitHub เพื่อป้องกันข้อมูลลืมเมื่อบอท Restart"""
     settings_data = {
         "bf_notify_enabled": bf_notify_enabled,
         "ppl_notify_enabled": ppl_notify_enabled
     }
+    try:
+        db.reference('bot_settings').set(settings_data)
+    except Exception: pass
     await asyncio.to_thread(set_db_value, "bf_notify_enabled", bf_notify_enabled)
     await asyncio.to_thread(set_db_value, "ppl_notify_enabled", ppl_notify_enabled)
     await asyncio.to_thread(save_json_local, SETTINGS_FILE, settings_data)
-    await sync_github_file(SETTINGS_FILE, settings_data, "Auto-update bot_settings.json via Discord Bot")
 
 async def load_bot_settings():
-    """โหลดค่าสถานะการตั้งค่าจาก Database / GitHub เมื่อเริ่มระบบ"""
     global bf_notify_enabled, ppl_notify_enabled
-    
-    # 1. ลองโหลดจาก Database ในเครื่องก่อน
-    db_bf = get_db_value("bf_notify_enabled", None)
-    db_ppl = get_db_value("ppl_notify_enabled", None)
-    
-    if db_bf is not None and db_ppl is not None:
-        bf_notify_enabled = db_bf
-        ppl_notify_enabled = db_ppl
-        print("✅ โหลดสถานะการแจ้งเตือนจาก Database เรียบร้อย")
-        return
+    data = None
+    try:
+        data = db.reference('bot_settings').get()
+    except Exception: pass
 
-    # 2. ถ้า DB หาย (เช่น บน Cloud/Render) ให้ดึงจาก GitHub / Local JSON
-    data = await fetch_github_file(SETTINGS_FILE)
-    if not data and os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception: pass
+    if not data:
+        db_bf = get_db_value("bf_notify_enabled", None)
+        db_ppl = get_db_value("ppl_notify_enabled", None)
+        if db_bf is not None: bf_notify_enabled = db_bf
+        if db_ppl is not None: ppl_notify_enabled = db_ppl
+        return
 
     if data:
         bf_notify_enabled = data.get("bf_notify_enabled", True)
         ppl_notify_enabled = data.get("ppl_notify_enabled", True)
-        set_db_value("bf_notify_enabled", bf_notify_enabled)
-        set_db_value("ppl_notify_enabled", ppl_notify_enabled)
-        print("✅ โหลดสถานะการแจ้งเตือนจาก GitHub/JSON สำรองเรียบร้อย")
-    else:
-        bf_notify_enabled = get_db_value("bf_notify_enabled", True)
-        ppl_notify_enabled = get_db_value("ppl_notify_enabled", True)
 
 async def save_vip_config():
+    try: db.reference('vip_config').set(vip_config)
+    except Exception: pass
     await asyncio.to_thread(set_db_value, "vip_config", vip_config)
     await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, vip_config)
-    await sync_github_file(VIP_CONFIG_FILE, vip_config, "Auto-update vip_config.json via Discord Bot")
 
 async def load_vip_config():
     global vip_config
-    db_data = get_db_value("vip_config", None)
-    if db_data is not None:
-        vip_config = db_data
-        return
-
-    data = await fetch_github_file(VIP_CONFIG_FILE)
-    if not data and os.path.exists(VIP_CONFIG_FILE):
-        try:
-            with open(VIP_CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception: pass
-    if data: 
-        vip_config = data
-        set_db_value("vip_config", vip_config)
+    data = None
+    try: data = db.reference('vip_config').get()
+    except Exception: pass
+    if not data: data = get_db_value("vip_config", None)
+    if data: vip_config = data
 
 async def save_live_config():
+    try: db.reference('live_message_config').set(live_message_config)
+    except Exception: pass
     await asyncio.to_thread(set_db_value, "live_message_config", live_message_config)
     await asyncio.to_thread(save_json_local, LIVE_CONFIG_FILE, live_message_config)
-    await sync_github_file(LIVE_CONFIG_FILE, live_message_config, "Auto-update live_config.json via Discord Bot")
 
 async def load_live_config():
     global live_message_config
-    db_data = get_db_value("live_message_config", None)
-    if db_data is not None:
-        live_message_config = db_data
-        return
-
-    data = await fetch_github_file(LIVE_CONFIG_FILE)
-    if not data and os.path.exists(LIVE_CONFIG_FILE):
-        try:
-            with open(LIVE_CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception: pass
-    if data: 
-        live_message_config = data
-        set_db_value("live_message_config", live_message_config)
+    data = None
+    try: data = db.reference('live_message_config').get()
+    except Exception: pass
+    if not data: data = get_db_value("live_message_config", None)
+    if data: live_message_config = data
 
 async def save_custom_bosses_to_github():
     custom_data = {}
@@ -592,19 +597,16 @@ async def save_custom_bosses_to_github():
                 "notice_text": ADVANCE_NOTICE_TEXT[name]
             }
 
+    try: db.reference('custom_bosses').set(custom_data)
+    except Exception: pass
     await asyncio.to_thread(set_db_value, "custom_bosses", custom_data)
     await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, custom_data)
-    await sync_github_file(CUSTOM_BOSSES_FILE, custom_data, "Auto-update custom_bosses.json via Discord Bot")
 
 async def load_custom_bosses():
-    custom_data = get_db_value("custom_bosses", None)
-    if custom_data is None:
-        custom_data = await fetch_github_file(CUSTOM_BOSSES_FILE)
-        if not custom_data and os.path.exists(CUSTOM_BOSSES_FILE):
-            try:
-                with open(CUSTOM_BOSSES_FILE, "r", encoding="utf-8") as f:
-                    custom_data = json.load(f)
-            except Exception: pass
+    custom_data = None
+    try: custom_data = db.reference('custom_bosses').get()
+    except Exception: pass
+    if not custom_data: custom_data = get_db_value("custom_bosses", None)
 
     if custom_data:
         for boss_name, data in custom_data.items():
@@ -612,46 +614,6 @@ async def load_custom_bosses():
             BOSS_CD_TEXT[boss_name] = data["cd_text"]
             ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
             ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
-        set_db_value("custom_bosses", custom_data)
-
-async def save_boss_data():
-    with schedule_lock:
-        data_to_save = {}
-        for boss_name, data in boss_schedule.items():
-            data_to_save[boss_name] = {
-                "spawn_time": data["spawn_time"].isoformat(),
-                "channel_id": data["channel_id"],
-                "notified_advance": data.get("notified_advance", False)
-            }
-    
-    await asyncio.to_thread(set_db_value, "boss_schedule", data_to_save)
-    await asyncio.to_thread(save_json_local, DATA_FILE, data_to_save)
-    await sync_github_file(DATA_FILE, data_to_save, "Auto-update boss_data.json via Discord Bot")
-
-async def load_boss_data():
-    global boss_schedule
-    saved_data = get_db_value("boss_schedule", None)
-    if saved_data is None:
-        saved_data = await fetch_github_file(DATA_FILE)
-        if not saved_data and os.path.exists(DATA_FILE):
-            try:
-                with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    saved_data = json.load(f)
-            except Exception: pass
-
-    if saved_data:
-        with schedule_lock:
-            for boss_name, data in saved_data.items():
-                st = datetime.fromisoformat(data["spawn_time"])
-                if st.tzinfo is None:
-                    st = st.replace(tzinfo=TZ_THAI)
-                boss_schedule[boss_name] = {
-                    "spawn_time": st,
-                    "channel_id": data.get("channel_id"),
-                    "notified_advance": data.get("notified_advance", False)
-                }
-        set_db_value("boss_schedule", saved_data)
-        print(f"✅ โหลดตารางบอสสำเร็จ {len(boss_schedule)} รายการ")
 
 # ==========================================
 # 🤖 6. Discord Bot Setup & Voice Helper
@@ -723,11 +685,9 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         voice_locks[guild.id] = asyncio.Lock()
 
     async with voice_locks[guild.id]:
-        # กำหนดรายการห้องเสียงที่จะเข้าไปพูด
         if target_channel:
             target_channels = [target_channel]
         else:
-            # ค้นหาห้องเสียงทั้งหมดที่มีสมาชิก (ที่ไม่ใช่บอท) สถิตอยู่
             target_channels = [
                 channel for channel in guild.voice_channels
                 if any(not m.bot for m in channel.members)
@@ -739,7 +699,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         unique_id = uuid.uuid4().hex
         tts_filename = f"temp_tts_{guild.id}_{unique_id}.mp3"
 
-        # แปลงข้อความ TTS เป็นไฟล์เสียงครั้งเดียวเพื่อใช้กับทุกห้อง
         try:
             communicate = edge_tts.Communicate(text, VOICE_THAI, rate="-20%", pitch="+10Hz")
             await communicate.save(tts_filename)
@@ -751,7 +710,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
 
         ffmpeg_executable = get_ffmpeg_path()
 
-        # วนลูปเข้าไปพูดในทุกห้องเสียงที่มีสมาชิกอยู่
         for channel in target_channels:
             vc = guild.voice_client
             try:
@@ -783,12 +741,11 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
 
                 vc.play(audio_source, after=after_playing)
                 await play_finished.wait()
-                await asyncio.sleep(0.5)  # พักครึ่งวินาทีก่อนย้ายไปห้องถัดไป
+                await asyncio.sleep(0.5)
 
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
 
-        # หลังพูดจบครบทุกห้องแล้ว ทำการตัดสายการเชื่อมต่อ
         vc = guild.voice_client
         if vc and vc.is_connected():
             try:
@@ -796,7 +753,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
 
-        # ลบไฟล์เสียงชั่วคราว
         if os.path.exists(tts_filename):
             try:
                 os.remove(tts_filename)
@@ -834,28 +790,20 @@ async def on_ready():
     print(f"Logged in as {bot.user.name} ({bot.user.id})")
     print(f"🔊 ใช้ FFmpeg จากตำแหน่ง: {get_ffmpeg_path()}")
 
-    # เริ่มต้นเชื่อมต่อและสร้าง Database SQLite
     init_db()
 
-    # โหลดข้อมูลแบบ Async จาก Database / GitHub / Local
     await load_bot_settings()
     await load_custom_bosses()
     await load_boss_data()
     await load_live_config()
     await load_vip_config()
 
-    # ลงทะเบียน Persistent View สำหรับปุ่ม Quick Actions
     bot.add_view(QuickActionsView())
 
     await asyncio.sleep(3)
     try:
         synced = await bot.tree.sync()
         print(f"ซิงค์ Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง")
-    except discord.errors.HTTPException as e:
-        if e.status == 429:
-            print("⚠️ ชน Global Rate Limit ตอน Sync Commands แต่ระบบจะรันบอทต่อ...")
-        else:
-            print(f"เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
     except Exception as e:
         print(f"เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
     
@@ -869,6 +817,8 @@ async def on_ready():
         check_auto_disconnect.start()
 
     is_bot_ready = True
+    loop = asyncio.get_running_loop()
+    threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
 
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Live Embed + Auto-Disconnect
@@ -965,10 +915,6 @@ async def check_boss_notifications():
                     await channel.send(content=send_content, embed=embed)
                     if guild:
                         asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"))
-                except discord.errors.HTTPException as e:
-                    if e.status == 429:
-                        print("⚠️ ชน Rate Limit ในการส่งข้อความเตือนบอส รอรอบถัดไป")
-                        await asyncio.sleep(5)
                 except Exception as e:
                     print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
@@ -987,10 +933,6 @@ async def check_boss_notifications():
                     await channel.send(content=send_content, embed=embed)
                     if guild:
                         asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ"))
-                except discord.errors.HTTPException as e:
-                    if e.status == 429:
-                        print("⚠️ ชน Rate Limit ในการส่งข้อความแจ้งบอสเกิด")
-                        await asyncio.sleep(5)
                 except Exception as e:
                     print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
@@ -1002,7 +944,7 @@ async def check_boss_notifications():
         if changed:
             await save_boss_data()
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'check_boss_notifications': {e}")
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_boss_notifications': {e}")
 
 @tasks.loop(seconds=60)
 async def update_live_embed():
@@ -1061,18 +1003,10 @@ async def update_live_embed():
         embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
         try:
             await cached_live_message.edit(embed=embed)
-        except discord.NotFound:
-            cached_live_message = None
-        except discord.errors.HTTPException as e:
-            if e.status == 429:
-                print("⚠️ เกิด Rate Limit ตอนอัปเดต Live Embed บอทจะข้ามไปอัปเดตรอบถัดไป")
-                await asyncio.sleep(10)
-            else:
-                cached_live_message = None
         except Exception as e:
             print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'update_live_embed': {e}")
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'update_live_embed': {e}")
 
 @tasks.loop(seconds=60)
 async def check_auto_disconnect():
@@ -1098,7 +1032,7 @@ async def check_auto_disconnect():
                     if guild.id in voice_empty_start:
                         del voice_empty_start[guild.id]
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดไม่คาดคิดใน Task 'check_auto_disconnect': {e}")
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_auto_disconnect': {e}")
 
 async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     choices = [
@@ -1142,7 +1076,7 @@ class QuickActionsView(discord.ui.View):
         
         chunk_size = 25
         chunks = [all_bosses[i:i + chunk_size] for i in range(0, len(all_bosses), chunk_size)]
-        chunks = chunks[:4]  # จำกัด Dropdown ไม่เกิน 4 แถว เพื่อเว้นแถวที่ 4 ไว้ใส่ปุ่มกด
+        chunks = chunks[:4]
         
         for index, chunk in enumerate(chunks):
             start_num = (index * chunk_size) + 1
@@ -1365,10 +1299,9 @@ async def disconnect_voice(interaction: discord.Interaction):
         await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
 # ==========================================
-# ⚔️ 10. Boss Slash Commands & Time Calculation Helper
+# ⚔️ 10. Boss Slash Commands
 # ==========================================
 def generate_boss_time_summary():
-    """Helper คำนวณสรุปเวลาบอสที่เหลือทั้งหมด โดยเรียงตามลำดับเวลาเกิดจากน้อยไปมาก"""
     now = datetime.now(TZ_THAI)
     with schedule_lock:
         schedule_copy = boss_schedule.copy()
@@ -1376,7 +1309,6 @@ def generate_boss_time_summary():
     if not schedule_copy:
         return None, "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ"
 
-    # เรียงลำดับจากน้อยไปมาก (เวลาเกิดก่อนขึ้นก่อน)
     sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
 
     embed = discord.Embed(
@@ -1400,20 +1332,15 @@ def generate_boss_time_summary():
             h, m = divmod(m, 60)
 
             parts = []
-            if h > 0:
-                parts.append(f"{h} ชม.")
-            if m > 0 or h > 0:
-                parts.append(f"{m} นาที")
+            if h > 0: parts.append(f"{h} ชม.")
+            if m > 0 or h > 0: parts.append(f"{m} นาที")
             parts.append(f"{s} วินาที")
 
             time_left_str = f"อีก {' '.join(parts)}"
 
-            if h > 0:
-                tts_time = f"{h} ชั่วโมง {m} นาที"
-            elif m > 0:
-                tts_time = f"{m} นาที"
-            else:
-                tts_time = f"{s} วินาที"
+            if h > 0: tts_time = f"{h} ชั่วโมง {m} นาที"
+            elif m > 0: tts_time = f"{m} นาที"
+            else: tts_time = f"{s} วินาที"
 
             tts_lines.append(f"บอส {spoken_name} เหลืออีก {tts_time}")
 
@@ -1480,17 +1407,12 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     if kill_time:
         try:
             time_parts = [int(p) for p in kill_time.strip().split(":")]
-            if len(time_parts) == 2:
-                hh, mm = time_parts
-                ss = 0
-            elif len(time_parts) == 3:
-                hh, mm, ss = time_parts
-            else:
-                raise ValueError
+            if len(time_parts) == 2: hh, mm, ss = time_parts[0], time_parts[1], 0
+            elif len(time_parts) == 3: hh, mm, ss = time_parts
+            else: raise ValueError
 
             boss_died_at = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
-            if boss_died_at > now:
-                boss_died_at -= timedelta(days=1)
+            if boss_died_at > now: boss_died_at -= timedelta(days=1)
                 
         except ValueError:
             await interaction.followup.send("❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอกแบบ **ชั่วโมง:นาที** เช่น `14:30`", ephemeral=True)
@@ -1581,6 +1503,8 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
             del boss_schedule[matched_key]
 
     if matched_key:
+        try: db.reference(f'boss_schedule/{matched_key}').delete()
+        except Exception: pass
         await save_boss_data()
         
         embed = discord.Embed(title="🗑️ ลบบอสสำเร็จ", description=f"ทำการลบข้อมูลเวลาของบอส **{matched_key}** ออกจากระบบเรียบร้อยแล้ว", color=discord.Color.orange())
