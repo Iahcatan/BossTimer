@@ -10,5 +10,11 @@
     "cd_text": "30 นาที",
     "notice_seconds": 300,
     "notice_text": "5 นาที"
+  },
+  "suuuk": {
+    "total_seconds": 1200,
+    "cd_text": "20 นาที",
+    "notice_seconds": 300,
+    "notice_text": "5 นาที"
   }
 }
