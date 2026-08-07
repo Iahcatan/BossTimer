@@ -1268,17 +1268,23 @@ class QuickActionsView(discord.ui.View):
         all_bosses = list(BOSS_RESPAWN_TIMES.keys())
         self.selected_boss = all_bosses[0] if all_bosses else "Wadangka"
         
-        chunk_size = 25
-        chunks = [all_bosses[i:i + chunk_size] for i in range(0, len(all_bosses), chunk_size)]
-        chunks = chunks[:4]
+        # แบ่งรายชื่อบอสทั้งหมดออกเป็น 2 แถว (แถวละไม่เกิน 25 รายการตามขีดจำกัด Discord)
+        total_bosses = len(all_bosses)
+        mid_point = (total_bosses + 1) // 2  # คำนวณจุดแบ่งครึ่ง (26 ตัวแรก และ 25 ตัวหลัง)
         
+        chunks = [
+            all_bosses[:mid_point],  # แถวที่ 0 (ลำดับที่ 1 ถึง 26)
+            all_bosses[mid_point:]   # แถวที่ 1 (ลำดับที่ 27 ถึง 51)
+        ]
+        
+        start_num = 1
         for index, chunk in enumerate(chunks):
-            start_num = (index * chunk_size) + 1
             end_num = start_num + len(chunk) - 1
             placeholder = f"🔻 เลือกบอส (ลำดับ {start_num}-{end_num})"
             self.add_item(BossSelect(chunk, placeholder, f"select_boss_quick_{index}", row=index))
+            start_num = end_num + 1
 
-    @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick", row=4)
+    @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick", row=2)
     async def boss_killed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
             await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
@@ -1307,7 +1313,7 @@ class QuickActionsView(discord.ui.View):
         await interaction.followup.send(embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "กดปุ่มบอสตาย (Quick Action)", f"👾 บอส: `{boss_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
 
-    @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=4)
+    @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=2)
     async def call_people_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
             await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
