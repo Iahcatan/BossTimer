@@ -22,5 +22,11 @@
     "cd_text": "20 นาที",
     "notice_seconds": 300,
     "notice_text": "5 นาที"
+  },
+  "sandgrave": {
+    "total_seconds": 1200,
+    "cd_text": "20 นาที",
+    "notice_seconds": 300,
+    "notice_text": "5 นาที"
   }
 }
