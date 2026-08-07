@@ -326,93 +326,215 @@ BOSS_RESPAWN_TIMES = {
 DEFAULT_BOSS_NAMES = set(BOSS_RESPAWN_TIMES.keys())
 
 BOSS_CD_TEXT = {
-    "Wadangka": "2 ชั่วโมง 30 นาที", "Elemental Queen": "2 ชั่วโมง 30 นาที",
-    "Tank": "58 นาที 20 วินาที", "Swirl Flame": "58 นาที 20 วินาที",
-    "Maelstrom": "58 นาที 20 วินาที", "Twister": "58 นาที 20 วินาที",
-    "Bigmama": "48 ชั่วโมง", "Chief Magief": "30 นาที",
-    "Faith": "5 ชั่วโมง 53 นาที", "Apapa": "15 นาที",
-    "Corrupt Forest Keeper": "58 นาที", "Recluse": "11 ชั่วโมง 23 นาที",
-    "Blackskull": "56 นาที 50 วินาที", "Sleepy Kooii": "20 นาที",
-    "Awaken Kooii": "1 ชั่วโมง 3 นาที", "Eeheehee": "1 ชั่วโมง 6 นาที 48 วินาที",
-    "Ooheeheek": "1 ชั่วโมง 8 นาที 3 วินาที", "Oohehe": "1 ชั่วโมง 5 นาที 8 วินาที",
-    "Guardian Imp": "1 ชั่วโมง 3 นาที", "Devilang": "5 ชั่วโมง 33 นาที",
-    "Blackjuno": "35 นาที", "Blacksky": "35 นาที",
-    "Red Fox": "20 นาที", "7tailfox": "20 นาที",
-    "777Tailfox": "30 นาที", "Sunrise Flower": "20 นาที",
-    "Magma Senior Thief": "20 นาที", "Bbinikjoe": "20 นาที",
-    "Bigmouse": "20 นาที", "Caligo": "7 วัน",
-    "Poison Root Flower": "28 นาที 10 วินาที", "Contaminated Queen Bee": "28 นาที",
-    "Rotten Pudding": "30 นาที", "Swamp Flower Monster": "30 นาที",
-    "Ukpana": "48 ชั่วโมง", "Darlene the Witch": "72 ชั่วโมง",
-    "Illust": "72 ชั่วโมง", "Actaemon": "6 ชั่วโมง",
-    "Aiyo's Protector": "72 ชั่วโมง", "Glucose": "30 นาที",
-    "Overload": "29 นาที 52 วินาที", "Soul Lich": "24 ชั่วโมง 15 นาที",
-    "Platanista": "168 ชั่วโมง (7 วัน)", "Barslaf": "48 ชั่วโมง",
+    "Wadangka": "2 ชั่วโมง 30 นาที",
+    "Elemental Queen": "2 ชั่วโมง 30 นาที",
+    "Tank": "58 นาที 20 วินาที",
+    "Swirl Flame": "58 นาที 20 วินาที",
+    "Maelstrom": "58 นาที 20 วินาที",
+    "Twister": "58 นาที 20 วินาที",
+    "Bigmama": "48 ชั่วโมง",
+    "Chief Magief": "30 นาที",
+    "Faith": "5 ชั่วโมง 53 นาที",
+    "Apapa": "15 นาที",
+    "Corrupt Forest Keeper": "58 นาที",
+    "Recluse": "11 ชั่วโมง 23 นาที",
+    "Blackskull": "56 นาที 50 วินาที",
+    "Sleepy Kooii": "20 นาที",
+    "Awaken Kooii": "1 ชั่วโมง 3 นาที",
+    "Eeheehee": "1 ชั่วโมง 6 นาที 48 วินาที",
+    "Ooheeheek": "1 ชั่วโมง 8 นาที 3 วินาที",
+    "Oohehe": "1 ชั่วโมง 5 นาที 8 วินาที",
+    "Guardian Imp": "1 ชั่วโมง 3 นาที",
+    "Devilang": "5 ชั่วโมง 33 นาที",
+    "Blackjuno": "35 นาที",
+    "Blacksky": "35 นาที",
+    "Red Fox": "20 นาที",
+    "7tailfox": "20 นาที",
+    "777Tailfox": "30 นาที",
+    "Sunrise Flower": "20 นาที",
+    "Magma Senior Thief": "20 นาที",
+    "Bbinikjoe": "20 นาที",
+    "Bigmouse": "20 นาที",
+    "Caligo": "7 วัน",
+    "Poison Root Flower": "28 นาที 10 วินาที",
+    "Contaminated Queen Bee": "28 นาที",
+    "Rotten Pudding": "30 นาที",
+    "Swamp Flower Monster": "30 นาที",
+    "Ukpana": "48 ชั่วโมง",
+    "Darlene the Witch": "72 ชั่วโมง",
+    "Illust": "72 ชั่วโมง",
+    "Actaemon": "6 ชั่วโมง",
+    "Aiyo's Protector": "72 ชั่วโมง",
+    "Glucose": "30 นาที",
+    "Overload": "29 นาที 52 วินาที",
+    "Soul Lich": "24 ชั่วโมง 15 นาที",
+    "Platanista": "168 ชั่วโมง (7 วัน)",
+    "Barslaf": "48 ชั่วโมง",
     "Billiard": "7 ชั่วโมง 55 นาที 3 วินาที",
-    "Shaaack": "30 นาที", "Suuuk": "20 นาที",
-    "Sususuk": "20 นาที", "sandgrave": "20 นาที",
+    "Shaaack": "30 นาที",
+    "Suuuk": "20 นาที",
+    "Sususuk": "20 นาที",
+    "sandgrave": "20 นาที",
     "Elder Beholder": "20 นาที"
 }
 
 ADVANCE_NOTICE_SECONDS = {
-    "Wadangka": 1800, "Elemental Queen": 300, "Tank": 300, 
-    "Swirl Flame": 300, "Maelstrom": 300, "Twister": 300,
-    "Bigmama": 1800, "Chief Magief": 300, "Faith": 1800, "Apapa": 300, 
-    "Corrupt Forest Keeper": 300, "Recluse": 1800, "Blackskull": 300, 
-    "Sleepy Kooii": 300, "Awaken Kooii": 300, "Eeheehee": 300, 
-    "Ooheeheek": 300, "Oohehe": 300, "Guardian Imp": 300, "Devilang": 1800, 
-    "Blackjuno": 300, "Blacksky": 300, "Red Fox": 300, "7tailfox": 300, 
-    "777Tailfox": 300, "Sunrise Flower": 300, "Magma Senior Thief": 300,
-    "Bbinikjoe": 300, "Bigmouse": 300, "Caligo": 3600, "Poison Root Flower": 300,
-    "Contaminated Queen Bee": 300, "Rotten Pudding": 300, "Swamp Flower Monster": 300,
-    "Ukpana": 1800, "Darlene the Witch": 1800, "Illust": 1800, "Actaemon": 1800,
-    "Aiyo's Protector": 1800, "Glucose": 300, "Overload": 300, "Soul Lich": 1800,
-    "Platanista": 3600, "Barslaf": 1800, "Billiard": 300,
-    "Shaaack": 300, "Suuuk": 300, "Sususuk": 300,
-    "sandgrave": 300, "Elder Beholder": 300
+    "Wadangka": 1800,
+    "Elemental Queen": 1800,
+    "Tank": 300,
+    "Swirl Flame": 300,
+    "Maelstrom": 300,
+    "Twister": 300,
+    "Bigmama": 1800,
+    "Chief Magief": 300,
+    "Faith": 1800,
+    "Apapa": 300,
+    "Corrupt Forest Keeper": 300,
+    "Recluse": 1800,
+    "Blackskull": 300,
+    "Sleepy Kooii": 300,
+    "Awaken Kooii": 300,
+    "Eeheehee": 300,
+    "Ooheeheek": 300,
+    "Oohehe": 300,
+    "Guardian Imp": 300,
+    "Devilang": 1800,
+    "Blackjuno": 300,
+    "Blacksky": 300,
+    "Red Fox": 300,
+    "7tailfox": 300,
+    "777Tailfox": 300,
+    "Sunrise Flower": 300,
+    "Magma Senior Thief": 300,
+    "Bbinikjoe": 300,
+    "Bigmouse": 300,
+    "Caligo": 3600,
+    "Poison Root Flower": 300,
+    "Contaminated Queen Bee": 300,
+    "Rotten Pudding": 300,
+    "Swamp Flower Monster": 300,
+    "Ukpana": 1800,
+    "Darlene the Witch": 1800,
+    "Illust": 1800,
+    "Actaemon": 1800,
+    "Aiyo's Protector": 1800,
+    "Glucose": 300,
+    "Overload": 300,
+    "Soul Lich": 1800,
+    "Platanista": 3600,
+    "Barslaf": 1800,
+    "Billiard": 1800,
+    "Shaaack": 300,
+    "Suuuk": 300,
+    "Sususuk": 300,
+    "sandgrave": 300,
+    "Elder Beholder": 300
 }
 
 ADVANCE_NOTICE_TEXT = {
-    "Wadangka": "30 นาที", "Elemental Queen": "5 นาที", "Tank": "5 นาที", 
-    "Swirl Flame": "5 นาที", "Maelstrom": "5 นาที", "Twister": "5 นาที",
-    "Bigmama": "30 นาที", "Chief Magief": "5 นาที", "Faith": "30 นาที", 
-    "Apapa": "5 นาที", "Corrupt Forest Keeper": "5 นาที", "Recluse": "30 นาที", 
-    "Blackskull": "5 นาที", "Sleepy Kooii": "5 นาที", "Awaken Kooii": "5 นาที",
-    "Eeheehee": "5 นาที", "Ooheeheek": "5 นาที", "Oohehe": "5 นาที", 
-    "Guardian Imp": "5 นาที", "Devilang": "30 นาที", "Blackjuno": "5 นาที", 
-    "Blacksky": "5 นาที", "Red Fox": "5 นาที", "7tailfox": "5 นาที", 
-    "777Tailfox": "5 นาที", "Sunrise Flower": "5 นาที", "Magma Senior Thief": "5 นาที",
-    "Bbinikjoe": "5 นาที", "Bigmouse": "5 นาที", "Caligo": "1 ชั่วโมง", 
-    "Poison Root Flower": "5 นาที", "Contaminated Queen Bee": "5 นาที", 
-    "Rotten Pudding": "5 นาที", "Swamp Flower Monster": "5 นาที",
-    "Ukpana": "30 นาที", "Darlene the Witch": "30 นาที", "Illust": "30 นาที", 
-    "Actaemon": "30 นาที", "Aiyo's Protector": "30 นาที", "Glucose": "5 นาที", 
-    "Overload": "5 นาที", "Soul Lich": "30 นาที", "Platanista": "1 ชั่วโมง", 
-    "Barslaf": "30 นาที", "Billiard": "5 นาที",
-    "Shaaack": "5 นาที", "Suuuk": "5 นาที", "Sususuk": "5 นาที",
-    "sandgrave": "5 นาที", "Elder Beholder": "5 นาที"
+    "Wadangka": "30 นาที",
+    "Elemental Queen": "30 นาที",
+    "Tank": "5 นาที",
+    "Swirl Flame": "5 นาที",
+    "Maelstrom": "5 นาที",
+    "Twister": "5 นาที",
+    "Bigmama": "30 นาที",
+    "Chief Magief": "5 นาที",
+    "Faith": "30 นาที",
+    "Apapa": "5 นาที",
+    "Corrupt Forest Keeper": "5 นาที",
+    "Recluse": "30 นาที",
+    "Blackskull": "5 นาที",
+    "Sleepy Kooii": "5 นาที",
+    "Awaken Kooii": "5 นาที",
+    "Eeheehee": "5 นาที",
+    "Ooheeheek": "5 นาที",
+    "Oohehe": "5 นาที",
+    "Guardian Imp": "5 นาที",
+    "Devilang": "30 นาที",
+    "Blackjuno": "5 นาที",
+    "Blacksky": "5 นาที",
+    "Red Fox": "5 นาที",
+    "7tailfox": "5 นาที",
+    "777Tailfox": "5 นาที",
+    "Sunrise Flower": "5 นาที",
+    "Magma Senior Thief": "5 นาที",
+    "Bbinikjoe": "5 นาที",
+    "Bigmouse": "5 นาที",
+    "Caligo": "1 ชั่วโมง",
+    "Poison Root Flower": "5 นาที",
+    "Contaminated Queen Bee": "5 นาที",
+    "Rotten Pudding": "5 นาที",
+    "Swamp Flower Monster": "5 นาที",
+    "Ukpana": "30 นาที",
+    "Darlene the Witch": "30 นาที",
+    "Illust": "30 นาที",
+    "Actaemon": "30 นาที",
+    "Aiyo's Protector": "30 นาที",
+    "Glucose": "5 นาที",
+    "Overload": "5 นาที",
+    "Soul Lich": "30 นาที",
+    "Platanista": "1 ชั่วโมง",
+    "Barslaf": "30 นาที",
+    "Billiard": "30 นาที",
+    "Shaaack": "5 นาที",
+    "Suuuk": "5 นาที",
+    "Sususuk": "5 นาที",
+    "sandgrave": "5 นาที",
+    "Elder Beholder": "5 นาที"
 }
 
 BOSS_PRONUNCIATION = {
-    "Wadangka": "วาดังการ์", "Elemental Queen": "เอเลเมนทัล ควีน", "Tank": "แท้งก์",
-    "Swirl Flame": "สเวิร์ล เฟลม", "Maelstrom": "เมลสตรอม", "Twister": "ทวิสเตอร์",
-    "Bigmama": "บิ๊กมาม่า", "Chief Magief": "ชีฟ มาเกียฟ", "Faith": "เฟธ",
-    "Apapa": "อาปาป้า", "Corrupt Forest Keeper": "คอร์รัปต์ ฟอเรสต์ คีปเปอร์",
-    "Recluse": "เรคลูซ", "Blackskull": "แบล็กสกัลป์", "Sleepy Kooii": "สลีปปี้ คูอี",
-    "Awaken Kooii": "อเวเคน คูอี", "Eeheehee": "อีฮีฮี", "Ooheeheek": "โอฮีฮีก",
-    "Oohehe": "โอเฮเฮ้", "Guardian Imp": "การ์เดียน อิมป์", "Devilang": "เดวิลแลง",
-    "Blackjuno": "แบล็กจูโน่", "Blacksky": "แบล็กสกาย", "Red Fox": "เรดฟ็อกซ์",
-    "7tailfox": "เซเว่นเทลฟ็อกซ์", "777Tailfox": "ทริปเปิลเซเว่นเทลฟ็อกซ์",
-    "Sunrise Flower": "ซันไรส์ ฟลาวเวอร์", "Magma Senior Thief": "แมกม่า ซีเนียร์ ธีฟ",
-    "Bbinikjoe": "บีนิกโจ", "Bigmouse": "บิ๊กเมาส์", "Caligo": "คาลิโก้",
-    "Poison Root Flower": "พอยซัน รูท ฟลาวเวอร์", "Contaminated Queen Bee": "คอนทามิเนตเต็ด ควีนบี",
-    "Rotten Pudding": "รอตเทน พุดดิ้ง", "Swamp Flower Monster": "สแวมป์ ฟลาวเวอร์ มอนสเตอร์",
-    "Ukpana": "อุคปาน่า", "Darlene the Witch": "ดาร์ลีน เดอะ วิทช์", "Illust": "อิลลัสต์",
-    "Actaemon": "แอคธีมอน", "Aiyo's Protector": "ไอโย โปรเตกเตอร์", "Glucose": "กลูโคส",
-    "Overload": "โอเวอร์โหลด", "Soul Lich": "โซล ลิช", "Platanista": "พลานิสต้า",
-    "Barslaf": "บาร์สลาฟ", "Billiard": "บิลเลียด",
-    "Shaaack": "ชาค", "Suuuk": "ซุก", "Sususuk": "ซูซูซุก",
-    "sandgrave": "แซนด์เกรฟ", "Elder Beholder": "เอลเดอร์ บีโฮลเดอร์"
+    "Wadangka": "วาดังการ์",
+    "Elemental Queen": "เอเลเมนทัล ควีน",
+    "Tank": "แท้งก์",
+    "Swirl Flame": "สเวิร์ล เฟลม",
+    "Maelstrom": "เมลสตรอม",
+    "Twister": "ทวิสเตอร์",
+    "Bigmama": "บิ๊กมาม่า",
+    "Chief Magief": "ชีฟ มาเกียฟ",
+    "Faith": "เฟธ",
+    "Apapa": "อาปาป้า",
+    "Corrupt Forest Keeper": "คอร์รัปต์ ฟอเรสต์ คีปเปอร์",
+    "Recluse": "เรคลูซ",
+    "Blackskull": "แบล็กสกัลป์",
+    "Sleepy Kooii": "สลีปปี้ คูอี",
+    "Awaken Kooii": "อเวเคน คูอี",
+    "Eeheehee": "อีฮีฮี",
+    "Ooheeheek": "โอฮีฮีก",
+    "Oohehe": "โอเฮเฮ้",
+    "Guardian Imp": "การ์เดียน อิมป์",
+    "Devilang": "เดวิลแลง",
+    "Blackjuno": "แบล็กจูโน่",
+    "Blacksky": "แบล็กสกาย",
+    "Red Fox": "เรดฟ็อกซ์",
+    "7tailfox": "เซเว่นเทลฟ็อกซ์",
+    "777Tailfox": "ทริปเปิลเซเว่นเทลฟ็อกซ์",
+    "Sunrise Flower": "ซันไรส์ ฟลาวเวอร์",
+    "Magma Senior Thief": "แมกม่า ซีเนียร์ ธีฟ",
+    "Bbinikjoe": "บีนิกโจ",
+    "Bigmouse": "บิ๊กเมาส์",
+    "Caligo": "คาลิโก้",
+    "Poison Root Flower": "พอยซัน รูท ฟลาวเวอร์",
+    "Contaminated Queen Bee": "คอนทามิเนตเต็ด ควีนบี",
+    "Rotten Pudding": "รอตเทน พุดดิ้ง",
+    "Swamp Flower Monster": "สแวมป์ ฟลาวเวอร์ มอนสเตอร์",
+    "Ukpana": "อุคปาน่า",
+    "Darlene the Witch": "ดาร์ลีน เดอะ วิทช์",
+    "Illust": "อิลลัสต์",
+    "Actaemon": "แอคธีมอน",
+    "Aiyo's Protector": "ไอโย โปรเตกเตอร์",
+    "Glucose": "กลูโคส",
+    "Overload": "โอเวอร์โหลด",
+    "Soul Lich": "โซล ลิช",
+    "Platanista": "พลานิสต้า",
+    "Barslaf": "บาร์สลาฟ",
+    "Billiard": "บิลเลียด",
+    "Shaaack": "ชาค",
+    "Suuuk": "ซุก",
+    "Sususuk": "ซูซูซุก",
+    "sandgrave": "แซนด์เกรฟ",
+    "Elder Beholder": "เอลเดอร์ บีโฮลเดอร์"
 }
 
 boss_schedule = {}
@@ -489,7 +611,6 @@ async def save_boss_data():
     try:
         is_updating_from_bot = True  # ตั้งค่าเพื่อป้องกัน Listener ทำงานวนลูป
         ref_boss = db.reference('boss_schedule')
-        # ✅ แก้ไขข้อ 1: รัน Synchronous Firebase Call บน Thread Pool เพื่อไม่ให้ Event Loop ค้าง
         await asyncio.to_thread(ref_boss.set, data_to_save)
     except Exception as e:
         print(f"❌ บันทึกตารางบอสลง Firebase ไม่สำเร็จ: {e}")
@@ -534,7 +655,6 @@ def start_firebase_listener(loop):
         if not is_bot_ready:
             return
         
-        # ✅ แก้ไขข้อ 3: ป้องกัน Infinite Re-entry จากการอัปเดตข้อมูลของบอทเอง
         if is_updating_from_bot:
             return
 
@@ -1047,7 +1167,6 @@ async def update_live_embed():
         else:
             sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
             
-            # ✅ แก้ไขข้อ 2: แสดงผลเฉพาะ 20 ตัวแรกที่กำลังจะเกิด เพื่อไม่ให้เกินข้อจำกัด 25 Fields ของ Discord
             display_bosses = sorted_bosses[:20]
             for boss, data in display_bosses:
                 spawn_time = parse_to_thai_datetime(data["spawn_time"])
@@ -1271,7 +1390,6 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
     app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
     app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
 ])
-# ✅ แก้ไขข้อ 4: เปลี่ยนการเช็กสิทธิ์จาก Server Owner เป็น check_user_permission เพื่อให้ Admin/ยศที่ได้รับอนุญาตใช้งานได้
 @has_allowed_role()
 async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
     await interaction.response.defer()
@@ -1392,7 +1510,6 @@ def generate_boss_time_summary():
 
     tts_lines = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
 
-    # ✅ แก้ไขข้อ 2: จำกัดบอสที่จะแสดงผลใน Embed เพื่อไม่ให้เกินขีดจำกัด
     display_bosses = sorted_bosses[:20]
     for boss, data in display_bosses:
         spawn_time = parse_to_thai_datetime(data["spawn_time"])
@@ -1610,7 +1727,6 @@ async def boss_status(interaction: discord.Interaction):
 
     sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
     
-    # ✅ แก้ไขข้อ 2: แสดงผลเฉพาะ 20 ตัวแรก
     display_bosses = sorted_bosses[:20]
     for boss, data in display_bosses:
         spawn_time = parse_to_thai_datetime(data["spawn_time"])
