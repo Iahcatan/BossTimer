@@ -47,10 +47,11 @@ logging.getLogger('discord.player').setLevel(logging.WARNING)
 logging.getLogger('discord.voice_state').setLevel(logging.WARNING)
 
 # ==========================================
-# 🔒 Thread Safety Lock สำหรับแชร์ข้อมูล
+# 🔒 Thread Safety Lock สำหรับแชร์ข้อมูล & Flag ป้องกัน Loop
 # ==========================================
 schedule_lock = threading.Lock()
 is_bot_ready = False
+is_updating_from_bot = False  # Flag สำหรับป้องกัน Infinite Re-entry จาก Listener
 
 # ==========================================
 # ⚙️ 2. ตั้งค่า Timezone ไทย & Config
@@ -469,7 +470,8 @@ def save_json_local(filename: str, data: dict):
         print(f"❌ เซฟ {filename} ลง local ไม่สำเร็จ: {e}")
 
 async def save_boss_data():
-    """บันทึกตารางบอสลง Firebase Realtime Database และ Local"""
+    """บันทึกตารางบอสลง Firebase Realtime Database และ Local (แก้ไขไม่ให้บล็อก Event Loop)"""
+    global is_updating_from_bot
     with schedule_lock:
         data_to_save = {}
         for boss_name, data in boss_schedule.items():
@@ -485,10 +487,14 @@ async def save_boss_data():
             }
     
     try:
+        is_updating_from_bot = True  # ตั้งค่าเพื่อป้องกัน Listener ทำงานวนลูป
         ref_boss = db.reference('boss_schedule')
-        ref_boss.set(data_to_save)
+        # ✅ แก้ไขข้อ 1: รัน Synchronous Firebase Call บน Thread Pool เพื่อไม่ให้ Event Loop ค้าง
+        await asyncio.to_thread(ref_boss.set, data_to_save)
     except Exception as e:
         print(f"❌ บันทึกตารางบอสลง Firebase ไม่สำเร็จ: {e}")
+    finally:
+        is_updating_from_bot = False
 
     await asyncio.to_thread(set_db_value, "boss_schedule", data_to_save)
     await asyncio.to_thread(save_json_local, DATA_FILE, data_to_save)
@@ -499,7 +505,7 @@ async def load_boss_data():
     saved_data = None
     try:
         ref_boss = db.reference('boss_schedule')
-        saved_data = ref_boss.get()
+        saved_data = await asyncio.to_thread(ref_boss.get)
     except Exception as e:
         print(f"⚠️ ดึงข้อมูลบอสจาก Firebase ไม่สำเร็จ: {e}")
 
@@ -524,9 +530,14 @@ async def load_boss_data():
 def start_firebase_listener(loop):
     """Real-time Listener คอยซิงค์ข้อมูลจาก Firebase เมื่อฝั่ง Web/App มีการเปลี่ยนแปลง"""
     def listener(event):
+        global is_updating_from_bot
         if not is_bot_ready:
             return
         
+        # ✅ แก้ไขข้อ 3: ป้องกัน Infinite Re-entry จากการอัปเดตข้อมูลของบอทเอง
+        if is_updating_from_bot:
+            return
+
         try:
             ref_boss = db.reference('boss_schedule')
             snapshot = ref_boss.get()
@@ -559,7 +570,7 @@ async def save_bot_settings():
         "ppl_notify_enabled": ppl_notify_enabled
     }
     try:
-        db.reference('bot_settings').set(settings_data)
+        await asyncio.to_thread(db.reference('bot_settings').set, settings_data)
     except Exception: pass
     await asyncio.to_thread(set_db_value, "bf_notify_enabled", bf_notify_enabled)
     await asyncio.to_thread(set_db_value, "ppl_notify_enabled", ppl_notify_enabled)
@@ -569,7 +580,7 @@ async def load_bot_settings():
     global bf_notify_enabled, ppl_notify_enabled
     data = None
     try:
-        data = db.reference('bot_settings').get()
+        data = await asyncio.to_thread(db.reference('bot_settings').get)
     except Exception: pass
 
     if not data:
@@ -584,7 +595,7 @@ async def load_bot_settings():
         ppl_notify_enabled = data.get("ppl_notify_enabled", True)
 
 async def save_vip_config():
-    try: db.reference('vip_config').set(vip_config)
+    try: await asyncio.to_thread(db.reference('vip_config').set, vip_config)
     except Exception: pass
     await asyncio.to_thread(set_db_value, "vip_config", vip_config)
     await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, vip_config)
@@ -592,13 +603,13 @@ async def save_vip_config():
 async def load_vip_config():
     global vip_config
     data = None
-    try: data = db.reference('vip_config').get()
+    try: data = await asyncio.to_thread(db.reference('vip_config').get)
     except Exception: pass
     if not data: data = get_db_value("vip_config", None)
     if data: vip_config = data
 
 async def save_live_config():
-    try: db.reference('live_message_config').set(live_message_config)
+    try: await asyncio.to_thread(db.reference('live_message_config').set, live_message_config)
     except Exception: pass
     await asyncio.to_thread(set_db_value, "live_message_config", live_message_config)
     await asyncio.to_thread(save_json_local, LIVE_CONFIG_FILE, live_message_config)
@@ -606,7 +617,7 @@ async def save_live_config():
 async def load_live_config():
     global live_message_config
     data = None
-    try: data = db.reference('live_message_config').get()
+    try: data = await asyncio.to_thread(db.reference('live_message_config').get)
     except Exception: pass
     if not data: data = get_db_value("live_message_config", None)
     if data: live_message_config = data
@@ -622,14 +633,14 @@ async def save_custom_bosses_to_github():
                 "notice_text": ADVANCE_NOTICE_TEXT[name]
             }
 
-    try: db.reference('custom_bosses').set(custom_data)
+    try: await asyncio.to_thread(db.reference('custom_bosses').set, custom_data)
     except Exception: pass
     await asyncio.to_thread(set_db_value, "custom_bosses", custom_data)
     await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, custom_data)
 
 async def load_custom_bosses():
     custom_data = None
-    try: custom_data = db.reference('custom_bosses').get()
+    try: custom_data = await asyncio.to_thread(db.reference('custom_bosses').get)
     except Exception: pass
     if not custom_data: custom_data = get_db_value("custom_bosses", None)
 
@@ -1003,6 +1014,7 @@ async def check_boss_notifications():
 
 @tasks.loop(seconds=60)
 async def update_live_embed():
+    """อัปเดต Live Embed โดยการจำกัดจำนวน Field ไม่ให้เกิน 20 เพื่อป้องกันข้อผิดพลาดจาก Discord"""
     global cached_live_message
     try:
         if not live_message_config: return
@@ -1034,7 +1046,10 @@ async def update_live_embed():
             embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
         else:
             sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
-            for boss, data in sorted_bosses:
+            
+            # ✅ แก้ไขข้อ 2: แสดงผลเฉพาะ 20 ตัวแรกที่กำลังจะเกิด เพื่อไม่ให้เกินข้อจำกัด 25 Fields ของ Discord
+            display_bosses = sorted_bosses[:20]
+            for boss, data in display_bosses:
                 spawn_time = parse_to_thai_datetime(data["spawn_time"])
                 if not spawn_time: continue
                 
@@ -1056,6 +1071,9 @@ async def update_live_embed():
                     value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(เตือนล่วงหน้า {notice_text})*",
                     inline=False
                 )
+            
+            if len(sorted_bosses) > 20:
+                embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
 
         embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
         try:
@@ -1253,12 +1271,9 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
     app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
     app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
 ])
+# ✅ แก้ไขข้อ 4: เปลี่ยนการเช็กสิทธิ์จาก Server Owner เป็น check_user_permission เพื่อให้ Admin/ยศที่ได้รับอนุญาตใช้งานได้
+@has_allowed_role()
 async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
-    if not interaction.guild or interaction.user.id != interaction.guild.owner_id:
-        embed = discord.Embed(title="🚫 ปฏิเสธการเข้าถึง", description="คำสั่งนี้อนุญาตเฉพาะ **เจ้าของเซิร์ฟเวอร์ (Server Owner)** เท่านั้นครับ!", color=discord.Color.red())
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
     await interaction.response.defer()
     global ppl_notify_enabled
 
@@ -1359,6 +1374,7 @@ async def disconnect_voice(interaction: discord.Interaction):
 # ⚔️ 10. Boss Slash Commands
 # ==========================================
 def generate_boss_time_summary():
+    """สร้างข้อมูล Embed สรุปเวลาบอส โดยจำกัดจำนวน Field ไม่ให้เกิน 20 เพื่อป้องกัน Discord API Error"""
     now = datetime.now(TZ_THAI)
     with schedule_lock:
         schedule_copy = boss_schedule.copy()
@@ -1376,7 +1392,9 @@ def generate_boss_time_summary():
 
     tts_lines = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
 
-    for boss, data in sorted_bosses:
+    # ✅ แก้ไขข้อ 2: จำกัดบอสที่จะแสดงผลใน Embed เพื่อไม่ให้เกินขีดจำกัด
+    display_bosses = sorted_bosses[:20]
+    for boss, data in display_bosses:
         spawn_time = parse_to_thai_datetime(data["spawn_time"])
         if not spawn_time: continue
 
@@ -1408,6 +1426,9 @@ def generate_boss_time_summary():
             value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**",
             inline=False
         )
+
+    if len(sorted_bosses) > 20:
+        embed.add_field(name="📌 หมายเหตุ", value=f"*ยังมีบอสอีก {len(sorted_bosses) - 20} ตัว สามารถดูเพิ่มเติมได้บน Dashboard*", inline=False)
 
     tts_text = " ".join(tts_lines)
     return embed, tts_text
@@ -1562,7 +1583,7 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
             del boss_schedule[matched_key]
 
     if matched_key:
-        try: db.reference(f'boss_schedule/{matched_key}').delete()
+        try: await asyncio.to_thread(db.reference(f'boss_schedule/{matched_key}').delete)
         except Exception: pass
         await save_boss_data()
         
@@ -1588,7 +1609,10 @@ async def boss_status(interaction: discord.Interaction):
     embed = discord.Embed(title="📜 ตารางเวลาบอสเกิดทั้งหมด", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.blue())
 
     sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
-    for boss, data in sorted_bosses:
+    
+    # ✅ แก้ไขข้อ 2: แสดงผลเฉพาะ 20 ตัวแรก
+    display_bosses = sorted_bosses[:20]
+    for boss, data in display_bosses:
         spawn_time = parse_to_thai_datetime(data["spawn_time"])
         if not spawn_time: continue
         
@@ -1606,6 +1630,9 @@ async def boss_status(interaction: discord.Interaction):
 
         notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
         embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(เตือนล่วงหน้า {notice_text})*", inline=False)
+
+    if len(sorted_bosses) > 20:
+        embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
 
     await interaction.followup.send(embed=embed)
 
