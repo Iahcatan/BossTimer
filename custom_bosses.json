@@ -4,5 +4,11 @@
     "cd_text": "6 นาที",
     "notice_seconds": 300,
     "notice_text": "5 นาที"
+  },
+  "Shaaack": {
+    "total_seconds": 1800,
+    "cd_text": "30 นาที",
+    "notice_seconds": 300,
+    "notice_text": "5 นาที"
   }
 }
