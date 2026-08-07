@@ -272,7 +272,12 @@ BOSS_RESPAWN_TIMES = {
     "Soul Lich": timedelta(hours=24, minutes=15),
     "Platanista": timedelta(hours=168),
     "Barslaf": timedelta(hours=48),
-    "Billiard": timedelta(hours=7, minutes=55, seconds=3)
+    "Billiard": timedelta(hours=7, minutes=55, seconds=3),
+    "Shaaack": timedelta(minutes=30),
+    "Suuuk": timedelta(minutes=20),
+    "Sususuk": timedelta(minutes=20),
+    "sandgrave": timedelta(minutes=20),
+    "Elder Beholder": timedelta(minutes=20)
 }
 
 DEFAULT_BOSS_NAMES = set(BOSS_RESPAWN_TIMES.keys())
@@ -300,7 +305,10 @@ BOSS_CD_TEXT = {
     "Aiyo's Protector": "72 ชั่วโมง", "Glucose": "30 นาที",
     "Overload": "29 นาที 52 วินาที", "Soul Lich": "24 ชั่วโมง 15 นาที",
     "Platanista": "168 ชั่วโมง (7 วัน)", "Barslaf": "48 ชั่วโมง",
-    "Billiard": "7 ชั่วโมง 55 นาที 3 วินาที"
+    "Billiard": "7 ชั่วโมง 55 นาที 3 วินาที",
+    "Shaaack": "30 นาที", "Suuuk": "20 นาที",
+    "Sususuk": "20 นาที", "sandgrave": "20 นาที",
+    "Elder Beholder": "20 นาที"
 }
 
 ADVANCE_NOTICE_SECONDS = {
@@ -316,7 +324,9 @@ ADVANCE_NOTICE_SECONDS = {
     "Contaminated Queen Bee": 300, "Rotten Pudding": 300, "Swamp Flower Monster": 300,
     "Ukpana": 1800, "Darlene the Witch": 1800, "Illust": 1800, "Actaemon": 1800,
     "Aiyo's Protector": 1800, "Glucose": 300, "Overload": 300, "Soul Lich": 1800,
-    "Platanista": 3600, "Barslaf": 1800, "Billiard": 300
+    "Platanista": 3600, "Barslaf": 1800, "Billiard": 300,
+    "Shaaack": 300, "Suuuk": 300, "Sususuk": 300,
+    "sandgrave": 300, "Elder Beholder": 300
 }
 
 ADVANCE_NOTICE_TEXT = {
@@ -335,7 +345,9 @@ ADVANCE_NOTICE_TEXT = {
     "Ukpana": "30 นาที", "Darlene the Witch": "30 นาที", "Illust": "30 นาที", 
     "Actaemon": "30 นาที", "Aiyo's Protector": "30 นาที", "Glucose": "5 นาที", 
     "Overload": "5 นาที", "Soul Lich": "30 นาที", "Platanista": "1 ชั่วโมง", 
-    "Barslaf": "30 นาที", "Billiard": "5 นาที"
+    "Barslaf": "30 นาที", "Billiard": "5 นาที",
+    "Shaaack": "5 นาที", "Suuuk": "5 นาที", "Sususuk": "5 นาที",
+    "sandgrave": "5 นาที", "Elder Beholder": "5 นาที"
 }
 
 BOSS_PRONUNCIATION = {
@@ -355,7 +367,9 @@ BOSS_PRONUNCIATION = {
     "Ukpana": "อุคปาน่า", "Darlene the Witch": "ดาร์ลีน เดอะ วิทช์", "Illust": "อิลลัสต์",
     "Actaemon": "แอคธีมอน", "Aiyo's Protector": "ไอโย โปรเตกเตอร์", "Glucose": "กลูโคส",
     "Overload": "โอเวอร์โหลด", "Soul Lich": "โซล ลิช", "Platanista": "พลานิสต้า",
-    "Barslaf": "บาร์สลาฟ", "Billiard": "บิลเลียด"
+    "Barslaf": "บาร์สลาฟ", "Billiard": "บิลเลียด",
+    "Shaaack": "ชาค", "Suuuk": "ซุก", "Sususuk": "ซูซูซุก",
+    "sandgrave": "แซนด์เกรฟ", "Elder Beholder": "เอลเดอร์ บีโฮลเดอร์"
 }
 
 boss_schedule = {}
