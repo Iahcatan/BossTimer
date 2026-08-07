@@ -53,6 +53,29 @@ schedule_lock = threading.Lock()
 is_bot_ready = False
 
 # ==========================================
+# ⚙️ 2. ตั้งค่า Timezone ไทย & Config
+# ==========================================
+TZ_THAI = timezone(timedelta(hours=7))
+
+def parse_to_thai_datetime(data_val):
+    """ฟังก์ชันช่วยแปลงข้อมูลเวลาจากชนิดต่างๆ ให้เป็น datetime (TZ_THAI)"""
+    if isinstance(data_val, (int, float)):
+        return datetime.fromtimestamp(data_val / 1000.0, tz=TZ_THAI)
+    elif isinstance(data_val, str):
+        try:
+            st = datetime.fromisoformat(data_val)
+            if st.tzinfo is None:
+                return st.replace(tzinfo=TZ_THAI)
+            return st.astimezone(TZ_THAI)
+        except Exception:
+            return None
+    elif isinstance(data_val, datetime):
+        if data_val.tzinfo is None:
+            return data_val.replace(tzinfo=TZ_THAI)
+        return data_val.astimezone(TZ_THAI)
+    return None
+
+# ==========================================
 # 🗄️ Database Utility (SQLite Persistent Storage)
 # ==========================================
 DB_FILE = "bot_database.db"
@@ -184,7 +207,10 @@ def dashboard():
     sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
     
     for boss_name, data in sorted_bosses:
-        spawn_time = data["spawn_time"]
+        spawn_time = parse_to_thai_datetime(data["spawn_time"])
+        if not spawn_time:
+            continue
+
         time_left_sec = (spawn_time - now).total_seconds()
         
         if time_left_sec <= 0:
@@ -213,9 +239,8 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # ==========================================
-# ⚙️ 2. ตั้งค่า Timezone ไทย & Config
+# ⚙️ Config & Global Variables
 # ==========================================
-TZ_THAI = timezone(timedelta(hours=7))
 DATA_FILE = "boss_data.json"
 CUSTOM_BOSSES_FILE = "custom_bosses.json"
 LIVE_CONFIG_FILE = "live_config.json"
@@ -448,7 +473,8 @@ async def save_boss_data():
     with schedule_lock:
         data_to_save = {}
         for boss_name, data in boss_schedule.items():
-            st = data["spawn_time"]
+            st = parse_to_thai_datetime(data["spawn_time"])
+            if not st: continue
             spawn_ms = int(st.timestamp() * 1000)
             data_to_save[boss_name] = {
                 "spawn_time": st.isoformat(),
@@ -458,7 +484,6 @@ async def save_boss_data():
                 "noticeMinutes": int(ADVANCE_NOTICE_SECONDS.get(boss_name, 300) / 60)
             }
     
-    # Save to Firebase Realtime Database
     try:
         ref_boss = db.reference('boss_schedule')
         ref_boss.set(data_to_save)
@@ -481,23 +506,23 @@ async def load_boss_data():
     if not saved_data:
         saved_data = get_db_value("boss_schedule", None)
 
-    if saved_data:
+    if saved_data and isinstance(saved_data, dict):
         with schedule_lock:
             boss_schedule.clear()
             for boss_name, data in saved_data.items():
-                if isinstance(data, dict) and "spawn_time" in data:
-                    st = datetime.fromisoformat(data["spawn_time"])
-                    if st.tzinfo is None:
-                        st = st.replace(tzinfo=TZ_THAI)
-                    boss_schedule[boss_name] = {
-                        "spawn_time": st,
-                        "channel_id": data.get("channel_id"),
-                        "notified_advance": data.get("notified_advance", False)
-                    }
+                if isinstance(data, dict):
+                    raw_st = data.get("spawn_time") or data.get("spawnTimeMs")
+                    st = parse_to_thai_datetime(raw_st)
+                    if st:
+                        boss_schedule[boss_name] = {
+                            "spawn_time": st,
+                            "channel_id": data.get("channel_id"),
+                            "notified_advance": data.get("notified_advance", data.get("notifiedNotice", False))
+                        }
         print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
 def start_firebase_listener(loop):
-    """ฟังก์ชัน Real-time Listener คอยซิงค์ข้อมูลจาก Firebase เมื่อฝั่ง Web มีการเปลี่ยนแปลง"""
+    """Real-time Listener คอยซิงค์ข้อมูลจาก Firebase เมื่อฝั่ง Web/App มีการเปลี่ยนแปลง"""
     def listener(event):
         if not is_bot_ready:
             return
@@ -509,15 +534,15 @@ def start_firebase_listener(loop):
                 boss_schedule.clear()
                 if snapshot and isinstance(snapshot, dict):
                     for boss_name, data in snapshot.items():
-                        if isinstance(data, dict) and "spawn_time" in data:
-                            st = datetime.fromisoformat(data["spawn_time"])
-                            if st.tzinfo is None:
-                                st = st.replace(tzinfo=TZ_THAI)
-                            boss_schedule[boss_name] = {
-                                "spawn_time": st,
-                                "channel_id": data.get("channel_id"),
-                                "notified_advance": data.get("notified_advance", False)
-                            }
+                        if isinstance(data, dict):
+                            raw_st = data.get("spawn_time") or data.get("spawnTimeMs")
+                            st = parse_to_thai_datetime(raw_st)
+                            if st:
+                                boss_schedule[boss_name] = {
+                                    "spawn_time": st,
+                                    "channel_id": data.get("channel_id"),
+                                    "notified_advance": data.get("notified_advance", data.get("notifiedNotice", False))
+                                }
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดใน Firebase Listener: {e}")
 
@@ -710,54 +735,58 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
 
         ffmpeg_executable = get_ffmpeg_path()
 
-        for channel in target_channels:
-            vc = guild.voice_client
-            try:
-                if not vc or not vc.is_connected():
-                    vc = await channel.connect(reconnect=True)
-                    await asyncio.sleep(0.5)
-                else:
-                    if vc.channel != channel:
-                        await vc.move_to(channel)
+        try:
+            for channel in target_channels:
+                vc = guild.voice_client
+                try:
+                    if not vc or not vc.is_connected():
+                        vc = await channel.connect(reconnect=True)
                         await asyncio.sleep(0.5)
+                    else:
+                        if vc.channel != channel:
+                            await vc.move_to(channel)
+                            await asyncio.sleep(0.5)
 
-                if vc.is_playing():
-                    vc.stop()
+                    if vc.is_playing():
+                        vc.stop()
 
-                audio_source = discord.FFmpegPCMAudio(
-                    tts_filename,
-                    executable=ffmpeg_executable,
-                    before_options="-loglevel error",
-                    options="-vn"
-                )
+                    audio_source = discord.FFmpegPCMAudio(
+                        tts_filename,
+                        executable=ffmpeg_executable,
+                        before_options="-loglevel error",
+                        options="-vn"
+                    )
 
-                loop = asyncio.get_running_loop()
-                play_finished = asyncio.Event()
+                    loop = asyncio.get_running_loop()
+                    play_finished = asyncio.Event()
 
-                def after_playing(error):
-                    if error:
-                        print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
-                    loop.call_soon_threadsafe(play_finished.set)
+                    def after_playing(error):
+                        if error:
+                            print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
+                        loop.call_soon_threadsafe(play_finished.set)
 
-                vc.play(audio_source, after=after_playing)
-                await play_finished.wait()
-                await asyncio.sleep(0.5)
+                    vc.play(audio_source, after=after_playing)
+                    try:
+                        await asyncio.wait_for(play_finished.wait(), timeout=30)
+                    except asyncio.TimeoutError:
+                        print("⚠️ การเล่นเสียง TTS หมดเวลา (Timeout)")
+                    await asyncio.sleep(0.5)
 
-            except Exception as e:
-                print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
+                except Exception as e:
+                    print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
 
-        vc = guild.voice_client
-        if vc and vc.is_connected():
-            try:
-                await vc.disconnect()
-            except Exception as e:
-                print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
-
-        if os.path.exists(tts_filename):
-            try:
-                os.remove(tts_filename)
-            except Exception:
-                pass
+            vc = guild.voice_client
+            if vc and vc.is_connected():
+                try:
+                    await vc.disconnect()
+                except Exception as e:
+                    print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
+        finally:
+            if os.path.exists(tts_filename):
+                try:
+                    os.remove(tts_filename)
+                except Exception:
+                    pass
 
 # ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
@@ -875,7 +904,10 @@ async def check_boss_notifications():
             schedule_copy = boss_schedule.copy()
         
         for boss_name, data in list(schedule_copy.items()):
-            spawn_time = data["spawn_time"]
+            spawn_time = parse_to_thai_datetime(data["spawn_time"])
+            if not spawn_time:
+                continue
+
             channel_id = data.get("channel_id")
             notified_advance = data.get("notified_advance", False)
             
@@ -978,9 +1010,11 @@ async def update_live_embed():
         if not schedule_copy:
             embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
         else:
-            sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
+            sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
             for boss, data in sorted_bosses:
-                spawn_time = data["spawn_time"]
+                spawn_time = parse_to_thai_datetime(data["spawn_time"])
+                if not spawn_time: continue
+                
                 time_left_sec = (spawn_time - now).total_seconds()
                 
                 if time_left_sec <= 0:
@@ -1309,7 +1343,7 @@ def generate_boss_time_summary():
     if not schedule_copy:
         return None, "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ"
 
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
+    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
 
     embed = discord.Embed(
         title="⌛ สรุปเวลาที่เหลือของบอสทุกตัว (เรียงจากน้อยไปมาก)",
@@ -1320,7 +1354,9 @@ def generate_boss_time_summary():
     tts_lines = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
 
     for boss, data in sorted_bosses:
-        spawn_time = data["spawn_time"]
+        spawn_time = parse_to_thai_datetime(data["spawn_time"])
+        if not spawn_time: continue
+
         time_left_sec = (spawn_time - now).total_seconds()
         spoken_name = BOSS_PRONUNCIATION.get(boss, boss)
 
@@ -1528,9 +1564,11 @@ async def boss_status(interaction: discord.Interaction):
     now = datetime.now(TZ_THAI)
     embed = discord.Embed(title="📜 ตารางเวลาบอสเกิดทั้งหมด", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.blue())
 
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
+    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
     for boss, data in sorted_bosses:
-        spawn_time = data["spawn_time"]
+        spawn_time = parse_to_thai_datetime(data["spawn_time"])
+        if not spawn_time: continue
+        
         time_left_sec = (spawn_time - now).total_seconds()
         
         if time_left_sec <= 0:
