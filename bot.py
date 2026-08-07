@@ -918,7 +918,6 @@ async def check_boss_notifications():
                     try: channel = await bot.fetch_channel(channel_id)
                     except Exception: channel = None
 
-            # 🛠️ [แก้ไขจุดที่ 3] เพิ่ม Fallback Channels กรณีบอสถูกคีย์มาจาก Web Dashboard (ไม่มี channel_id)
             channels_to_notify = []
             if channel:
                 channels_to_notify.append(channel)
@@ -1072,7 +1071,6 @@ async def check_auto_disconnect():
         now = datetime.now(TZ_THAI)
         for guild in bot.guilds:
             vc = guild.voice_client
-            # 🛠️ [แก้ไขจุดที่ 5] เพิ่มการตรวจสอบ vc.channel ป้องกัน Runtime Error
             if vc and vc.is_connected() and vc.channel:
                 human_members = [m for m in vc.channel.members if not m.bot]
                 if len(human_members) == 0:
