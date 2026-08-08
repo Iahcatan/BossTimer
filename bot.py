@@ -1268,20 +1268,18 @@ class QuickActionsView(discord.ui.View):
         all_bosses = list(BOSS_RESPAWN_TIMES.keys())
         self.selected_boss = all_bosses[0] if all_bosses else "Wadangka"
         
-        # แบ่งรายชื่อบอสออกเป็น Chunk ละไม่เกิน 25 ตัว (สูงสุด 3 แถว แถวละ 25 ตัว รวมสูงสุด 75 ตัว)
-        chunks = []
-        for i in range(0, min(len(all_bosses), 75), 25):
-            chunks.append(all_bosses[i:i + 25])
+        # แบ่งบอสเป็น Chunk ละไม่เกิน 25 ตัว (สูงสุด 3 แถว รวมได้ 75 ตัว)
+        chunks = [all_bosses[i:i + 25] for i in range(0, min(len(all_bosses), 75), 25)]
         
         start_num = 1
         for index, chunk in enumerate(chunks):
             end_num = start_num + len(chunk) - 1
             placeholder = f"🔻 เลือกบอส (ชุดที่ {index + 1}: ลำดับ {start_num}-{end_num})"
-            # เพิ่ม Dropdown ในแถว index (0, 1, 2)
+            # บังคับกำหนด row=0, row=1, row=2 ชัดเจนให้กับ Select Menu แต่ละแถว
             self.add_item(BossSelect(chunk, placeholder, f"select_boss_quick_{index}", row=index))
             start_num = end_num + 1
 
-    # ปรับ row=3 เพื่อวางปุ่มไว้ต่อท้าย Dropdown ทั้ง 3 แถว
+    # กำหนด row=3 เพื่อวางปุ่มทั้งหมดลงในแถวที่ 4 (ต่อท้ายจาก Select Menu ทั้ง 3 แถว)
     @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick", row=3)
     async def boss_killed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
@@ -1311,7 +1309,6 @@ class QuickActionsView(discord.ui.View):
         await interaction.followup.send(embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "กดปุ่มบอสตาย (Quick Action)", f"👾 บอส: `{boss_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
 
-    # ปรับ row=3 เพื่อวางปุ่มไว้ต่อท้าย Dropdown ทั้ง 3 แถว
     @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=3)
     async def call_people_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
