@@ -638,7 +638,7 @@ async def save_boss_data():
             data_to_save[boss_name] = {
                 "spawn_time": st.isoformat(),
                 "spawnTimeMs": spawn_ms,
-                "channel_id": data.get("channel_id"),
+                "channel_id": data.get("channel_id"),  # 👈 คงค่า channel_id ไว้ให้ถูกต้องเสมอ
                 "notified_advance": data.get("notified_advance", False),
                 "noticeMinutes": int(ADVANCE_NOTICE_SECONDS.get(boss_name, 300) / 60)
             }
@@ -1124,7 +1124,9 @@ async def check_boss_notifications():
                     try:
                         await ch.send(content=send_content, embed=embed)
                         if guild:
-                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"))
+                            # 🛠️ แก้ไขให้ค้นหาห้องเสียงที่มีคนอยู่ในกิลด์นั้นๆ เพื่อให้บอทวิ่งเข้าห้องเสียงและพูดประกาศได้ทันที
+                            active_vc = next((vc for vc in guild.voice_channels if any(not m.bot for m in vc.members)), None)
+                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ", target_channel=active_vc))
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
@@ -1153,7 +1155,9 @@ async def check_boss_notifications():
                     try:
                         await ch.send(content=send_content, embed=embed)
                         if guild:
-                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ"))
+                            # 🛠️ แก้ไขให้ค้นหาห้องเสียงที่มีคนอยู่เพื่อเข้าประกาศเสียงบอตกําลังเกิด
+                            active_vc = next((vc for vc in guild.voice_channels if any(not m.bot for m in vc.members)), None)
+                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ", target_channel=active_vc))
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
