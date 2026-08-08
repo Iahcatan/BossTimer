@@ -1229,9 +1229,16 @@ async def check_auto_disconnect():
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_auto_disconnect': {e}")
 
 async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
+    all_bosses = sorted(BOSS_RESPAWN_TIMES.keys())
+    
+    # หากยังไม่ได้พิมพ์คำค้นหา ให้คืนค่า 25 รายการแรก
+    if not current:
+        return [app_commands.Choice(name=boss, value=boss) for boss in all_bosses[:25]]
+    
+    # หากมีการพิมพ์คำค้นหา ค้นหาชื่อบอสที่ตรงกัน (ไม่สนตัวพิมพ์เล็ก-ใหญ่)
     choices = [
         app_commands.Choice(name=boss, value=boss)
-        for boss in BOSS_RESPAWN_TIMES.keys()
+        for boss in all_bosses
         if current.lower() in boss.lower()
     ]
     return choices[:25]
@@ -1239,6 +1246,76 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
 # ==========================================
 # 🎛️ 8. Dynamic Boss Select & Quick Actions
 # ==========================================
+class BossTimeModal(discord.ui.Modal, title="⏱️ ระบุเวลาที่บอสตาย"):
+    time_input = discord.ui.TextInput(
+        label="เวลาที่ตาย (ระบบ 24 ชม.)",
+        placeholder="เช่น 17:30 หรือ 1730 (เว้นว่างไว้หากเป็นเวลาปัจจุบัน)",
+        required=False,
+        max_length=8
+    )
+
+    def __init__(self, boss_name: str):
+        super().__init__()
+        self.boss_name = boss_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        now = datetime.now(TZ_THAI)
+        input_val = self.time_input.value.strip() if self.time_input.value else ""
+
+        if input_val:
+            # จัดการแปลงรูปแบบเวลา เช่น 1730 -> 17:30
+            clean_time = input_val.replace(".", ":").replace(" ", "")
+            if clean_time.isdigit():
+                if len(clean_time) == 3:  # เช่น 930 -> 09:30
+                    clean_time = f"0{clean_time[0]}:{clean_time[1:]}"
+                elif len(clean_time) == 4:  # เช่น 1730 -> 17:30
+                    clean_time = f"{clean_time[:2]}:{clean_time[2:]}"
+
+            try:
+                parts = [int(p) for p in clean_time.split(":")]
+                if len(parts) == 2:
+                    hh, mm, ss = parts[0], parts[1], 0
+                elif len(parts) == 3:
+                    hh, mm, ss = parts
+                else:
+                    raise ValueError
+
+                boss_died_at = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+                if boss_died_at > now:
+                    boss_died_at -= timedelta(days=1)
+            except ValueError:
+                await interaction.followup.send("❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอก เช่น `17:30` หรือ `1730`", ephemeral=True)
+                return
+        else:
+            boss_died_at = now
+
+        next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[self.boss_name]
+
+        with schedule_lock:
+            boss_schedule[self.boss_name] = {
+                "spawn_time": next_spawn,
+                "channel_id": interaction.channel_id,
+                "notified_advance": False
+            }
+        await save_boss_data()
+
+        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
+        embed.add_field(name="👾 ชื่อบอส", value=f"`{self.boss_name}`", inline=True)
+        embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
+        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[self.boss_name], inline=True)
+        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
+        embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {interaction.user.display_name}")
+
+        await interaction.followup.send(embed=embed)
+        await send_audit_log(
+            interaction.guild, 
+            interaction.user, 
+            "กดปุ่มบอสตาย (Quick Action)", 
+            f"👾 บอส: `{self.boss_name}`\n⏱️ เวลาตาย: {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", 
+            discord.Color.red()
+        )
+
 class BossSelect(discord.ui.Select):
     def __init__(self, boss_chunk: list, placeholder: str, custom_id: str, row: int):
         options = [
@@ -1265,50 +1342,33 @@ class QuickActionsView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         
-        all_bosses = list(BOSS_RESPAWN_TIMES.keys())
+        all_bosses = sorted(BOSS_RESPAWN_TIMES.keys())
         self.selected_boss = all_bosses[0] if all_bosses else "Wadangka"
         
-        # แบ่งบอสเป็น Chunk ละไม่เกิน 25 ตัว (สูงสุด 3 แถว รวมได้ 75 ตัว)
-        chunks = [all_bosses[i:i + 25] for i in range(0, min(len(all_bosses), 75), 25)]
+        # แบ่งรายชื่อบอสออกเป็น Chunk ละไม่เกิน 25 ตัว (สูงสุด 3 แถว แถวละ 25 ตัว รวมสูงสุด 75 ตัว)
+        chunks = []
+        for i in range(0, min(len(all_bosses), 75), 25):
+            chunks.append(all_bosses[i:i + 25])
         
         start_num = 1
         for index, chunk in enumerate(chunks):
             end_num = start_num + len(chunk) - 1
             placeholder = f"🔻 เลือกบอส (ชุดที่ {index + 1}: ลำดับ {start_num}-{end_num})"
-            # บังคับกำหนด row=0, row=1, row=2 ชัดเจนให้กับ Select Menu แต่ละแถว
+            # เพิ่ม Dropdown ในแถว index (0, 1, 2)
             self.add_item(BossSelect(chunk, placeholder, f"select_boss_quick_{index}", row=index))
             start_num = end_num + 1
 
-    # กำหนด row=3 เพื่อวางปุ่มทั้งหมดลงในแถวที่ 4 (ต่อท้ายจาก Select Menu ทั้ง 3 แถว)
+    # ปรับ row=3 เพื่อวางปุ่มไว้ต่อท้าย Dropdown ทั้ง 3 แถว
     @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick", row=3)
     async def boss_killed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
             await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
             return
 
-        await interaction.response.defer()
-        boss_name = self.selected_boss
-        now = datetime.now(TZ_THAI)
-        next_spawn = now + BOSS_RESPAWN_TIMES[boss_name]
+        # เปิดหน้าต่าง Modal ให้ผู้ใช้ใส่เวลาที่ตายเองได้
+        await interaction.response.send_modal(BossTimeModal(self.selected_boss))
 
-        with schedule_lock:
-            boss_schedule[boss_name] = {
-                "spawn_time": next_spawn,
-                "channel_id": interaction.channel_id,
-                "notified_advance": False
-            }
-        await save_boss_data()
-
-        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
-        embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-        embed.add_field(name="⏱️ เวลาที่ตาย", value=now.strftime("%H:%M:%S น."), inline=True)
-        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[boss_name], inline=True)
-        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
-        embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {interaction.user.display_name}")
-
-        await interaction.followup.send(embed=embed)
-        await send_audit_log(interaction.guild, interaction.user, "กดปุ่มบอสตาย (Quick Action)", f"👾 บอส: `{boss_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
-
+    # ปรับ row=3 เพื่อวางปุ่มไว้ต่อท้าย Dropdown ทั้ง 3 แถว
     @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=3)
     async def call_people_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_user_permission(interaction.user):
