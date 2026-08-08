@@ -240,7 +240,10 @@ def dashboard():
     with schedule_lock:
         schedule_copy = boss_schedule.copy()
         
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: x[1]["spawn_time"])
+    sorted_bosses = sorted(
+        schedule_copy.items(), 
+        key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
+    )
     
     for boss_name, data in sorted_bosses:
         spawn_time = parse_to_thai_datetime(data["spawn_time"])
@@ -805,6 +808,8 @@ async def load_custom_bosses():
             BOSS_CD_TEXT[boss_name] = data["cd_text"]
             ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
             ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
+            if boss_name not in BOSS_PRONUNCIATION:
+                BOSS_PRONUNCIATION[boss_name] = boss_name
 
 # ==========================================
 # 🤖 6. Discord Bot Setup & Voice Helper
@@ -875,7 +880,7 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
     - หากระบุ target_channel มา จะพูดเฉพาะห้องนั้น
     - หากไม่ระบุ (None) จะทำการวิ่งไปแจ้งเตือนพูดทุกๆ ห้องที่มีคนอยู่จริงในเซิร์ฟเวอร์
     """
-    if not guild: return
+    if not guild or not text: return
 
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
@@ -911,11 +916,18 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
             for channel in target_channels:
                 vc = guild.voice_client
                 try:
-                    if not vc or not vc.is_connected():
-                        vc = await channel.connect(reconnect=True)
+                    if vc is None:
+                        vc = await channel.connect(reconnect=True, timeout=15)
                         await asyncio.sleep(0.5)
                     else:
-                        if vc.channel != channel:
+                        if not vc.is_connected():
+                            try:
+                                await vc.disconnect(force=True)
+                            except Exception:
+                                pass
+                            vc = await channel.connect(reconnect=True, timeout=15)
+                            await asyncio.sleep(0.5)
+                        elif vc.channel != channel:
                             await vc.move_to(channel)
                             await asyncio.sleep(0.5)
 
@@ -1117,6 +1129,7 @@ async def check_boss_notifications():
                     color=discord.Color.gold()
                 )
                 
+                notified_guild_ids = set()
                 for ch in channels_to_notify:
                     guild = ch.guild if hasattr(ch, "guild") else None
                     mentions = []
@@ -1129,11 +1142,13 @@ async def check_boss_notifications():
                     send_content = mention_target if mention_target.strip() else None
                     try:
                         await ch.send(content=send_content, embed=embed)
-                        if guild:
-                            # ปล่อยว่าง target_channel เพื่อให้ระบบวนไปพูดแจ้งเตือนทุกห้องที่มีคนอยู่
-                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"))
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
+
+                    if guild and guild.id not in notified_guild_ids:
+                        notified_guild_ids.add(guild.id)
+                        # วิ่งเข้าไปแจ้งเตือนทางเสียงทุกห้องที่มีคนอยู่
+                        asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"))
                     
                 with schedule_lock:
                     if boss_name in boss_schedule:
@@ -1147,6 +1162,7 @@ async def check_boss_notifications():
                     color=discord.Color.green()
                 )
                 
+                notified_guild_ids = set()
                 for ch in channels_to_notify:
                     guild = ch.guild if hasattr(ch, "guild") else None
                     mentions = []
@@ -1159,11 +1175,13 @@ async def check_boss_notifications():
                     send_content = mention_target if mention_target.strip() else None
                     try:
                         await ch.send(content=send_content, embed=embed)
-                        if guild:
-                            # ปล่อยว่าง target_channel เพื่อให้ระบบวนไปพูดแจ้งเตือนทุกห้องที่มีคนอยู่
-                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ"))
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
+
+                    if guild and guild.id not in notified_guild_ids:
+                        notified_guild_ids.add(guild.id)
+                        # วิ่งเข้าไปแจ้งเตือนทางเสียงทุกห้องที่มีคนอยู่
+                        asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ"))
                     
                 with schedule_lock:
                     if boss_name in boss_schedule:
@@ -1208,7 +1226,10 @@ async def update_live_embed():
         if not schedule_copy:
             embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
         else:
-            sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
+            sorted_bosses = sorted(
+                schedule_copy.items(), 
+                key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
+            )
             
             display_bosses = sorted_bosses[:20]
             for boss, data in display_bosses:
@@ -1448,6 +1469,11 @@ async def send_quick_panel(interaction: discord.Interaction):
     view = QuickActionsView()
     await interaction.followup.send(embed=embed, view=view)
 
+    # ส่งเสียงพูดแจ้งเวลาบอสไล่ตามทุกห้องที่มีคนอยู่เมื่อรันคำสั่ง /panel
+    embed_summary, tts_text = generate_boss_time_summary()
+    if tts_text and interaction.guild:
+        asyncio.create_task(speak_in_guild(interaction.guild, tts_text))
+
 # ==========================================
 # 🔊 9. Voice & Notify Commands
 # ==========================================
@@ -1593,7 +1619,10 @@ def generate_boss_time_summary():
     if not schedule_copy:
         return None, "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ"
 
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
+    sorted_bosses = sorted(
+        schedule_copy.items(), 
+        key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
+    )
 
     embed = discord.Embed(
         title="⌛ สรุปเวลาที่เหลือของบอสทุกตัว (เรียงจากน้อยไปมาก)",
@@ -1753,6 +1782,8 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
     BOSS_CD_TEXT[matched_name] = cd_text
     ADVANCE_NOTICE_SECONDS[matched_name] = notice_minutes * 60
     ADVANCE_NOTICE_TEXT[matched_name] = f"{notice_minutes} นาที"
+    if matched_name not in BOSS_PRONUNCIATION:
+        BOSS_PRONUNCIATION[matched_name] = matched_name
 
     await save_custom_bosses_to_github()
 
@@ -1807,7 +1838,10 @@ async def boss_status(interaction: discord.Interaction):
     now = datetime.now(TZ_THAI)
     embed = discord.Embed(title="📜 ตารางเวลาบอสเกิดทั้งหมด", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.blue())
 
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
+    sorted_bosses = sorted(
+        schedule_copy.items(), 
+        key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
+    )
     
     display_bosses = sorted_bosses[:20]
     for boss, data in display_bosses:
