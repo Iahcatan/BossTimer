@@ -51,7 +51,7 @@ logging.getLogger('discord.voice_state').setLevel(logging.WARNING)
 # ==========================================
 schedule_lock = threading.Lock()
 is_bot_ready = False
-is_updating_from_bot = False  # Flag สำหรับป้องกัน Infinite Re-entry จาก Listener
+is_updating_from_bot = False
 
 # ==========================================
 # ⚙️ 2. ตั้งค่า Timezone ไทย & Config
@@ -59,7 +59,6 @@ is_updating_from_bot = False  # Flag สำหรับป้องกัน Inf
 TZ_THAI = timezone(timedelta(hours=7))
 
 def parse_to_thai_datetime(data_val):
-    """ฟังก์ชันช่วยแปลงข้อมูลเวลาจากชนิดต่างๆ ให้เป็น datetime (TZ_THAI)"""
     if isinstance(data_val, (int, float)):
         return datetime.fromtimestamp(data_val / 1000.0, tz=TZ_THAI)
     elif isinstance(data_val, str):
@@ -77,21 +76,20 @@ def parse_to_thai_datetime(data_val):
     return None
 
 def parse_time_input(time_str: str, now: datetime) -> datetime:
-    """แปลงรูปแบบเวลาที่ผู้ใช้กรอกให้เป็น datetime รองรับ HHMM และ HHMMSS"""
     if not time_str or not time_str.strip():
         return now
 
     cleaned = time_str.strip().replace(".", ":")
 
-    # กรณีเป็นตัวเลข 3 ถึง 6 หลัก เช่น 1730, 0530, 233200
+    # แก้ไขการตรวจจับเวลาให้รองรับความยาว 3, 4, 5 และ 6 หลัก
     if re.fullmatch(r'\d{3,6}', cleaned):
-        if len(cleaned) == 3: # HMM
+        if len(cleaned) == 3:
             hh, mm, ss = int(cleaned[0]), int(cleaned[1:]), 0
-        elif len(cleaned) == 4: # HHMM
+        elif len(cleaned) == 4:
             hh, mm, ss = int(cleaned[:2]), int(cleaned[2:]), 0
-        elif len(cleaned) == 5: # HMMSS
+        elif len(cleaned) == 5:
             hh, mm, ss = int(cleaned[0]), int(cleaned[1:3]), int(cleaned[3:])
-        elif len(cleaned) == 6: # HHMMSS
+        elif len(cleaned) == 6:
             hh, mm, ss = int(cleaned[:2]), int(cleaned[2:4]), int(cleaned[4:])
     elif ":" in cleaned:
         parts = [int(p) for p in cleaned.split(":") if p.isdigit()]
@@ -206,16 +204,12 @@ HTML_TEMPLATE = """
                         {% for boss in bosses %}
                         <tr>
                             <td class="fw-bold text-info">{{ boss.name }}</td>
-                            <td>{{ boss.spawn_time }}</td>
+                            <td>{{ boss.spawn_time }} น.</td>
                             <td>
-                                {% if boss.has_record %}
-                                    {% if boss.is_spawned %}
-                                        <span class="badge bg-danger">⚔️ เกิดแล้ว!</span>
-                                    {% else %}
-                                        <span class="badge bg-primary">⏳ เหลือ {{ boss.time_left }}</span>
-                                    {% endif %}
+                                {% if boss.is_spawned %}
+                                    <span class="badge bg-danger">⚔️ เกิดแล้ว!</span>
                                 {% else %}
-                                    <span class="badge bg-secondary">รอการบันทึก</span>
+                                    <span class="badge bg-primary">⏳ เหลือ {{ boss.time_left }}</span>
                                 {% endif %}
                             </td>
                             <td><small class="text-muted">{{ boss.notice_text }}</small></td>
@@ -245,55 +239,34 @@ def dashboard():
     with schedule_lock:
         schedule_copy = boss_schedule.copy()
         
-    # ดึงรายชื่อบอสทั้งหมดที่มีในระบบ เพื่อให้บอสใหม่ที่ถูก Add โชว์ขึ้นมาด้วย
-    all_bosses = list(BOSS_RESPAWN_TIMES.keys())
+    sorted_bosses = sorted(
+        schedule_copy.items(), 
+        key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
+    )
     
-    active_bosses = []
-    inactive_bosses = []
-    
-    for boss_name in all_bosses:
-        notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
-        if boss_name in schedule_copy:
-            data = schedule_copy[boss_name]
-            spawn_time = parse_to_thai_datetime(data["spawn_time"])
-            if not spawn_time: continue
+    for boss_name, data in sorted_bosses:
+        spawn_time = parse_to_thai_datetime(data["spawn_time"])
+        if not spawn_time:
+            continue
 
-            time_left_sec = (spawn_time - now).total_seconds()
-            
-            if time_left_sec <= 0:
-                time_left_str = "เกิดแล้ว!"
-                is_spawned = True
-            else:
-                m, s = divmod(int(time_left_sec), 60)
-                h, m = divmod(m, 60)
-                time_left_str = f"{h:02d}:{m:02d}:{s:02d} ชม."
-                is_spawned = False
-
-            active_bosses.append({
-                "name": boss_name,
-                "spawn_time": spawn_time.strftime("%H:%M:%S น."),
-                "spawn_obj": spawn_time,
-                "time_left": time_left_str,
-                "is_spawned": is_spawned,
-                "notice_text": notice_text,
-                "has_record": True
-            })
-        else:
-            inactive_bosses.append({
-                "name": boss_name,
-                "spawn_time": "-",
-                "time_left": "รอการบันทึก",
-                "is_spawned": False,
-                "notice_text": notice_text,
-                "has_record": False
-            })
-
-    # เรียงลำดับบอสที่กำลังจะเกิดก่อน แล้วตามด้วยบอสที่ยังไม่ถูกระบุเวลา
-    active_bosses.sort(key=lambda x: x["spawn_obj"])
-    for b in active_bosses:
-        del b["spawn_obj"]
+        time_left_sec = (spawn_time - now).total_seconds()
         
-    boss_list = active_bosses + inactive_bosses
+        if time_left_sec <= 0:
+            time_left_str = "เกิดแล้ว!"
+            is_spawned = True
+        else:
+            m, s = divmod(int(time_left_sec), 60)
+            h, m = divmod(m, 60)
+            time_left_str = f"{h:02d}:{m:02d}:{s:02d} ชม."
+            is_spawned = False
+
+        boss_list.append({
+            "name": boss_name,
+            "spawn_time": spawn_time.strftime("%H:%M:%S"),
+            "time_left": time_left_str,
+            "is_spawned": is_spawned,
+            "notice_text": ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
+        })
 
     return render_template_string(HTML_TEMPLATE, bosses=boss_list)
 
@@ -656,7 +629,6 @@ def save_json_local(filename: str, data: dict):
         print(f"❌ เซฟ {filename} ลง local ไม่สำเร็จ: {e}")
 
 async def save_boss_data():
-    """บันทึกตารางบอสลง Firebase Realtime Database และ Local (แก้ไขไม่ให้บล็อก Event Loop)"""
     global is_updating_from_bot
     with schedule_lock:
         data_to_save = {}
@@ -685,7 +657,6 @@ async def save_boss_data():
     await asyncio.to_thread(save_json_local, DATA_FILE, data_to_save)
 
 async def load_boss_data():
-    """โหลดตารางบอสจาก Firebase Realtime Database เมื่อเริ่มระบบ"""
     global boss_schedule
     saved_data = None
     try:
@@ -713,7 +684,6 @@ async def load_boss_data():
         print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
 def start_firebase_listener(loop):
-    """Real-time Listener คอยซิงค์ข้อมูลจาก Firebase เมื่อฝั่ง Web/App มีการเปลี่ยนแปลง"""
     def listener(event):
         global is_updating_from_bot
         if not is_bot_ready:
@@ -901,11 +871,6 @@ def clean_display_name(name: str) -> str:
     return cleaned if cleaned else "สมาชิก"
 
 async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discord.VoiceChannel = None):
-    """
-    ฟังก์ชันส่งบอทเข้าไปพูดในห้องเสียง:
-    - หากระบุ target_channel มา จะพูดเฉพาะห้องนั้น
-    - หากไม่ระบุ (None) จะทำการวิ่งไปแจ้งเตือนพูดทุกๆ ห้องที่มีคนอยู่จริงในเซิร์ฟเวอร์
-    """
     if not guild or not text: return
 
     if guild.id not in voice_locks:
@@ -915,7 +880,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         if target_channel:
             target_channels = [target_channel]
         else:
-            # ดึงห้องเสียงทั้งหมดที่มีสมาชิกตัวจริง (ไม่นับ Bot) อยู่ข้างใน
             target_channels = [
                 channel for channel in guild.voice_channels
                 if any(not m.bot for m in channel.members)
@@ -933,28 +897,29 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
             if not os.path.exists(tts_filename) or os.path.getsize(tts_filename) == 0:
                 return
         except Exception as tts_err:
-            print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS ('{text}'): {tts_err}")
+            print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS: {tts_err}")
             return
 
         ffmpeg_executable = get_ffmpeg_path()
 
         try:
-            for channel in target_channels:
-                vc = guild.voice_client
+            for idx, channel in enumerate(target_channels):
                 try:
-                    # จัดการการเข้าห้อง / ย้ายห้อง พร้อมใส่ Delay ป้องกันบัค Discord ลืมเชื่อมต่อเสียง
+                    vc = guild.voice_client
                     if vc is None:
                         vc = await channel.connect(reconnect=True, timeout=15)
                         await asyncio.sleep(1.0)
                     else:
                         if not vc.is_connected():
-                            try: await vc.disconnect(force=True)
-                            except Exception: pass
+                            try:
+                                await vc.disconnect(force=True)
+                            except Exception:
+                                pass
                             vc = await channel.connect(reconnect=True, timeout=15)
                             await asyncio.sleep(1.0)
-                        elif vc.channel.id != channel.id:
+                        elif vc.channel != channel:
                             await vc.move_to(channel)
-                            await asyncio.sleep(1.0) # สำคัญมาก! ช่วยให้พร้อมเล่นเสียงเมื่อย้ายห้อง
+                            await asyncio.sleep(1.0)
 
                     if vc.is_playing():
                         vc.stop()
@@ -971,22 +936,26 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
 
                     def after_playing(error):
                         if error:
-                            print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง: {error}")
+                            print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียงใน {channel.name}: {error}")
                         loop.call_soon_threadsafe(play_finished.set)
 
-                    vc.play(audio_source, after=after_playing)
                     try:
-                        # รอให้เล่นเสียงให้จบ หรือตัดจบถ้าเกิน 30 วินาที
+                        vc.play(audio_source, after=after_playing)
                         await asyncio.wait_for(play_finished.wait(), timeout=30)
                     except asyncio.TimeoutError:
-                        print("⚠️ การเล่นเสียง TTS หมดเวลา (Timeout)")
-                    
-                    await asyncio.sleep(0.5) # พักเล็กน้อยหลังพูดจบก่อนที่จะมูฟไปห้องอื่น
+                        print(f"⚠️ การเล่นเสียง TTS หมดเวลา (Timeout) ในห้อง {channel.name}")
+                    except Exception as play_err:
+                        print(f"❌ ระบบเล่นเสียงขัดข้องในห้อง {channel.name}: {play_err}")
+                        loop.call_soon_threadsafe(play_finished.set)
+
+                    # หน่วงเวลาเล็กน้อยก่อนย้ายห้องถัดไป เพื่อป้องกัน Rate Limit
+                    if idx < len(target_channels) - 1:
+                        await asyncio.sleep(1.5)
 
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
 
-            # ไล่แจ้งครบทุกห้องแล้ว ทำการตัดสายออก
+            # สั่งตัดสายหลังจากตระเวนพูดจบทุกห้อง
             vc = guild.voice_client
             if vc and vc.is_connected():
                 try:
@@ -1175,7 +1144,6 @@ async def check_boss_notifications():
 
                     if guild and guild.id not in notified_guild_ids:
                         notified_guild_ids.add(guild.id)
-                        # วิ่งเข้าไปแจ้งเตือนทางเสียงทุกห้องที่มีคนอยู่
                         asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"))
                     
                 with schedule_lock:
@@ -1208,7 +1176,6 @@ async def check_boss_notifications():
 
                     if guild and guild.id not in notified_guild_ids:
                         notified_guild_ids.add(guild.id)
-                        # วิ่งเข้าไปแจ้งเตือนทางเสียงทุกห้องที่มีคนอยู่
                         asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ"))
                     
                 with schedule_lock:
@@ -1223,7 +1190,6 @@ async def check_boss_notifications():
 
 @tasks.loop(seconds=60)
 async def update_live_embed():
-    """อัปเดต Live Embed โดยการจำกัดจำนวน Field ไม่ให้เกิน 20 เพื่อป้องกันข้อผิดพลาดจาก Discord"""
     global cached_live_message
     try:
         if not live_message_config: return
@@ -1474,7 +1440,6 @@ class QuickActionsView(discord.ui.View):
         spoken_boss = BOSS_PRONUNCIATION.get(self.selected_boss, self.selected_boss)
         spoken_text = f"เรียกคนลุยบอส {spoken_boss} ด่วนค่ะ"
         if guild:
-            # วิ่งกระจายเสียงพูดเรียกคนไปทุกห้องที่มีคนอยู่
             asyncio.create_task(speak_in_guild(guild, spoken_text))
 
         await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{self.selected_boss}`", discord.Color.gold())
@@ -1497,7 +1462,6 @@ async def send_quick_panel(interaction: discord.Interaction):
     view = QuickActionsView()
     await interaction.followup.send(embed=embed, view=view)
 
-    # ส่งเสียงพูดแจ้งเวลาบอสไล่ตามทุกห้องที่มีคนอยู่เมื่อรันคำสั่ง /panel
     embed_summary, tts_text = generate_boss_time_summary()
     if tts_text and interaction.guild:
         asyncio.create_task(speak_in_guild(interaction.guild, tts_text))
@@ -1639,7 +1603,6 @@ async def disconnect_voice(interaction: discord.Interaction):
 # ⚔️ 10. Boss Slash Commands
 # ==========================================
 def generate_boss_time_summary():
-    """สร้างข้อมูล Embed สรุปเวลาบอส โดยจำกัดจำนวน Field ไม่ให้เกิน 20 เพื่อป้องกัน Discord API Error"""
     now = datetime.now(TZ_THAI)
     with schedule_lock:
         schedule_copy = boss_schedule.copy()
@@ -1711,7 +1674,6 @@ async def boss_time_slash(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
-    # ส่งเสียงประกาศสรุปเวลาบอสไปยังทุกห้องที่มีคนอยู่
     asyncio.create_task(speak_in_guild(interaction.guild, tts_text))
     await send_audit_log(interaction.guild, interaction.user, "เช็กเวลาบอสพร้อม TTS (/time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
@@ -1725,7 +1687,6 @@ async def boss_time_prefix(ctx: commands.Context):
 
     await ctx.send(embed=embed)
 
-    # ส่งเสียงประกาศสรุปเวลาบอสไปยังทุกห้องที่มีคนอยู่
     asyncio.create_task(speak_in_guild(ctx.guild, tts_text))
     await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
@@ -1815,6 +1776,15 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
 
     await save_custom_bosses_to_github()
 
+    # นำบอสเข้าตารางในสถานะ 'เกิดแล้ว' เพื่อให้แสดงบนหน้า Dashboard ทันทีที่ Add เสร็จ
+    with schedule_lock:
+        boss_schedule[matched_name] = {
+            "spawn_time": datetime.now(TZ_THAI),
+            "channel_id": interaction.channel_id,
+            "notified_advance": True
+        }
+    await save_boss_data()
+
     embed = discord.Embed(title="✅ เพิ่ม/แก้ไขบอสสำเร็จ", color=discord.Color.green())
     embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
     embed.add_field(name="⏳ คูลดาวน์", value=cd_text, inline=True)
@@ -1847,8 +1817,92 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
         
         embed = discord.Embed(title="🗑️ ลบบอสสำเร็จ", description=f"ทำการลบข้อมูลเวลาของบอส **{matched_key}** ออกจากระบบเรียบร้อยแล้ว", color=discord.Color.orange())
         await interaction.followup.send(embed=embed)
-        await send_audit_log(interaction.guild, interaction.user, "ลบบอส (/delboss)", f"🗑️ ลบข้อมูลเวลาบอส: `{matched_key}`", discord.Color.orange())
+        await send_audit_log(interaction.guild, interaction.user, "ลบบอส (/delboss)", f"🗑️ ลบบอส: `{matched_key}`", discord.Color.orange())
     else:
-        await interaction.followup.send(f"❌ ไม่พบชื่อบอส **{boss_name}** ในตารางปัจจุบัน!", ephemeral=True)
+        await interaction.followup.send(f"❌ ไม่พบบอส **{boss_name}** ในตารางนับถอยหลังขณะนี้", ephemeral=True)
 
-bot.run("YOUR_DISCORD_BOT_TOKEN")
+@bot.tree.command(name="status", description="เช็กสถานะเวลาบอสทั้งหมดที่กำลังนับถอยหลัง")
+async def boss_status(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    with schedule_lock:
+        schedule_copy = boss_schedule.copy()
+
+    if not schedule_copy:
+        embed = discord.Embed(title="📜 ตารางเวลาบอส", description="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ\nใช้คำสั่ง `/kill [ชื่อบอส]` เพื่อเริ่มบันทึกเวลาได้เลยครับ", color=discord.Color.blue())
+        await interaction.followup.send(embed=embed)
+        return
+
+    now = datetime.now(TZ_THAI)
+    embed = discord.Embed(title="📜 ตารางเวลาบอสเกิดทั้งหมด", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.blue())
+
+    sorted_bosses = sorted(
+        schedule_copy.items(), 
+        key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
+    )
+    
+    display_bosses = sorted_bosses[:20]
+    for boss, data in display_bosses:
+        spawn_time = parse_to_thai_datetime(data["spawn_time"])
+        if not spawn_time: continue
+        
+        time_left_sec = (spawn_time - now).total_seconds()
+        
+        if time_left_sec <= 0:
+            time_left_str = "เกิดแล้ว!"
+        else:
+            m, s = divmod(int(time_left_sec), 60)
+            h, m = divmod(m, 60)
+            if h > 0:
+                time_left_str = f"อีก {h} ชม. {m} นาที"
+            else:
+                time_left_str = f"อีก {m} นาที {s} วินาที"
+
+        notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
+        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(เตือนล่วงหน้า {notice_text})*", inline=False)
+
+    if len(sorted_bosses) > 20:
+        embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
+
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="setlive", description="ตั้งค่าป้ายไฟนับถอยหลังเวลาบอสเกิด Real-time ในช่องนี้")
+@has_allowed_role()
+async def set_live(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    now = datetime.now(TZ_THAI)
+    embed = discord.Embed(title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time", description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.teal())
+    embed.add_field(name="📌 สถานะ", value="กำลังเริ่มต้นระบบ...", inline=False)
+    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
+
+    msg = await interaction.followup.send(embed=embed)
+
+    global live_message_config, cached_live_message
+    live_message_config = {"channel_id": interaction.channel_id, "message_id": msg.id}
+    cached_live_message = msg
+    await save_live_config()
+
+    await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", f"📌 ช่อง: <#{interaction.channel_id}>\nMessage ID: `{msg.id}`", discord.Color.teal())
+
+# ==========================================
+# 🚀 11. Run Bot
+# ==========================================
+if __name__ == "__main__":
+    token = os.environ.get("DISCORD_TOKEN")
+    if token:
+        while True:
+            try:
+                bot.run(token)
+                break
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพักและรอ 60 วินาทีก่อนลองรันใหม่...")
+                    time.sleep(60)
+                else:
+                    raise e
+            except Exception as e:
+                print(f"❌ เกิดข้อผิดพลาดของระบบ: {e}")
+                break
+    else:
+        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables! กรุณาตั้งค่าก่อนรันบอท")
