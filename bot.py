@@ -870,6 +870,11 @@ def clean_display_name(name: str) -> str:
     return cleaned if cleaned else "สมาชิก"
 
 async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discord.VoiceChannel = None):
+    """
+    ฟังก์ชันส่งบอทเข้าไปพูดในห้องเสียง:
+    - หากระบุ target_channel มา จะพูดเฉพาะห้องนั้น
+    - หากไม่ระบุ (None) จะทำการวิ่งไปแจ้งเตือนพูดทุกๆ ห้องที่มีคนอยู่จริงในเซิร์ฟเวอร์
+    """
     if not guild: return
 
     if guild.id not in voice_locks:
@@ -879,6 +884,7 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         if target_channel:
             target_channels = [target_channel]
         else:
+            # ดึงห้องเสียงทั้งหมดที่มีสมาชิกตัวจริง (ไม่นับ Bot) อยู่ข้างใน
             target_channels = [
                 channel for channel in guild.voice_channels
                 if any(not m.bot for m in channel.members)
@@ -1124,8 +1130,8 @@ async def check_boss_notifications():
                     try:
                         await ch.send(content=send_content, embed=embed)
                         if guild:
-                            active_vc = next((vc for vc in guild.voice_channels if any(not m.bot for m in vc.members)), None)
-                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ", target_channel=active_vc))
+                            # ปล่อยว่าง target_channel เพื่อให้ระบบวนไปพูดแจ้งเตือนทุกห้องที่มีคนอยู่
+                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"))
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
@@ -1154,8 +1160,8 @@ async def check_boss_notifications():
                     try:
                         await ch.send(content=send_content, embed=embed)
                         if guild:
-                            active_vc = next((vc for vc in guild.voice_channels if any(not m.bot for m in vc.members)), None)
-                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ", target_channel=active_vc))
+                            # ปล่อยว่าง target_channel เพื่อให้ระบบวนไปพูดแจ้งเตือนทุกห้องที่มีคนอยู่
+                            asyncio.create_task(speak_in_guild(guild, f"บอส {spoken_name} เกิดแล้วค่ะ"))
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
                     
@@ -1419,6 +1425,7 @@ class QuickActionsView(discord.ui.View):
         spoken_boss = BOSS_PRONUNCIATION.get(self.selected_boss, self.selected_boss)
         spoken_text = f"เรียกคนลุยบอส {spoken_boss} ด่วนค่ะ"
         if guild:
+            # วิ่งกระจายเสียงพูดเรียกคนไปทุกห้องที่มีคนอยู่
             asyncio.create_task(speak_in_guild(guild, spoken_text))
 
         await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{self.selected_boss}`", discord.Color.gold())
@@ -1433,7 +1440,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         description="เลือกชื่อบอสจากเมนูด้านล่าง แล้วกดปุ่มสั่งการได้ทันที:\n\n"
                     "• **🔻 เมนูเลือกบอส**: เลือกชื่อบอสที่ต้องการ\n"
                     "• **⚔️ บอสตายแล้ว**: กดเพื่อเปิดช่องพิมพ์ระบุเวลาตาย (เช่น `17:30`, `1730` หรือเว้นว่างไว้เพื่อใช้เวลาปัจจุบัน)\n"
-                    "• **🔔 เรียกคน**: แท็กยศคนลุยบอส + ส่งเสียง TTS ประกาศตามในห้องเสียง",
+                    "• **🔔 เรียกคน**: แท็กยศคนลุยบอส + ส่งเสียง TTS ประกาศตามในห้องเสียงทุกห้องที่มีคนอยู่",
         color=discord.Color.dark_purple()
     )
     embed.set_footer(text="ระบบปุ่มกดอัตโนมัติ 24/7 • Boss Control Panel")
@@ -1647,8 +1654,8 @@ async def boss_time_slash(interaction: discord.Interaction):
 
     await interaction.followup.send(embed=embed)
 
-    target_channel = interaction.user.voice.channel if (isinstance(interaction.user, discord.Member) and interaction.user.voice) else None
-    asyncio.create_task(speak_in_guild(interaction.guild, tts_text, target_channel=target_channel))
+    # ส่งเสียงประกาศสรุปเวลาบอสไปยังทุกห้องที่มีคนอยู่
+    asyncio.create_task(speak_in_guild(interaction.guild, tts_text))
     await send_audit_log(interaction.guild, interaction.user, "เช็กเวลาบอสพร้อม TTS (/time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
 @bot.command(name="time")
@@ -1661,8 +1668,8 @@ async def boss_time_prefix(ctx: commands.Context):
 
     await ctx.send(embed=embed)
 
-    target_channel = ctx.author.voice.channel if (isinstance(ctx.author, discord.Member) and ctx.author.voice) else None
-    asyncio.create_task(speak_in_guild(ctx.guild, tts_text, target_channel=target_channel))
+    # ส่งเสียงประกาศสรุปเวลาบอสไปยังทุกห้องที่มีคนอยู่
+    asyncio.create_task(speak_in_guild(ctx.guild, tts_text))
     await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
