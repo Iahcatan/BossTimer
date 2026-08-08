@@ -1371,18 +1371,31 @@ class QuickActionsView(discord.ui.View):
     # ปรับ row=3 เพื่อวางปุ่มไว้ต่อท้าย Dropdown ทั้ง 3 แถว
     @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=3)
     async def call_people_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not check_user_permission(interaction.user):
-            await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
+        guild = interaction.guild
+        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+
+        # รายชื่อโรลที่ได้รับอนุญาต และให้แท็ก
+        allowed_role_names = ["Eternal", "Meaw", "Anti"]
+
+        # ตรวจสอบสิทธิ์ผู้ใช้: ต้องเป็น เจ้าของ Server หรือ มีโรล Eternal, Meaw, Anti ตัวใดตัวหนึ่ง
+        is_owner = (guild and guild.owner_id == interaction.user.id)
+        has_required_role = False
+
+        if member:
+            has_required_role = any(role.name in allowed_role_names for role in member.roles)
+
+        if not (is_owner or has_required_role):
+            await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้! (อนุญาตเฉพาะเจ้าของ Server และผู้ที่มีโรล Eternal, Meaw, Anti เท่านั้น)", ephemeral=True)
             return
 
         await interaction.response.defer()
-        guild = interaction.guild
 
+        # ดึง Mention เฉพาะโรล Eternal, Meaw, Anti
         mentions = []
         if guild:
-            for role_id in TARGET_ROLE_IDS:
-                role = guild.get_role(role_id)
-                if role: mentions.append(role.mention)
+            for role in guild.roles:
+                if role.name in allowed_role_names:
+                    mentions.append(role.mention)
 
         mention_target = " ".join(mentions) if mentions else "@everyone"
 
