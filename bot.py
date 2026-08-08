@@ -1231,11 +1231,9 @@ async def check_auto_disconnect():
 async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     all_bosses = sorted(BOSS_RESPAWN_TIMES.keys())
     
-    # หากยังไม่ได้พิมพ์คำค้นหา ให้คืนค่า 25 รายการแรก
     if not current:
         return [app_commands.Choice(name=boss, value=boss) for boss in all_bosses[:25]]
     
-    # หากมีการพิมพ์คำค้นหา ค้นหาชื่อบอสที่ตรงกัน (ไม่สนตัวพิมพ์เล็ก-ใหญ่)
     choices = [
         app_commands.Choice(name=boss, value=boss)
         for boss in all_bosses
@@ -1246,76 +1244,6 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
 # ==========================================
 # 🎛️ 8. Dynamic Boss Select & Quick Actions
 # ==========================================
-class BossTimeModal(discord.ui.Modal, title="⏱️ ระบุเวลาที่บอสตาย"):
-    time_input = discord.ui.TextInput(
-        label="เวลาที่ตาย (ระบบ 24 ชม.)",
-        placeholder="เช่น 17:30 หรือ 1730 (เว้นว่างไว้หากเป็นเวลาปัจจุบัน)",
-        required=False,
-        max_length=8
-    )
-
-    def __init__(self, boss_name: str):
-        super().__init__()
-        self.boss_name = boss_name
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        now = datetime.now(TZ_THAI)
-        input_val = self.time_input.value.strip() if self.time_input.value else ""
-
-        if input_val:
-            # จัดการแปลงรูปแบบเวลา เช่น 1730 -> 17:30
-            clean_time = input_val.replace(".", ":").replace(" ", "")
-            if clean_time.isdigit():
-                if len(clean_time) == 3:  # เช่น 930 -> 09:30
-                    clean_time = f"0{clean_time[0]}:{clean_time[1:]}"
-                elif len(clean_time) == 4:  # เช่น 1730 -> 17:30
-                    clean_time = f"{clean_time[:2]}:{clean_time[2:]}"
-
-            try:
-                parts = [int(p) for p in clean_time.split(":")]
-                if len(parts) == 2:
-                    hh, mm, ss = parts[0], parts[1], 0
-                elif len(parts) == 3:
-                    hh, mm, ss = parts
-                else:
-                    raise ValueError
-
-                boss_died_at = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
-                if boss_died_at > now:
-                    boss_died_at -= timedelta(days=1)
-            except ValueError:
-                await interaction.followup.send("❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอก เช่น `17:30` หรือ `1730`", ephemeral=True)
-                return
-        else:
-            boss_died_at = now
-
-        next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[self.boss_name]
-
-        with schedule_lock:
-            boss_schedule[self.boss_name] = {
-                "spawn_time": next_spawn,
-                "channel_id": interaction.channel_id,
-                "notified_advance": False
-            }
-        await save_boss_data()
-
-        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
-        embed.add_field(name="👾 ชื่อบอส", value=f"`{self.boss_name}`", inline=True)
-        embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
-        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[self.boss_name], inline=True)
-        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
-        embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {interaction.user.display_name}")
-
-        await interaction.followup.send(embed=embed)
-        await send_audit_log(
-            interaction.guild, 
-            interaction.user, 
-            "กดปุ่มบอสตาย (Quick Action)", 
-            f"👾 บอส: `{self.boss_name}`\n⏱️ เวลาตาย: {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", 
-            discord.Color.red()
-        )
-
 class BossSelect(discord.ui.Select):
     def __init__(self, boss_chunk: list, placeholder: str, custom_id: str, row: int):
         options = [
@@ -1334,7 +1262,60 @@ class BossSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         self.view.selected_boss = self.values[0]
         await interaction.response.send_message(
-            f"🎯 เลือกบอส: **{self.values[0]}** เรียบร้อยแล้ว สามารถกดปุ่มสั่งการด้านล่างได้ทันที", 
+            f"🎯 เลือกบอส: **{self.values[0]}** เรียบร้อยแล้ว", 
+            ephemeral=True
+        )
+
+class TimeSelect(discord.ui.Select):
+    def __init__(self):
+        now = datetime.now(TZ_THAI)
+        
+        options = [
+            discord.SelectOption(label="⏱️ เวลาปัจจุบัน (Current Time)", value="now", description="ใช้เวลาปัจจุบันขณะนี้", default=True),
+            discord.SelectOption(label="⏳ ย้อนหลัง 5 นาที (-5m)", value="5", description="เวลาตายก่อนปัจจุบัน 5 นาที"),
+            discord.SelectOption(label="⏳ ย้อนหลัง 10 นาที (-10m)", value="10", description="เวลาตายก่อนปัจจุบัน 10 นาที"),
+            discord.SelectOption(label="⏳ ย้อนหลัง 15 นาที (-15m)", value="15", description="เวลาตายก่อนปัจจุบัน 15 นาที"),
+            discord.SelectOption(label="⏳ ย้อนหลัง 30 นาที (-30m)", value="30", description="เวลาตายก่อนปัจจุบัน 30 นาที"),
+            discord.SelectOption(label="⏳ ย้อนหลัง 1 ชั่วโมง (-1h)", value="60", description="เวลาตายก่อนปัจจุบัน 1 ชั่วโมง"),
+        ]
+        
+        # เพิ่มช่วงเวลา (รอบ 30 นาที ย้อนหลังลงไป)
+        current_minute = now.minute
+        rounded_minute = 30 if current_minute >= 30 else 0
+        base_time = now.replace(minute=rounded_minute, second=0, microsecond=0)
+        if rounded_minute == 0 and current_minute < 30:
+            base_time -= timedelta(minutes=30)
+            
+        for i in range(10):
+            slot_time = base_time - timedelta(minutes=30 * i)
+            time_str = slot_time.strftime("%H:%M")
+            options.append(
+                discord.SelectOption(label=f"🕒 เวลา {time_str} น.", value=f"time_{time_str}", description=f"ระบุเวลาตายเป็น {time_str}")
+            )
+
+        super().__init__(
+            placeholder="🕒 เลือกเวลาที่บอสตาย (เช่น เวลาปัจจุบัน หรือ 17:30)",
+            min_values=1,
+            max_values=1,
+            options=options[:25],
+            custom_id="select_time_quick",
+            row=4
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_time_value = self.values[0]
+        val = self.values[0]
+        if val == "now":
+            desc = "เวลาปัจจุบัน"
+        elif val.isdigit():
+            desc = f"ย้อนหลัง {val} นาที"
+        elif val.startswith("time_"):
+            desc = f"เวลา {val.replace('time_', '')} น."
+        else:
+            desc = val
+            
+        await interaction.response.send_message(
+            f"⏱️ เลือกเวลาตายเป็น: **{desc}** เรียบร้อยแล้ว สามารถกดปุ่ม **⚔️ บอสตายแล้ว** ด้านบนได้ทันที",
             ephemeral=True
         )
 
@@ -1344,8 +1325,9 @@ class QuickActionsView(discord.ui.View):
         
         all_bosses = sorted(BOSS_RESPAWN_TIMES.keys())
         self.selected_boss = all_bosses[0] if all_bosses else "Wadangka"
+        self.selected_time_value = "now"
         
-        # แบ่งรายชื่อบอสออกเป็น Chunk ละไม่เกิน 25 ตัว (สูงสุด 3 แถว แถวละ 25 ตัว รวมสูงสุด 75 ตัว)
+        # แบ่งรายชื่อบอสออกเป็น Chunk ละไม่เกิน 25 ตัว (แถว 0, 1, 2)
         chunks = []
         for i in range(0, min(len(all_bosses), 75), 25):
             chunks.append(all_bosses[i:i + 25])
@@ -1354,64 +1336,105 @@ class QuickActionsView(discord.ui.View):
         for index, chunk in enumerate(chunks):
             end_num = start_num + len(chunk) - 1
             placeholder = f"🔻 เลือกบอส (ชุดที่ {index + 1}: ลำดับ {start_num}-{end_num})"
-            # เพิ่ม Dropdown ในแถว index (0, 1, 2)
             self.add_item(BossSelect(chunk, placeholder, f"select_boss_quick_{index}", row=index))
             start_num = end_num + 1
 
-    # ปรับ row=3 เพื่อวางปุ่มไว้ต่อท้าย Dropdown ทั้ง 3 แถว
-    @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick", row=3)
-    async def boss_killed_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not check_user_permission(interaction.user):
-            await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
-            return
+        # เพิ่มปุ่มคำสั่งในแถวที่ 3
+        @discord.ui.button(label="⚔️ บอสตายแล้ว", style=discord.ButtonStyle.danger, custom_id="btn_boss_killed_quick", row=3)
+        async def boss_killed_button(interaction: discord.Interaction, button: discord.ui.Button):
+            if not check_user_permission(interaction.user):
+                await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้!", ephemeral=True)
+                return
 
-        # เปิดหน้าต่าง Modal ให้ผู้ใช้ใส่เวลาที่ตายเองได้
-        await interaction.response.send_modal(BossTimeModal(self.selected_boss))
+            await interaction.response.defer()
+            now = datetime.now(TZ_THAI)
+            val = getattr(self, "selected_time_value", "now")
 
-    # ปรับ row=3 เพื่อวางปุ่มไว้ต่อท้าย Dropdown ทั้ง 3 แถว
-    @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=3)
-    async def call_people_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        member = interaction.user if isinstance(interaction.user, discord.Member) else None
+            if val == "now":
+                boss_died_at = now
+            elif val.isdigit():
+                boss_died_at = now - timedelta(minutes=int(val))
+            elif val.startswith("time_"):
+                time_str = val.replace("time_", "")
+                try:
+                    hh, mm = map(int, time_str.split(":"))
+                    boss_died_at = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if boss_died_at > now:
+                        boss_died_at -= timedelta(days=1)
+                except Exception:
+                    boss_died_at = now
+            else:
+                boss_died_at = now
 
-        # รายชื่อโรลที่ได้รับอนุญาต และให้แท็ก
-        allowed_role_names = ["Eternal", "Meaw", "Anti"]
+            next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[self.selected_boss]
 
-        # ตรวจสอบสิทธิ์ผู้ใช้: ต้องเป็น เจ้าของ Server หรือ มีโรล Eternal, Meaw, Anti ตัวใดตัวหนึ่ง
-        is_owner = (guild and guild.owner_id == interaction.user.id)
-        has_required_role = False
+            with schedule_lock:
+                boss_schedule[self.selected_boss] = {
+                    "spawn_time": next_spawn,
+                    "channel_id": interaction.channel_id,
+                    "notified_advance": False
+                }
+            await save_boss_data()
 
-        if member:
-            has_required_role = any(role.name in allowed_role_names for role in member.roles)
+            embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
+            embed.add_field(name="👾 ชื่อบอส", value=f"`{self.selected_boss}`", inline=True)
+            embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
+            embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[self.selected_boss], inline=True)
+            embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
+            embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {interaction.user.display_name}")
 
-        if not (is_owner or has_required_role):
-            await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้! (อนุญาตเฉพาะเจ้าของ Server และผู้ที่มีโรล Eternal, Meaw, Anti เท่านั้น)", ephemeral=True)
-            return
+            await interaction.followup.send(embed=embed)
+            await send_audit_log(
+                interaction.guild, 
+                interaction.user, 
+                "กดปุ่มบอสตาย (Quick Action)", 
+                f"👾 บอส: `{self.selected_boss}`\n⏱️ เวลาตาย: {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", 
+                discord.Color.red()
+            )
 
-        await interaction.response.defer()
+        @discord.ui.button(label="🔔 เรียกคน", style=discord.ButtonStyle.primary, custom_id="btn_call_people_quick", row=3)
+        async def call_people_button(interaction: discord.Interaction, button: discord.ui.Button):
+            guild = interaction.guild
+            member = interaction.user if isinstance(interaction.user, discord.Member) else None
 
-        # ดึง Mention เฉพาะโรล Eternal, Meaw, Anti
-        mentions = []
-        if guild:
-            for role in guild.roles:
-                if role.name in allowed_role_names:
-                    mentions.append(role.mention)
+            allowed_role_names = ["Eternal", "Meaw", "Anti"]
+            is_owner = (guild and guild.owner_id == interaction.user.id)
+            has_required_role = False
 
-        mention_target = " ".join(mentions) if mentions else "@everyone"
+            if member:
+                has_required_role = any(role.name in allowed_role_names for role in member.roles)
 
-        embed = discord.Embed(
-            title="🔔 เรียกสมาชิกคนลุยบอส!",
-            description=f"📢 {interaction.user.mention} เรียกสมาชิกลุยบอส **{self.selected_boss}** ด่วน!",
-            color=discord.Color.gold()
-        )
-        await interaction.followup.send(content=mention_target, embed=embed)
+            if not (is_owner or has_required_role):
+                await interaction.response.send_message("❌ คุณไม่มีสิทธิ์ใช้งานปุ่มนี้! (อนุญาตเฉพาะเจ้าของ Server และผู้ที่มีโรล Eternal, Meaw, Anti เท่านั้น)", ephemeral=True)
+                return
 
-        spoken_boss = BOSS_PRONUNCIATION.get(self.selected_boss, self.selected_boss)
-        spoken_text = f"เรียกคนลุยบอส {spoken_boss} ด่วนค่ะ"
-        if guild:
-            asyncio.create_task(speak_in_guild(guild, spoken_text))
+            await interaction.response.defer()
 
-        await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{self.selected_boss}`", discord.Color.gold())
+            mentions = []
+            if guild:
+                for role in guild.roles:
+                    if role.name in allowed_role_names:
+                        mentions.append(role.mention)
+
+            mention_target = " ".join(mentions) if mentions else "@everyone"
+
+            embed = discord.Embed(
+                title="🔔 เรียกสมาชิกคนลุยบอส!",
+                description=f"📢 {interaction.user.mention} เรียกสมาชิกลุยบอส **{self.selected_boss}** ด่วน!",
+                color=discord.Color.gold()
+            )
+            await interaction.followup.send(content=mention_target, embed=embed)
+
+            spoken_boss = BOSS_PRONUNCIATION.get(self.selected_boss, self.selected_boss)
+            spoken_text = f"เรียกคนลุยบอส {spoken_boss} ด่วนค่ะ"
+            if guild:
+                asyncio.create_task(speak_in_guild(guild, spoken_text))
+
+            await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{self.selected_boss}`", discord.Color.gold())
+
+        # เพิ่ม TimeSelect ในแถวที่ 4
+        self.add_Item_ref = TimeSelect()
+        self.add_item(self.add_Item_ref)
 
 @bot.tree.command(name="panel", description="ส่งข้อความ Interactive Embed พร้อมปุ่มกด Quick Actions ในช่องนี้")
 @has_allowed_role()
@@ -1420,8 +1443,10 @@ async def send_quick_panel(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title="⚡ Quick Actions - แผงควบคุมเวลาบอส",
-        description="เลือกชื่อบอสจากเมนูด้านล่าง แล้วกดปุ่มสั่งการได้ทันทีโดยไม่ต้องพิมพ์คำสั่ง:\n\n"
-                    "• **⚔️ บอสตายแล้ว**: บันทึกเวลานับถอยหลังของบอสทันที\n"
+        description="เลือกชื่อบอสและเลือกเวลาจากเมนูด้านล่าง แล้วกดปุ่มสั่งการได้ทันที:\n\n"
+                    "• **🔻 เมนูบนสุด**: เลือกชื่อบอส\n"
+                    "• **🕒 เมนูล่างสุด**: เลือกเวลาตาย (เวลาปัจจุบัน, ย้อนหลัง หรือระบุเวลา เช่น 17:30)\n"
+                    "• **⚔️ บอสตายแล้ว**: บันทึกเวลานับถอยหลังของบอสทันทีตามเวลาที่เลือก\n"
                     "• **🔔 เรียกคน**: แท็กยศคนลุยบอส + ส่งเสียง TTS ประกาศตามในห้องเสียง",
         color=discord.Color.dark_purple()
     )
