@@ -63,6 +63,9 @@ def parse_to_thai_datetime(data_val):
         return datetime.fromtimestamp(data_val / 1000.0, tz=TZ_THAI)
     elif isinstance(data_val, str):
         try:
+            # แก้ไขปัญหารองรับ 'Z' Suffix จาก Javascript Date.toISOString()
+            if data_val.endswith('Z'):
+                data_val = data_val[:-1] + '+00:00'
             st = datetime.fromisoformat(data_val)
             if st.tzinfo is None:
                 return st.replace(tzinfo=TZ_THAI)
@@ -81,7 +84,6 @@ def parse_time_input(time_str: str, now: datetime) -> datetime:
 
     cleaned = time_str.strip().replace(".", ":")
 
-    # แก้ไขการตรวจจับเวลาให้รองรับความยาว 3, 4, 5 และ 6 หลัก
     if re.fullmatch(r'\d{3,6}', cleaned):
         if len(cleaned) == 3:
             hh, mm, ss = int(cleaned[0]), int(cleaned[1:]), 0
@@ -676,10 +678,16 @@ async def load_boss_data():
                     raw_st = data.get("spawn_time") or data.get("spawnTimeMs")
                     st = parse_to_thai_datetime(raw_st)
                     if st:
+                        raw_notified = data.get("notified_advance", data.get("notifiedNotice", False))
+                        if isinstance(raw_notified, str):
+                            raw_notified = raw_notified.lower() == 'true'
+                        else:
+                            raw_notified = bool(raw_notified)
+                            
                         boss_schedule[boss_name] = {
                             "spawn_time": st,
                             "channel_id": data.get("channel_id"),
-                            "notified_advance": data.get("notified_advance", data.get("notifiedNotice", False))
+                            "notified_advance": raw_notified
                         }
         print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
@@ -703,10 +711,16 @@ def start_firebase_listener(loop):
                             raw_st = data.get("spawn_time") or data.get("spawnTimeMs")
                             st = parse_to_thai_datetime(raw_st)
                             if st:
+                                raw_notified = data.get("notified_advance", data.get("notifiedNotice", False))
+                                if isinstance(raw_notified, str):
+                                    raw_notified = raw_notified.lower() == 'true'
+                                else:
+                                    raw_notified = bool(raw_notified)
+                                
                                 boss_schedule[boss_name] = {
                                     "spawn_time": st,
                                     "channel_id": data.get("channel_id"),
-                                    "notified_advance": data.get("notified_advance", data.get("notifiedNotice", False))
+                                    "notified_advance": raw_notified
                                 }
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดใน Firebase Listener: {e}")
@@ -1090,7 +1104,17 @@ async def check_boss_notifications():
                 continue
 
             channel_id = data.get("channel_id")
-            notified_advance = data.get("notified_advance", False)
+            if channel_id is not None:
+                try:
+                    channel_id = int(channel_id)
+                except ValueError:
+                    channel_id = None
+
+            raw_notified = data.get("notified_advance", False)
+            if isinstance(raw_notified, str):
+                notified_advance = raw_notified.lower() == 'true'
+            else:
+                notified_advance = bool(raw_notified)
             
             channel = None
             if channel_id:
