@@ -643,6 +643,7 @@ async def save_boss_data():
                 "spawnTimeMs": spawn_ms,
                 "channel_id": data.get("channel_id"),
                 "notified_advance": data.get("notified_advance", False),
+                "notified_spawn": data.get("notified_spawn", False), # ✅ เก็บบันทึกสถานะแจ้งเตือนการเกิดแล้ว
                 "noticeMinutes": int(ADVANCE_NOTICE_SECONDS.get(boss_name, 300) / 60)
             }
     
@@ -687,7 +688,8 @@ async def load_boss_data():
                         boss_schedule[boss_name] = {
                             "spawn_time": st,
                             "channel_id": data.get("channel_id"),
-                            "notified_advance": raw_notified
+                            "notified_advance": raw_notified,
+                            "notified_spawn": bool(data.get("notified_spawn", False)) # ✅ โหลดสถานะ
                         }
         print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
@@ -720,7 +722,8 @@ def start_firebase_listener(loop):
                                 boss_schedule[boss_name] = {
                                     "spawn_time": st,
                                     "channel_id": data.get("channel_id"),
-                                    "notified_advance": raw_notified
+                                    "notified_advance": raw_notified,
+                                    "notified_spawn": bool(data.get("notified_spawn", False)) # ✅ โหลดสถานะ
                                 }
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดใน Firebase Listener: {e}")
@@ -1175,7 +1178,8 @@ async def check_boss_notifications():
                         boss_schedule[boss_name]["notified_advance"] = True
                 changed = True
 
-            elif time_left <= 0:
+            # ✅ แก้ไขตรงนี้: แจ้งเตือนเสร็จแล้วจะเชตค่า notified_spawn เป็น True (ไม่ใช่การลบบอสทิ้ง) เพื่อให้แสดงบนหน้าแดชบอร์ดต่อ
+            elif time_left <= 0 and not data.get("notified_spawn", False):
                 embed = discord.Embed(
                     title="⚔️ บอสเกิดแล้ว!",
                     description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
@@ -1204,7 +1208,7 @@ async def check_boss_notifications():
                     
                 with schedule_lock:
                     if boss_name in boss_schedule:
-                        del boss_schedule[boss_name]
+                        boss_schedule[boss_name]["notified_spawn"] = True
                 changed = True
 
         if changed:
@@ -1381,7 +1385,8 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
             boss_schedule[self.selected_boss] = {
                 "spawn_time": next_spawn,
                 "channel_id": interaction.channel_id,
-                "notified_advance": False
+                "notified_advance": False,
+                "notified_spawn": False # ✅ รีเซ็ตค่าการแจ้งเตือนรอบใหม่
             }
         await save_boss_data()
 
@@ -1747,7 +1752,8 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         boss_schedule[matched_name] = {
             "spawn_time": next_spawn,
             "channel_id": interaction.channel_id,
-            "notified_advance": False
+            "notified_advance": False,
+            "notified_spawn": False # ✅ รีเซ็ตค่าการแจ้งเตือนรอบใหม่
         }
     await save_boss_data()
 
@@ -1805,7 +1811,8 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
         boss_schedule[matched_name] = {
             "spawn_time": datetime.now(TZ_THAI),
             "channel_id": interaction.channel_id,
-            "notified_advance": True
+            "notified_advance": True,
+            "notified_spawn": True # ✅ ป้องกันบอสใหม่ถูกลบออกจากสารบบตอนเช็กเวลาเตือน
         }
     await save_boss_data()
 
