@@ -54,9 +54,25 @@ is_bot_ready = False
 is_updating_from_bot = False
 
 # ==========================================
-# ⚙️ 2. ตั้งค่า Timezone ไทย & Config
+# ⚙️ 2. ตั้งค่า Timezone ไทย & Helper Functions
 # ==========================================
 TZ_THAI = timezone(timedelta(hours=7))
+
+def parse_bool(val, default=False) -> bool:
+    """แปลงค่าต่างๆ (String, Bool, Int) ให้เป็น Boolean อย่างถูกต้อง"""
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return bool(val)
+    if isinstance(val, str):
+        cleaned = val.strip().lower()
+        if cleaned in ('true', '1', 'yes'):
+            return True
+        if cleaned in ('false', '0', 'no'):
+            return False
+    return default
 
 def parse_to_thai_datetime(data_val):
     if not data_val:
@@ -64,7 +80,6 @@ def parse_to_thai_datetime(data_val):
     if isinstance(data_val, (int, float)):
         return datetime.fromtimestamp(data_val / 1000.0, tz=TZ_THAI)
     elif isinstance(data_val, str):
-        # ลบคำว่า " น." และช่องว่างออก เพื่อรองรับข้อมูลจากฝั่งเว็บ
         cleaned_val = data_val.replace(" น.", "").strip()
         try:
             if cleaned_val.endswith('Z'):
@@ -74,7 +89,6 @@ def parse_to_thai_datetime(data_val):
                 return st.replace(tzinfo=TZ_THAI)
             return st.astimezone(TZ_THAI)
         except ValueError:
-            # Fallback เผื่อเว็บส่งมาแค่ HH:MM:SS หรือ HH:MM
             now = datetime.now(TZ_THAI)
             try:
                 time_obj = datetime.strptime(cleaned_val, "%H:%M:%S").time()
@@ -662,8 +676,8 @@ async def save_boss_data():
                 "spawn_time": st.isoformat(),
                 "spawnTimeMs": spawn_ms,
                 "channel_id": data.get("channel_id"),
-                "notified_advance": data.get("notified_advance", False),
-                "notified_spawn": data.get("notified_spawn", False),
+                "notified_advance": parse_bool(data.get("notified_advance", False)),
+                "notified_spawn": parse_bool(data.get("notified_spawn", False)),
                 "noticeMinutes": int(ADVANCE_NOTICE_SECONDS.get(boss_name, 300) / 60)
             }
     
@@ -697,19 +711,12 @@ async def load_boss_data():
             boss_schedule.clear()
             for boss_name, data in saved_data.items():
                 if isinstance(data, dict):
-                    # 🔥 Prioritize UNIX timestamp for accuracy to bypass string formatting bugs
                     raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
                     st = parse_to_thai_datetime(raw_st)
                     if st:
-                        raw_notified = data.get("notified_advance", data.get("notifiedNotice", False))
-                        if isinstance(raw_notified, str):
-                            notified_adv = raw_notified.lower() == 'true'
-                        else:
-                            notified_adv = bool(raw_notified)
+                        notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
+                        notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
                         
-                        notified_spwn = bool(data.get("notified_spawn", False))
-                        
-                        # ✅ Auto-reset logic for safety: Force reset if time is far in future
                         time_left = (st - now).total_seconds()
                         notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
                         if time_left > notice_limit:
@@ -741,44 +748,38 @@ def start_firebase_listener(loop):
                     for boss_name, data in snapshot.items():
                         if not isinstance(data, dict): continue
                         
-                        # 🔥 ดึง SpawnTimeMs ก่อน ป้องกันเว็บส่งสตริงที่ไม่สมบูรณ์มา
                         raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
                         st = parse_to_thai_datetime(raw_st)
                         if not st: continue
 
                         existing = boss_schedule.get(boss_name)
                         
-                        # ✅ ถ้ารับข้อมูลมาจากเว็บ แล้วเวลาบอสเกิดต่างจากเดิม = หน้าเว็บเพิ่งอัปเดตใหม่ ให้ Reset แจ้งเตือน!
-                        if existing and existing["spawn_time"] != st:
+                        # ✅ หากเป็นบอสใหม่ หรือเวลาเกิดเปลี่ยนไป ให้ Reset การแจ้งเตือนเสมอ!
+                        if not existing or existing.get("spawn_time") != st:
                             notified_adv = False
                             notified_spwn = False
                         else:
-                            raw_notified = data.get("notified_advance", data.get("notifiedNotice", False))
-                            if isinstance(raw_notified, str):
-                                notified_adv = raw_notified.lower() == 'true'
-                            else:
-                                notified_adv = bool(raw_notified)
-                            
-                            notified_spwn = bool(data.get("notified_spawn", False))
-                            
-                            # Safety check: หากยังไม่ถึงเวลาเตือน ให้ปรับการเตือนเป็น False เสมอ
-                            time_left = (st - now).total_seconds()
-                            notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
-                            if time_left > notice_limit:
-                                notified_adv = False
-                                notified_spwn = False
-                            elif time_left > 0:
-                                notified_spwn = False
+                            notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
+                            notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
+
+                        time_left = (st - now).total_seconds()
+                        notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
+                        
+                        # Reset อัตโนมัติป้องกัน Flag ค้าง
+                        if time_left > notice_limit:
+                            notified_adv = False
+                            notified_spwn = False
+                        elif time_left > 0:
+                            notified_spwn = False
 
                         boss_schedule[boss_name] = {
                             "spawn_time": st,
-                            # เก็บ channel_id เดิมไว้เผื่อเว็บไม่ได้ส่งมา
                             "channel_id": data.get("channel_id") or (existing.get("channel_id") if existing else None),
                             "notified_advance": notified_adv,
                             "notified_spawn": notified_spwn
                         }
                     
-                    # เลี้ยงบอสที่ถูกลบออกจากระบบ
+                    # ลบข้อมูลบอสที่ถูกลบออกจาก Firebase
                     for boss_name in list(boss_schedule.keys()):
                         if boss_name not in snapshot:
                             del boss_schedule[boss_name]
@@ -1022,14 +1023,12 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
                         print(f"❌ ระบบเล่นเสียงขัดข้องในห้อง {channel.name}: {play_err}")
                         loop.call_soon_threadsafe(play_finished.set)
 
-                    # หน่วงเวลาเล็กน้อยก่อนย้ายห้องถัดไป เพื่อป้องกัน Rate Limit
                     if idx < len(target_channels) - 1:
                         await asyncio.sleep(1.5)
 
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
 
-            # สั่งตัดสายหลังจากตระเวนพูดจบทุกห้อง
             vc = guild.voice_client
             if vc and vc.is_connected():
                 try:
@@ -1149,7 +1148,8 @@ async def check_bf_notifications():
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
 
-@tasks.loop(seconds=60)
+# 🔥 ปรับลดเวลาตรวจเช็กเวลาบอสเป็นทุกๆ 10 วินาที เพื่อการตอบสนองที่เรียลไทม์และไม่หลุดเตือน
+@tasks.loop(seconds=10)
 async def check_boss_notifications():
     try:
         now = datetime.now(TZ_THAI)
@@ -1170,12 +1170,10 @@ async def check_boss_notifications():
                 except ValueError:
                     channel_id = None
 
-            raw_notified = data.get("notified_advance", False)
-            if isinstance(raw_notified, str):
-                notified_advance = raw_notified.lower() == 'true'
-            else:
-                notified_advance = bool(raw_notified)
-            
+            # แปลง Boolean อย่างรัดกุม รองรับทั้งสตริงจาก Web และ True/False แท้
+            notified_advance = parse_bool(data.get("notified_advance", False))
+            notified_spawn = parse_bool(data.get("notified_spawn", False))
+
             channel = None
             if channel_id:
                 channel = bot.get_channel(channel_id)
@@ -1200,9 +1198,9 @@ async def check_boss_notifications():
             time_left = (spawn_time - now).total_seconds()
             notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
             notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
-            
             spoken_name = BOSS_PRONUNCIATION.get(boss_name, boss_name)
             
+            # [สเต็ป 1] แจ้งเตือนล่วงหน้าตามเวลาที่ตั้งค่าไว้
             if 0 < time_left <= notice_limit and not notified_advance:
                 embed = discord.Embed(
                     title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
@@ -1235,8 +1233,8 @@ async def check_boss_notifications():
                         boss_schedule[boss_name]["notified_advance"] = True
                 changed = True
 
-            # ✅ แจ้งเตือนเสร็จแล้วจะเชตค่า notified_spawn เป็น True
-            elif time_left <= 0 and not data.get("notified_spawn", False):
+            # [สเต็ป 2] แจ้งเตือนเมื่อบอสเกิดทันที
+            if time_left <= 0 and not notified_spawn:
                 embed = discord.Embed(
                     title="⚔️ บอสเกิดแล้ว!",
                     description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
