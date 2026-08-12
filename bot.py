@@ -1687,7 +1687,7 @@ async def disconnect_voice(interaction: discord.Interaction):
 @app_commands.describe(message="ข้อความที่ต้องการให้บอทประกาศ")
 @has_allowed_role()
 async def notice_command(interaction: discord.Interaction, message: str):
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
 
     if not message.strip():
         await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
@@ -1699,7 +1699,7 @@ async def notice_command(interaction: discord.Interaction, message: str):
         color=discord.Color.blue()
     )
     embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
-    await interaction.followup.send(embed=embed)
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
     asyncio.create_task(speak_in_guild(interaction.guild, message))
 
