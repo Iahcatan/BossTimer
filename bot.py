@@ -1683,6 +1683,34 @@ async def disconnect_voice(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
+@bot.tree.command(name="notice", description="ประกาศข้อความเสียงไปยังทุกห้องสนทนาที่มีคนอยู่")
+@app_commands.describe(message="ข้อความที่ต้องการให้บอทประกาศ")
+@has_allowed_role()
+async def notice_command(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+
+    if not message.strip():
+        await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="📢 ประกาศข้อความเสียง (Global Notice)",
+        description=f"**ข้อความ:** {message}\n\nกำลังไล่ประกาศในทุกห้องเสียงที่มีสมาชิกอยู่...",
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
+    await interaction.followup.send(embed=embed)
+
+    asyncio.create_task(speak_in_guild(interaction.guild, message))
+
+    await send_audit_log(
+        interaction.guild, 
+        interaction.user, 
+        "ประกาศข้อความเสียง (/notice)", 
+        f"📢 ข้อความ: `{message}`", 
+        discord.Color.blue()
+    )
+
 # ==========================================
 # ⚔️ 10. Boss Slash Commands
 # ==========================================
