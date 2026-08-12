@@ -1703,14 +1703,6 @@ async def notice_command(interaction: discord.Interaction, message: str):
 
     asyncio.create_task(speak_in_guild(interaction.guild, message))
 
-    await send_audit_log(
-        interaction.guild, 
-        interaction.user, 
-        "ประกาศข้อความเสียง (/notice)", 
-        f"📢 ข้อความ: `{message}`", 
-        discord.Color.blue()
-    )
-
 # ==========================================
 # ⚔️ 10. Boss Slash Commands
 # ==========================================
