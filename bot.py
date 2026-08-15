@@ -336,9 +336,11 @@ voice_empty_start = {}
 voice_locks = {}
 
 bf_notify_enabled = True
+lib_notify_enabled = True
 ppl_notify_enabled = True
 vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
 last_bf_notified_hour = -1
+last_lib_notified_key = ""
 
 cached_live_message = None
 VOICE_THAI = "th-TH-PremwadeeNeural"
@@ -796,17 +798,19 @@ def start_firebase_listener(loop):
 async def save_bot_settings():
     settings_data = {
         "bf_notify_enabled": bf_notify_enabled,
+        "lib_notify_enabled": lib_notify_enabled,
         "ppl_notify_enabled": ppl_notify_enabled
     }
     try:
         await asyncio.to_thread(db.reference('bot_settings').set, settings_data)
     except Exception: pass
     await asyncio.to_thread(set_db_value, "bf_notify_enabled", bf_notify_enabled)
+    await asyncio.to_thread(set_db_value, "lib_notify_enabled", lib_notify_enabled)
     await asyncio.to_thread(set_db_value, "ppl_notify_enabled", ppl_notify_enabled)
     await asyncio.to_thread(save_json_local, SETTINGS_FILE, settings_data)
 
 async def load_bot_settings():
-    global bf_notify_enabled, ppl_notify_enabled
+    global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
     data = None
     try:
         data = await asyncio.to_thread(db.reference('bot_settings').get)
@@ -814,13 +818,16 @@ async def load_bot_settings():
 
     if not data:
         db_bf = get_db_value("bf_notify_enabled", None)
+        db_lib = get_db_value("lib_notify_enabled", None)
         db_ppl = get_db_value("ppl_notify_enabled", None)
         if db_bf is not None: bf_notify_enabled = db_bf
+        if db_lib is not None: lib_notify_enabled = db_lib
         if db_ppl is not None: ppl_notify_enabled = db_ppl
         return
 
     if data:
         bf_notify_enabled = data.get("bf_notify_enabled", True)
+        lib_notify_enabled = data.get("lib_notify_enabled", True)
         ppl_notify_enabled = data.get("ppl_notify_enabled", True)
 
 async def save_vip_config():
@@ -1094,6 +1101,8 @@ async def on_ready():
         check_boss_notifications.start()
     if not check_bf_notifications.is_running():
         check_bf_notifications.start()
+    if not check_library_boss_notifications.is_running():
+        check_library_boss_notifications.start()
     if not update_live_embed.is_running():
         update_live_embed.start()
     if not check_auto_disconnect.is_running():
@@ -1104,7 +1113,7 @@ async def on_ready():
     threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
 
 # ==========================================
-# ⏰ 7. Tasks เช็กเวลาเตือน + BF + Live Embed + Auto-Disconnect
+# ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
 # ==========================================
 @tasks.loop(seconds=30)
 async def check_bf_notifications():
@@ -1147,6 +1156,49 @@ async def check_bf_notifications():
                     asyncio.create_task(speak_in_guild(guild, spoken_text))
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
+
+@tasks.loop(seconds=30)
+async def check_library_boss_notifications():
+    global last_lib_notified_key, lib_notify_enabled
+    if not lib_notify_enabled: return
+
+    try:
+        now = datetime.now(TZ_THAI)
+        # เช็กเวลา 08:50 น. และ 20:50 น. ทุกวัน
+        if (now.hour == 8 and now.minute == 50) or (now.hour == 20 and now.minute == 50):
+            current_key = f"{now.strftime('%Y-%m-%d')}_{now.hour}:{now.minute}"
+            if last_lib_notified_key != current_key:
+                last_lib_notified_key = current_key
+
+                time_str = "08:50 น." if now.hour == 8 else "20:50 น."
+
+                for guild in bot.guilds:
+                    mentions = []
+                    for role_id in BF_ROLE_IDS:
+                        role = guild.get_role(role_id)
+                        if role: mentions.append(role.mention)
+                    mention_target = " ".join(mentions) if mentions else ""
+
+                    channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+                    if not channel:
+                        channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+
+                    if channel:
+                        embed = discord.Embed(
+                            title="⚔️ แจ้งเตือน Library Boss!",
+                            description=f"บอส **Library Boss** ถึงเวลาเตรียมตัวแล้ว! (เวลา **{time_str}**)\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
+                            color=discord.Color.purple()
+                        )
+                        try:
+                            send_content = mention_target if mention_target.strip() else None
+                            await channel.send(content=send_content, embed=embed)
+                        except Exception as e:
+                            print(f"❌ ส่งข้อความเตือน Library Boss ไม่สำเร็จ: {e}")
+
+                    spoken_text = "Library Boss ถึงเวลาเตรียมตัวแล้วค่ะ"
+                    asyncio.create_task(speak_in_guild(guild, spoken_text))
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_library_boss_notifications': {e}")
 
 # 🔥 ปรับลดเวลาตรวจเช็กเวลาบอสเป็นทุกๆ 10 วินาที เพื่อการตอบสนองที่เรียลไทม์และไม่หลุดเตือน
 @tasks.loop(seconds=10)
