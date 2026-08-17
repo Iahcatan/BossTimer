@@ -822,6 +822,7 @@ async def load_custom_bosses():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
+intents.members = True # 🟢 แก้ไข: เพิ่ม members intent เพื่อให้บอทเห็นคนในห้องเสียงเวลารีสตาร์ท
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -926,11 +927,10 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
                     if idx < len(target_channels) - 1: await asyncio.sleep(1.5)
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
+                    
+            # 🟢 แก้ไข: นำคำสั่ง disconnect ออก เพื่อป้องกันบอทเข้าออกห้องเสียงรัวๆ จนติด Rate Limit (ถูกแบนไม่ให้เข้าห้อง)
+            # ระบบจะปล่อยให้ task 'check_auto_disconnect' จัดการเตะบอทออกเมื่อห้องว่างเกิน 3 นาทีโดยอัตโนมัติ
 
-            vc = guild.voice_client
-            if vc and vc.is_connected():
-                try: await vc.disconnect()
-                except Exception as e: print(f"❌ เกิดข้อผิดพลาดในการตัดสาย: {e}")
         finally:
             if os.path.exists(tts_filename):
                 try: os.remove(tts_filename)
@@ -1116,7 +1116,7 @@ async def check_boss_notifications():
             spoken_name = get_boss_pronunciation(boss_name)
             
             # ================================================
-            # [สเต็ป 1] แจ้งเตือนล่วงหน้า (แก้บัคการเข้าห้องเสียงแล้ว)
+            # [สเต็ป 1] แจ้งเตือนล่วงหน้า 
             # ================================================
             if 0 < time_left <= notice_limit and not notified_advance:
                 embed = discord.Embed(
