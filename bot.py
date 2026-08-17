@@ -271,6 +271,7 @@ HTML_TEMPLATE = """
                             <th>เวลาเกิด (เวลาไทย)</th>
                             <th>สถานะ/นับถอยหลัง</th>
                             <th>แจ้งเตือนล่วงหน้า</th>
+                            <th>ผู้บันทึก (Recorded by)</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -286,6 +287,7 @@ HTML_TEMPLATE = """
                                 {% endif %}
                             </td>
                             <td><small class="text-muted">{{ boss.notice_text }}</small></td>
+                            <td><small class="text-warning">{{ boss.recorded_by }}</small></td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -336,7 +338,8 @@ def dashboard():
             "spawn_time": spawn_time.strftime("%H:%M:%S"),
             "time_left": time_left_str,
             "is_spawned": is_spawned,
-            "notice_text": get_boss_advance_notice_text(boss_name)
+            "notice_text": get_boss_advance_notice_text(boss_name),
+            "recorded_by": data.get("recorded_by", "-")
         })
 
     return render_template_string(HTML_TEMPLATE, bosses=boss_list)
@@ -593,13 +596,16 @@ async def save_boss_data():
             st = parse_to_thai_datetime(data["spawn_time"])
             if not st: continue
             spawn_ms = int(st.timestamp() * 1000)
+            rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
             data_to_save[boss_name] = {
                 "spawn_time": st.isoformat(),
                 "spawnTimeMs": spawn_ms,
                 "channel_id": data.get("channel_id"),
                 "notified_advance": parse_bool(data.get("notified_advance", False)),
                 "notified_spawn": parse_bool(data.get("notified_spawn", False)),
-                "noticeMinutes": int(get_boss_advance_notice_seconds(boss_name) / 60)
+                "noticeMinutes": int(get_boss_advance_notice_seconds(boss_name) / 60),
+                "recorded_by": rec_by,
+                "recordedBy": rec_by
             }
     
     try:
@@ -638,6 +644,7 @@ async def load_boss_data():
                         canonical_name = get_boss_canonical_name(boss_name)
                         notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
                         notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
+                        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
                         
                         time_left = (st - now).total_seconds()
                         notice_limit = get_boss_advance_notice_seconds(canonical_name)
@@ -654,7 +661,8 @@ async def load_boss_data():
                             "spawn_time": st,
                             "channel_id": data.get("channel_id"),
                             "notified_advance": notified_adv,
-                            "notified_spawn": notified_spwn
+                            "notified_spawn": notified_spwn,
+                            "recorded_by": rec_by
                         }
         print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
@@ -685,6 +693,7 @@ def start_firebase_listener(loop):
                                 st = kt + cd
 
                         existing = boss_schedule.get(canonical_name) or boss_schedule.get(boss_name)
+                        rec_by = data.get("recorded_by") or data.get("recordedBy") or (existing.get("recorded_by") if existing else "-")
                         
                         if not existing or existing.get("spawn_time") != st:
                             notified_adv = False
@@ -710,7 +719,8 @@ def start_firebase_listener(loop):
                             "spawn_time": st,
                             "channel_id": data.get("channel_id") or (existing.get("channel_id") if existing else None),
                             "notified_advance": notified_adv,
-                            "notified_spawn": notified_spwn
+                            "notified_spawn": notified_spwn,
+                            "recorded_by": rec_by
                         }
                     
                     for key in list(boss_schedule.keys()):
@@ -822,7 +832,7 @@ async def load_custom_bosses():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-intents.members = True # 🟢 แก้ไข: เพิ่ม members intent เพื่อให้บอทเห็นคนในห้องเสียงเวลารีสตาร์ท
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -927,9 +937,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
                     if idx < len(target_channels) - 1: await asyncio.sleep(1.5)
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
-                    
-            # 🟢 แก้ไข: นำคำสั่ง disconnect ออก เพื่อป้องกันบอทเข้าออกห้องเสียงรัวๆ จนติด Rate Limit (ถูกแบนไม่ให้เข้าห้อง)
-            # ระบบจะปล่อยให้ task 'check_auto_disconnect' จัดการเตะบอทออกเมื่อห้องว่างเกิน 3 นาทีโดยอัตโนมัติ
 
         finally:
             if os.path.exists(tts_filename):
@@ -1257,9 +1264,10 @@ async def update_live_embed():
                     else: time_left_str = f"อีก {m} นาที {s} วินาที"
 
                 notice_text = get_boss_advance_notice_text(boss)
+                rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
                 embed.add_field(
                     name=f"👾 {boss}",
-                    value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(เตือนล่วงหน้า {notice_text})*",
+                    value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*",
                     inline=False
                 )
             
@@ -1340,13 +1348,15 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
         respawn_time = get_boss_respawn_time(canonical_name)
         next_spawn = boss_died_at + respawn_time
         is_already_past = next_spawn <= now
+        user_name = interaction.user.display_name
 
         with schedule_lock:
             boss_schedule[canonical_name] = {
                 "spawn_time": next_spawn,
                 "channel_id": interaction.channel_id,
                 "notified_advance": is_already_past,
-                "notified_spawn": is_already_past
+                "notified_spawn": is_already_past,
+                "recorded_by": user_name
             }
         await save_boss_data()
         cd_text = get_boss_cd_text(canonical_name)
@@ -1355,11 +1365,12 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
         embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
         embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
         embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
+        embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
         embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
-        embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {interaction.user.display_name}")
+        embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {user_name}")
 
         await interaction.followup.send(embed=embed)
-        await send_audit_log(interaction.guild, interaction.user, "กดปุ่มบอสตาย (Quick Action)", f"👾 บอส: `{canonical_name}`\n⏱️ เวลาตาย: {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
+        await send_audit_log(interaction.guild, interaction.user, "กดปุ่มบอสตาย (Quick Action)", f"👾 บอส: `{canonical_name}`\n⏱️ เวลาตาย: {boss_died_at.strftime('%H:%M:%S น.')}\n👤 ผู้บันทึก: `{user_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
 
 class QuickActionsView(discord.ui.View):
     def __init__(self):
@@ -1567,6 +1578,7 @@ def generate_boss_time_summary():
         if not spawn_time: continue
         time_left_sec = (spawn_time - now).total_seconds()
         spoken_name = get_boss_pronunciation(boss)
+        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
 
         if time_left_sec <= 0:
             time_left_str = "เกิดแล้ว!"
@@ -1585,7 +1597,7 @@ def generate_boss_time_summary():
             else: tts_time = f"{s} วินาที"
             tts_lines.append(f"บอส {spoken_name} เหลืออีก {tts_time}")
 
-        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**", inline=False)
+        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(บันทึกโดย: {rec_by})*", inline=False)
 
     if len(sorted_bosses) > 20:
         embed.add_field(name="📌 หมายเหตุ", value=f"*ยังมีบอสอีก {len(sorted_bosses) - 20} ตัว สามารถดูเพิ่มเติมได้บน Dashboard*", inline=False)
@@ -1629,13 +1641,15 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     respawn_time = get_boss_respawn_time(canonical_name)
     next_spawn = boss_died_at + respawn_time
     is_already_past = next_spawn <= now
+    user_name = interaction.user.display_name
 
     with schedule_lock:
         boss_schedule[canonical_name] = {
             "spawn_time": next_spawn,
             "channel_id": interaction.channel_id,
             "notified_advance": is_already_past,
-            "notified_spawn": is_already_past
+            "notified_spawn": is_already_past,
+            "recorded_by": user_name
         }
     await save_boss_data()
     cd_text = get_boss_cd_text(canonical_name)
@@ -1644,11 +1658,12 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
     embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
     embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
+    embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
     embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
-    embed.set_footer(text=f"บันทึกโดย {interaction.user.display_name}")
+    embed.set_footer(text=f"บันทึกโดย {user_name}")
 
     await interaction.followup.send(embed=embed)
-    await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", f"👾 บอส: `{canonical_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
+    await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", f"👾 บอส: `{canonical_name}`\n👤 ผู้บันทึก: `{user_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
 
 @bot.tree.command(name="addboss", description="เพิ่มบอสใหม่หรือแก้ไขเวลา คูลดาวน์ / เวลาเตือนล่วงหน้า")
 @app_commands.describe(name="ชื่อบอสที่ต้องการเพิ่มหรือแก้ไข", hours="จำนวนชั่วโมงคูลดาวน์", minutes="จำนวนนาทีคูลดาวน์", seconds="จำนวนวินาทีคูลดาวน์", notice_minutes="เวลาที่ต้องการให้เตือนล่วงหน้า (นาที)")
@@ -1676,12 +1691,14 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
 
     await save_custom_bosses_to_github()
 
+    user_name = interaction.user.display_name
     with schedule_lock:
         boss_schedule[matched_name] = {
             "spawn_time": datetime.now(TZ_THAI),
             "channel_id": interaction.channel_id,
             "notified_advance": True,
-            "notified_spawn": True
+            "notified_spawn": True,
+            "recorded_by": user_name
         }
     await save_boss_data()
 
@@ -1745,7 +1762,8 @@ async def boss_status(interaction: discord.Interaction):
             else: time_left_str = f"อีก {m} นาที {s} วินาที"
 
         notice_text = get_boss_advance_notice_text(boss)
-        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(เตือนล่วงหน้า {notice_text})*", inline=False)
+        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
+        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*", inline=False)
 
     if len(sorted_bosses) > 20:
         embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
