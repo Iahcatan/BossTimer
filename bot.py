@@ -93,14 +93,18 @@ def parse_to_thai_datetime(data_val):
             try:
                 time_obj = datetime.strptime(cleaned_val, "%H:%M:%S").time()
                 st = now.replace(hour=time_obj.hour, minute=time_obj.minute, second=time_obj.second, microsecond=0)
-                if st < now - timedelta(hours=12):
+                if (st - now).total_seconds() > 600:
+                    st -= timedelta(days=1)
+                elif st < now - timedelta(hours=18):
                     st += timedelta(days=1)
                 return st
             except ValueError:
                 try:
                     time_obj = datetime.strptime(cleaned_val, "%H:%M").time()
                     st = now.replace(hour=time_obj.hour, minute=time_obj.minute, second=0, microsecond=0)
-                    if st < now - timedelta(hours=12):
+                    if (st - now).total_seconds() > 600:
+                        st -= timedelta(days=1)
+                    elif st < now - timedelta(hours=18):
                         st += timedelta(days=1)
                     return st
                 except ValueError:
@@ -142,9 +146,55 @@ def parse_time_input(time_str: str, now: datetime) -> datetime:
         raise ValueError("Invalid time range")
 
     boss_died_at = now.replace(hour=hh, minute=mm, second=ss, microsecond=0)
-    if boss_died_at > now:
+    if (boss_died_at - now).total_seconds() > 600:
         boss_died_at -= timedelta(days=1)
     return boss_died_at
+
+def get_boss_respawn_time(boss_name: str) -> timedelta:
+    if not boss_name:
+        return timedelta(minutes=30)
+    cleaned = boss_name.strip().lower()
+    for key, val in BOSS_RESPAWN_TIMES.items():
+        if key.lower() == cleaned:
+            return val
+    return timedelta(minutes=30)
+
+def get_boss_canonical_name(boss_name: str) -> str:
+    if not boss_name:
+        return boss_name
+    cleaned = boss_name.strip().lower()
+    for key in BOSS_RESPAWN_TIMES.keys():
+        if key.lower() == cleaned:
+            return key
+    return boss_name
+
+def get_boss_advance_notice_seconds(boss_name: str) -> int:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    for key, val in ADVANCE_NOTICE_SECONDS.items():
+        if key.lower() == cleaned:
+            return val
+    return 300
+
+def get_boss_advance_notice_text(boss_name: str) -> str:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    for key, val in ADVANCE_NOTICE_TEXT.items():
+        if key.lower() == cleaned:
+            return val
+    return "5 นาที"
+
+def get_boss_cd_text(boss_name: str) -> str:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    for key, val in BOSS_CD_TEXT.items():
+        if key.lower() == cleaned:
+            return val
+    return "30 นาที"
+
+def get_boss_pronunciation(boss_name: str) -> str:
+    cleaned = boss_name.strip().lower() if boss_name else ""
+    for key, val in BOSS_PRONUNCIATION.items():
+        if key.lower() == cleaned:
+            return val
+    return boss_name
 
 # ==========================================
 # 🗄️ Database Utility (SQLite Persistent Storage)
@@ -301,7 +351,7 @@ def dashboard():
             "spawn_time": spawn_time.strftime("%H:%M:%S"),
             "time_left": time_left_str,
             "is_spawned": is_spawned,
-            "notice_text": ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
+            "notice_text": get_boss_advance_notice_text(boss_name)
         })
 
     return render_template_string(HTML_TEMPLATE, bosses=boss_list)
@@ -680,7 +730,7 @@ async def save_boss_data():
                 "channel_id": data.get("channel_id"),
                 "notified_advance": parse_bool(data.get("notified_advance", False)),
                 "notified_spawn": parse_bool(data.get("notified_spawn", False)),
-                "noticeMinutes": int(ADVANCE_NOTICE_SECONDS.get(boss_name, 300) / 60)
+                "noticeMinutes": int(get_boss_advance_notice_seconds(boss_name) / 60)
             }
     
     try:
@@ -716,18 +766,22 @@ async def load_boss_data():
                     raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
                     st = parse_to_thai_datetime(raw_st)
                     if st:
+                        canonical_name = get_boss_canonical_name(boss_name)
                         notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
                         notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
                         
                         time_left = (st - now).total_seconds()
-                        notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
+                        notice_limit = get_boss_advance_notice_seconds(canonical_name)
                         if time_left > notice_limit:
                             notified_adv = False
                             notified_spwn = False
                         elif time_left > 0:
                             notified_spwn = False
+                        else:
+                            notified_adv = True
+                            notified_spwn = True
                             
-                        boss_schedule[boss_name] = {
+                        boss_schedule[canonical_name] = {
                             "spawn_time": st,
                             "channel_id": data.get("channel_id"),
                             "notified_advance": notified_adv,
@@ -750,13 +804,20 @@ def start_firebase_listener(loop):
                     for boss_name, data in snapshot.items():
                         if not isinstance(data, dict): continue
                         
+                        canonical_name = get_boss_canonical_name(boss_name)
                         raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
                         st = parse_to_thai_datetime(raw_st)
                         if not st: continue
 
-                        existing = boss_schedule.get(boss_name)
+                        raw_kt = data.get("kill_time") or data.get("die_time") or data.get("killed_at")
+                        if raw_kt:
+                            kt = parse_to_thai_datetime(raw_kt)
+                            if kt and abs((st - kt).total_seconds()) < 5:
+                                cd = get_boss_respawn_time(canonical_name)
+                                st = kt + cd
+
+                        existing = boss_schedule.get(canonical_name) or boss_schedule.get(boss_name)
                         
-                        # ✅ หากเป็นบอสใหม่ หรือเวลาเกิดเปลี่ยนไป ให้ Reset การแจ้งเตือนเสมอ!
                         if not existing or existing.get("spawn_time") != st:
                             notified_adv = False
                             notified_spwn = False
@@ -765,26 +826,28 @@ def start_firebase_listener(loop):
                             notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
 
                         time_left = (st - now).total_seconds()
-                        notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
+                        notice_limit = get_boss_advance_notice_seconds(canonical_name)
                         
-                        # Reset อัตโนมัติป้องกัน Flag ค้าง
                         if time_left > notice_limit:
                             notified_adv = False
                             notified_spwn = False
                         elif time_left > 0:
                             notified_spwn = False
+                        else:
+                            if not existing or existing.get("spawn_time") != st:
+                                notified_adv = True
+                                notified_spwn = True
 
-                        boss_schedule[boss_name] = {
+                        boss_schedule[canonical_name] = {
                             "spawn_time": st,
                             "channel_id": data.get("channel_id") or (existing.get("channel_id") if existing else None),
                             "notified_advance": notified_adv,
                             "notified_spawn": notified_spwn
                         }
                     
-                    # ลบข้อมูลบอสที่ถูกลบออกจาก Firebase
-                    for boss_name in list(boss_schedule.keys()):
-                        if boss_name not in snapshot:
-                            del boss_schedule[boss_name]
+                    for key in list(boss_schedule.keys()):
+                        if key not in snapshot and get_boss_canonical_name(key) not in [get_boss_canonical_name(k) for k in snapshot.keys()]:
+                            del boss_schedule[key]
         except Exception as e:
             print(f"❌ เกิดข้อผิดพลาดใน Firebase Listener: {e}")
 
@@ -1164,7 +1227,6 @@ async def check_library_boss_notifications():
 
     try:
         now = datetime.now(TZ_THAI)
-        # เช็กเวลา 08:50 น. และ 20:50 น. ทุกวัน
         if (now.hour == 8 and now.minute == 50) or (now.hour == 20 and now.minute == 50):
             current_key = f"{now.strftime('%Y-%m-%d')}_{now.hour}:{now.minute}"
             if last_lib_notified_key != current_key:
@@ -1200,7 +1262,6 @@ async def check_library_boss_notifications():
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_library_boss_notifications': {e}")
 
-# 🔥 ปรับลดเวลาตรวจเช็กเวลาบอสเป็นทุกๆ 10 วินาที เพื่อการตอบสนองที่เรียลไทม์และไม่หลุดเตือน
 @tasks.loop(seconds=10)
 async def check_boss_notifications():
     try:
@@ -1222,7 +1283,6 @@ async def check_boss_notifications():
                 except ValueError:
                     channel_id = None
 
-            # แปลง Boolean อย่างรัดกุม รองรับทั้งสตริงจาก Web และ True/False แท้
             notified_advance = parse_bool(data.get("notified_advance", False))
             notified_spawn = parse_bool(data.get("notified_spawn", False))
 
@@ -1248,9 +1308,9 @@ async def check_boss_notifications():
                 continue
 
             time_left = (spawn_time - now).total_seconds()
-            notice_limit = ADVANCE_NOTICE_SECONDS.get(boss_name, 300)
-            notice_text = ADVANCE_NOTICE_TEXT.get(boss_name, "5 นาที")
-            spoken_name = BOSS_PRONUNCIATION.get(boss_name, boss_name)
+            notice_limit = get_boss_advance_notice_seconds(boss_name)
+            notice_text = get_boss_advance_notice_text(boss_name)
+            spoken_name = get_boss_pronunciation(boss_name)
             
             # [สเต็ป 1] แจ้งเตือนล่วงหน้าตามเวลาที่ตั้งค่าไว้
             if 0 < time_left <= notice_limit and not notified_advance:
@@ -1377,7 +1437,7 @@ async def update_live_embed():
                     else:
                         time_left_str = f"อีก {m} นาที {s} วินาที"
 
-                notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
+                notice_text = get_boss_advance_notice_text(boss)
                 embed.add_field(
                     name=f"👾 {boss}",
                     value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(เตือนล่วงหน้า {notice_text})*",
@@ -1486,21 +1546,27 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
             return
 
         await interaction.response.defer()
-        next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[self.selected_boss]
+
+        canonical_name = get_boss_canonical_name(self.selected_boss)
+        respawn_time = get_boss_respawn_time(canonical_name)
+        next_spawn = boss_died_at + respawn_time
+        is_already_past = next_spawn <= now
 
         with schedule_lock:
-            boss_schedule[self.selected_boss] = {
+            boss_schedule[canonical_name] = {
                 "spawn_time": next_spawn,
                 "channel_id": interaction.channel_id,
-                "notified_advance": False,
-                "notified_spawn": False
+                "notified_advance": is_already_past,
+                "notified_spawn": is_already_past
             }
         await save_boss_data()
 
+        cd_text = get_boss_cd_text(canonical_name)
+
         embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
-        embed.add_field(name="👾 ชื่อบอส", value=f"`{self.selected_boss}`", inline=True)
+        embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
         embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
-        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[self.selected_boss], inline=True)
+        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
         embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
         embed.set_footer(text=f"บันทึกผ่าน Quick Action โดย {interaction.user.display_name}")
 
@@ -1509,7 +1575,7 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
             interaction.guild, 
             interaction.user, 
             "กดปุ่มบอสตาย (Quick Action)", 
-            f"👾 บอส: `{self.selected_boss}`\n⏱️ เวลาตาย: {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", 
+            f"👾 บอส: `{canonical_name}`\n⏱️ เวลาตาย: {boss_died_at.strftime('%H:%M:%S น.')}\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", 
             discord.Color.red()
         )
 
@@ -1566,19 +1632,21 @@ class QuickActionsView(discord.ui.View):
 
         mention_target = " ".join(mentions) if mentions else "@everyone"
 
+        canonical_name = get_boss_canonical_name(self.selected_boss)
+
         embed = discord.Embed(
             title="🔔 เรียกสมาชิกคนลุยบอส!",
-            description=f"📢 {interaction.user.mention} เรียกสมาชิกลุยบอส **{self.selected_boss}** ด่วน!",
+            description=f"📢 {interaction.user.mention} เรียกสมาชิกลุยบอส **{canonical_name}** ด่วน!",
             color=discord.Color.gold()
         )
         await interaction.followup.send(content=mention_target, embed=embed)
 
-        spoken_boss = BOSS_PRONUNCIATION.get(self.selected_boss, self.selected_boss)
+        spoken_boss = get_boss_pronunciation(canonical_name)
         spoken_text = f"เรียกคนลุยบอส {spoken_boss} ด่วนค่ะ"
         if guild:
             asyncio.create_task(speak_in_guild(guild, spoken_text))
 
-        await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{self.selected_boss}`", discord.Color.gold())
+        await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{canonical_name}`", discord.Color.gold())
 
 @bot.tree.command(name="panel", description="ส่งข้อความ Interactive Embed พร้อมปุ่มกด Quick Actions ในช่องนี้")
 @has_allowed_role()
@@ -1785,7 +1853,7 @@ def generate_boss_time_summary():
         if not spawn_time: continue
 
         time_left_sec = (spawn_time - now).total_seconds()
-        spoken_name = BOSS_PRONUNCIATION.get(boss, boss)
+        spoken_name = get_boss_pronunciation(boss)
 
         if time_left_sec <= 0:
             time_left_str = "เกิดแล้ว!"
@@ -1856,16 +1924,7 @@ async def boss_time_prefix(ctx: commands.Context):
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None):
     await interaction.response.defer()
     
-    matched_name = None
-    for b in BOSS_RESPAWN_TIMES.keys():
-        if b.lower() == boss_name.lower():
-            matched_name = b
-            break
-
-    if not matched_name:
-        await interaction.followup.send(f"❌ ไม่พบชื่อบอส **{boss_name}** ในระบบ!", ephemeral=True)
-        return
-
+    canonical_name = get_boss_canonical_name(boss_name)
     now = datetime.now(TZ_THAI)
     try:
         boss_died_at = parse_time_input(kill_time, now)
@@ -1873,26 +1932,30 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         await interaction.followup.send("❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอกแบบ **17:30** หรือ **1730**", ephemeral=True)
         return
 
-    next_spawn = boss_died_at + BOSS_RESPAWN_TIMES[matched_name]
+    respawn_time = get_boss_respawn_time(canonical_name)
+    next_spawn = boss_died_at + respawn_time
+    is_already_past = next_spawn <= now
 
     with schedule_lock:
-        boss_schedule[matched_name] = {
+        boss_schedule[canonical_name] = {
             "spawn_time": next_spawn,
             "channel_id": interaction.channel_id,
-            "notified_advance": False,
-            "notified_spawn": False
+            "notified_advance": is_already_past,
+            "notified_spawn": is_already_past
         }
     await save_boss_data()
 
+    cd_text = get_boss_cd_text(canonical_name)
+
     embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
-    embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
+    embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
     embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
-    embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=BOSS_CD_TEXT[matched_name], inline=True)
+    embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
     embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
     embed.set_footer(text=f"บันทึกโดย {interaction.user.display_name}")
 
     await interaction.followup.send(embed=embed)
-    await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", f"👾 บอส: `{matched_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
+    await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", f"👾 บอส: `{canonical_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
 
 @bot.tree.command(name="addboss", description="เพิ่มบอสใหม่หรือแก้ไขเวลา คูลดาวน์ / เวลาเตือนล่วงหน้า")
 @app_commands.describe(
@@ -1911,11 +1974,7 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
         await interaction.followup.send("❌ เวลาคูลดาวน์รวมต้องมากกว่า 0 วินาทีครับ!", ephemeral=True)
         return
 
-    matched_name = name
-    for existing_name in BOSS_RESPAWN_TIMES.keys():
-        if existing_name.lower() == name.lower():
-            matched_name = existing_name
-            break
+    matched_name = get_boss_canonical_name(name)
 
     BOSS_RESPAWN_TIMES[matched_name] = timedelta(seconds=total_seconds)
     
@@ -1959,7 +2018,7 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
 
     matched_key = None
     with schedule_lock:
-        for k in boss_schedule.keys():
+        for k in list(boss_schedule.keys()):
             if k.lower() == boss_name.lower():
                 matched_key = k
                 break
@@ -2015,7 +2074,7 @@ async def boss_status(interaction: discord.Interaction):
             else:
                 time_left_str = f"อีก {m} นาที {s} วินาที"
 
-        notice_text = ADVANCE_NOTICE_TEXT.get(boss, "5 นาที")
+        notice_text = get_boss_advance_notice_text(boss)
         embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(เตือนล่วงหน้า {notice_text})*", inline=False)
 
     if len(sorted_bosses) > 20:
