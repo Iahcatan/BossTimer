@@ -372,6 +372,7 @@ LIVE_CHANNEL_NAME = "boss-schedule"
 
 voice_empty_start = {}
 voice_locks = {}
+disconnect_tasks = {} # เพิ่มตัวแปรสำหรับจัดการดีเลย์ 10 วิ ก่อนออกจากห้องเสียง
 
 bf_notify_enabled = True
 lib_notify_enabled = True
@@ -871,8 +872,14 @@ def clean_display_name(name: str) -> str:
 
 async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discord.VoiceChannel = None):
     if not guild or not text: return
+    
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
+
+    # 🔥 ยกเลิกการนับเวลา Disconnect ทันทีเมื่อมีแจ้งเตือนใหม่เข้ามา
+    if guild.id in disconnect_tasks:
+        disconnect_tasks[guild.id].cancel()
+        del disconnect_tasks[guild.id]
 
     async with voice_locks[guild.id]:
         if target_channel:
@@ -943,6 +950,19 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
                 try: os.remove(tts_filename)
                 except Exception: pass
 
+    # 🔥 เริ่มนับเวลา 10 วินาทีหลังพูดจบ ถ้าไม่มีข้อความใหม่มาแทรกให้ Disconnect
+    async def auto_disconnect_after_delay():
+        try:
+            await asyncio.sleep(10)  # รอ 10 วินาที
+            if guild.voice_client and guild.voice_client.is_connected():
+                await guild.voice_client.disconnect(force=True)
+                print(f"🔌 ออกจากห้องเสียงอัตโนมัติเนื่องจากไม่มีการใช้งานเกิน 10 วินาที ในเซิร์ฟเวอร์: {guild.name}")
+        except asyncio.CancelledError:
+            # กรณีที่มีข้อความใหม่เข้ามาและยกเลิก Task นี้
+            pass
+
+    disconnect_tasks[guild.id] = asyncio.create_task(auto_disconnect_after_delay())
+
 # ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
 # ==========================================
@@ -989,7 +1009,7 @@ async def on_ready():
     if not check_bf_notifications.is_running(): check_bf_notifications.start()
     if not check_library_boss_notifications.is_running(): check_library_boss_notifications.start()
     if not update_live_embed.is_running(): update_live_embed.start()
-    if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
+    if not check_auto_disconnect.is_running(): check_auto_disconnect.start() # ระบบเก่า เช็ค 3 นาที ทิ้งไว้เป็นระบบสำรองได้ครับ
 
     is_bot_ready = True
     loop = asyncio.get_running_loop()
