@@ -807,7 +807,7 @@ async def load_custom_bosses():
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
-intents.members = True
+intents.members = True # 📌 หมายเหตุ: ต้องไปเปิด Server Members Intent และ Message Content Intent ใน Discord Developer Portal ด้วยนะครับ บอทถึงจะเห็นคนในห้องเสียง
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -844,13 +844,14 @@ def clean_display_name(name: str) -> str:
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned if cleaned else "สมาชิก"
 
+# 🔥 แก้ไขฟังก์ชัน speak_in_guild ใหม่ทั้งหมดเพื่อแก้ปัญหาบอทไม่เข้าห้อง
 async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discord.VoiceChannel = None):
     if not guild or not text: return
     
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
 
-    # 🔥 ยกเลิกการนับเวลา Disconnect ทันทีเมื่อมีแจ้งเตือนใหม่เข้ามา
+    # ยกเลิกการนับเวลา Disconnect ทันทีเมื่อมีแจ้งเตือนใหม่เข้ามา
     if guild.id in disconnect_tasks:
         disconnect_tasks[guild.id].cancel()
         del disconnect_tasks[guild.id]
@@ -859,10 +860,10 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         if target_channel:
             target_channels = [target_channel]
         else:
-            # 1. ค้นหาห้องเสียงที่มีสมาชิกอยู่
+            # 1. ค้นหาห้องเสียงที่มีสมาชิกอยู่ (เช็ค len เพื่อความมั่นใจว่ามีคน และไม่ใช่บอท)
             target_channels = [
                 channel for channel in guild.voice_channels
-                if any(not m.bot for m in channel.members)
+                if len(channel.members) > 0 and any(not m.bot for m in channel.members)
             ]
             # 2. หากไม่มีสมาชิกอยู่ในห้องใดๆ แต่บอทต่อสายไว้อยู่แล้ว ให้ใช้ห้องเดิม
             if not target_channels and guild.voice_client and guild.voice_client.channel:
@@ -889,43 +890,61 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
             for idx, channel in enumerate(target_channels):
                 try:
                     vc = guild.voice_client
+                    
+                    # === จัดการสถานะการเชื่อมต่อ (Force Cleanup & Reconnect) ป้องกันบอทค้าง ===
                     if vc is None:
-                        vc = await channel.connect(reconnect=True, timeout=15)
-                        await asyncio.sleep(1.0)
+                        try:
+                            vc = await channel.connect(reconnect=True, timeout=15)
+                        except discord.ClientException:
+                            # กรณี Discord API มีบั๊กค้างสถานะว่าต่อแล้ว ทั้งๆ ที่ vc เป็น None
+                            if guild.voice_client:
+                                await guild.voice_client.disconnect(force=True)
+                            vc = await channel.connect(reconnect=True, timeout=15)
                     else:
                         if not vc.is_connected():
                             try: await vc.disconnect(force=True)
-                            except Exception: pass
+                            except: pass
                             vc = await channel.connect(reconnect=True, timeout=15)
-                            await asyncio.sleep(1.0)
-                        elif vc.channel != channel:
-                            await vc.move_to(channel)
-                            await asyncio.sleep(1.0)
+                        elif vc.channel.id != channel.id:
+                            try:
+                                await vc.move_to(channel)
+                            except discord.ClientException:
+                                await vc.disconnect(force=True)
+                                vc = await channel.connect(reconnect=True, timeout=15)
+                    
+                    await asyncio.sleep(1.0)
 
-                    if vc.is_playing(): vc.stop()
+                    if vc.is_playing(): 
+                        vc.stop()
 
-                    audio_source = discord.FFmpegPCMAudio(
-                        tts_filename, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
-                    )
-                    loop = asyncio.get_running_loop()
-                    play_finished = asyncio.Event()
+                    if vc.is_connected():
+                        audio_source = discord.FFmpegPCMAudio(
+                            tts_filename, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
+                        )
+                        loop = asyncio.get_running_loop()
+                        play_finished = asyncio.Event()
 
-                    def after_playing(error):
-                        if error: print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียงใน {channel.name}: {error}")
-                        loop.call_soon_threadsafe(play_finished.set)
+                        def after_playing(error):
+                            if error: print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียงใน {channel.name}: {error}")
+                            loop.call_soon_threadsafe(play_finished.set)
 
-                    try:
-                        vc.play(audio_source, after=after_playing)
-                        await asyncio.wait_for(play_finished.wait(), timeout=30)
-                    except asyncio.TimeoutError:
-                        print(f"⚠️ การเล่นเสียง TTS หมดเวลา (Timeout) ในห้อง {channel.name}")
-                    except Exception as play_err:
-                        print(f"❌ ระบบเล่นเสียงขัดข้องในห้อง {channel.name}: {play_err}")
-                        loop.call_soon_threadsafe(play_finished.set)
+                        try:
+                            vc.play(audio_source, after=after_playing)
+                            await asyncio.wait_for(play_finished.wait(), timeout=30)
+                        except asyncio.TimeoutError:
+                            print(f"⚠️ การเล่นเสียง TTS หมดเวลา (Timeout) ในห้อง {channel.name}")
+                            if vc.is_playing(): vc.stop()
+                        except Exception as play_err:
+                            print(f"❌ ระบบเล่นเสียงขัดข้องในห้อง {channel.name}: {play_err}")
+                            loop.call_soon_threadsafe(play_finished.set)
 
                     if idx < len(target_channels) - 1: await asyncio.sleep(1.5)
+                
                 except Exception as e:
                     print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
+                    if guild.voice_client:
+                        try: await guild.voice_client.disconnect(force=True)
+                        except: pass
 
         finally:
             if os.path.exists(tts_filename):
