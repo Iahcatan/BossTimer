@@ -372,7 +372,7 @@ LIVE_CHANNEL_NAME = "boss-schedule"
 
 voice_empty_start = {}
 voice_locks = {}
-disconnect_tasks = {} # เพิ่มตัวแปรสำหรับจัดการดีเลย์ 10 วิ ก่อนออกจากห้องเสียง
+disconnect_tasks = {}
 
 bf_notify_enabled = True
 lib_notify_enabled = True
@@ -634,7 +634,6 @@ async def load_boss_data():
         saved_data = get_db_value("boss_schedule", None)
 
     if saved_data and isinstance(saved_data, dict):
-        now = datetime.now(TZ_THAI)
         with schedule_lock:
             boss_schedule.clear()
             for boss_name, data in saved_data.items():
@@ -647,17 +646,6 @@ async def load_boss_data():
                         notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
                         rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
                         
-                        time_left = (st - now).total_seconds()
-                        notice_limit = get_boss_advance_notice_seconds(canonical_name)
-                        if time_left > notice_limit:
-                            notified_adv = False
-                            notified_spwn = False
-                        elif time_left > 0:
-                            notified_spwn = False
-                        else:
-                            notified_adv = True
-                            notified_spwn = True
-                            
                         boss_schedule[canonical_name] = {
                             "spawn_time": st,
                             "channel_id": data.get("channel_id"),
@@ -676,7 +664,6 @@ def start_firebase_listener(loop):
             ref_boss = db.reference('boss_schedule')
             snapshot = ref_boss.get()
             if snapshot and isinstance(snapshot, dict):
-                now = datetime.now(TZ_THAI)
                 with schedule_lock:
                     for boss_name, data in snapshot.items():
                         if not isinstance(data, dict): continue
@@ -696,25 +683,12 @@ def start_firebase_listener(loop):
                         existing = boss_schedule.get(canonical_name) or boss_schedule.get(boss_name)
                         rec_by = data.get("recorded_by") or data.get("recordedBy") or (existing.get("recorded_by") if existing else "-")
                         
-                        if not existing or existing.get("spawn_time") != st:
-                            notified_adv = False
-                            notified_spwn = False
-                        else:
-                            notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
-                            notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
+                        notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
+                        notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
 
-                        time_left = (st - now).total_seconds()
-                        notice_limit = get_boss_advance_notice_seconds(canonical_name)
-                        
-                        if time_left > notice_limit:
-                            notified_adv = False
-                            notified_spwn = False
-                        elif time_left > 0:
-                            notified_spwn = False
-                        else:
-                            if not existing or existing.get("spawn_time") != st:
-                                notified_adv = True
-                                notified_spwn = True
+                        if existing and existing.get("spawn_time") == st:
+                            notified_adv = existing.get("notified_advance", notified_adv)
+                            notified_spwn = existing.get("notified_spawn", notified_spwn)
 
                         boss_schedule[canonical_name] = {
                             "spawn_time": st,
@@ -885,10 +859,18 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
         if target_channel:
             target_channels = [target_channel]
         else:
+            # 1. ค้นหาห้องเสียงที่มีสมาชิกอยู่
             target_channels = [
                 channel for channel in guild.voice_channels
                 if any(not m.bot for m in channel.members)
             ]
+            # 2. หากไม่มีสมาชิกอยู่ในห้องใดๆ แต่บอทต่อสายไว้อยู่แล้ว ให้ใช้ห้องเดิม
+            if not target_channels and guild.voice_client and guild.voice_client.channel:
+                target_channels = [guild.voice_client.channel]
+            # 3. หากไม่มีสมาชิกและบอทไม่ได้ต่อสาย ให้ Fallback ไปยังห้องเสียงห้องแรกของเซิร์ฟเวอร์
+            if not target_channels and guild.voice_channels:
+                target_channels = [guild.voice_channels[0]]
+
         if not target_channels: return
 
         unique_id = uuid.uuid4().hex
@@ -958,7 +940,6 @@ async def speak_in_guild(guild: discord.Guild, text: str, target_channel: discor
                 await guild.voice_client.disconnect(force=True)
                 print(f"🔌 ออกจากห้องเสียงอัตโนมัติเนื่องจากไม่มีการใช้งานเกิน 10 วินาที ในเซิร์ฟเวอร์: {guild.name}")
         except asyncio.CancelledError:
-            # กรณีที่มีข้อความใหม่เข้ามาและยกเลิก Task นี้
             pass
 
     disconnect_tasks[guild.id] = asyncio.create_task(auto_disconnect_after_delay())
@@ -1009,7 +990,7 @@ async def on_ready():
     if not check_bf_notifications.is_running(): check_bf_notifications.start()
     if not check_library_boss_notifications.is_running(): check_library_boss_notifications.start()
     if not update_live_embed.is_running(): update_live_embed.start()
-    if not check_auto_disconnect.is_running(): check_auto_disconnect.start() # ระบบเก่า เช็ค 3 นาที ทิ้งไว้เป็นระบบสำรองได้ครับ
+    if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
 
     is_bot_ready = True
     loop = asyncio.get_running_loop()
@@ -1170,7 +1151,7 @@ async def check_boss_notifications():
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
 
-                # 2. ส่งเสียงเตือน (แยกอิสระจาก Text Channel)
+                # 2. ส่งเสียงเตือน
                 target_guilds_for_voice = set()
                 if channel and hasattr(channel, "guild") and channel.guild:
                     target_guilds_for_voice.add(channel.guild)
@@ -1216,7 +1197,7 @@ async def check_boss_notifications():
                     except Exception as e:
                         print(f"❌ ส่งข้อความเตือนไม่สำเร็จ: {e}")
 
-                # 2. ส่งเสียงเตือน (แยกอิสระ)
+                # 2. ส่งเสียงเตือน
                 target_guilds_for_voice = set()
                 if channel and hasattr(channel, "guild") and channel.guild:
                     target_guilds_for_voice.add(channel.guild)
