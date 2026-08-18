@@ -1794,15 +1794,24 @@ if __name__ == "__main__":
     if token:
         while True:
             try:
+                # 🔧 Reset ป้องกันปัญหา "Session is closed" เมื่อต้อง retry ใหม่
+                bot._is_closed = False
+                if hasattr(bot, 'http') and bot.http:
+                    try:
+                        bot.http._HTTPClient__session = None
+                    except Exception:
+                        pass
                 bot.run(token)
                 break
             except discord.errors.HTTPException as e:
                 if e.status == 429:
                     print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพักและรอ 60 วินาทีก่อนลองรันใหม่...")
                     time.sleep(60)
-                else: raise e
+                else:
+                    print(f"❌ เกิดข้อผิดพลาด HTTPException: {e}")
+                    break
             except Exception as e:
                 print(f"❌ เกิดข้อผิดพลาดของระบบ: {e}")
-                break
+                time.sleep(10)
     else:
         print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables! กรุณาตั้งค่าก่อนรันบอท")
