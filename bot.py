@@ -810,6 +810,11 @@ async def load_custom_bosses():
     if not custom_data: custom_data = get_db_value("custom_bosses", None)
     if custom_data:
         for boss_name, data in custom_data.items():
+            # 🔥 บังคับ Wadangka ให้แจ้งเตือนล่วงหน้า 30 นาทีเสมอ แม้ข้อมูลเก่าในฐานข้อมูลจะเป็นค่าอื่น
+            if "wadangka" in boss_name.lower() or "วาดังการ์" in boss_name:
+                data["notice_seconds"] = 1800
+                data["notice_text"] = "30 นาที"
+            
             BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
             BOSS_CD_TEXT[boss_name] = data["cd_text"]
             ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
@@ -1972,41 +1977,20 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
                 timestamp=datetime.now(TZ_THAI)
             )
             log_embed.add_field(name="👤 ผู้ประกาศ", value=f"{interaction.user.mention} (`{interaction.user.name}`)", inline=False)
-            log_embed.add_field(name="👾 ชื่อบอส", value=boss_name, inline=True)
-            log_embed.add_field(name="🔑 โค้ด", value=code, inline=True)
-            log_embed.add_field(name="🎁 ไอเทมดรอป", value=drop_item, inline=True)
-            
+            log_embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
+            log_embed.add_field(name="🔑 โค้ด (Code)", value=f"**{code}**", inline=True)
+            log_embed.add_field(name="🎁 ไอเทมดรอป", value=f"`{drop_item}`", inline=False)
             try:
                 await attendance_channel.send(embed=log_embed)
             except Exception as e:
-                print(f"❌ ส่ง Audit Log ไปที่ห้อง boss-attendance ไม่สำเร็จ: {e}")
+                print(f"❌ ส่ง Audit Log เช็คชื่อบอสไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🚀 11. Run Bot
+# 🚀 Run Bot
 # ==========================================
 if __name__ == "__main__":
-    token = os.environ.get("DISCORD_TOKEN")
-    if token:
-        while True:
-            try:
-                # 🔧 Reset ป้องกันปัญหา "Session is closed" เมื่อต้อง retry ใหม่
-                bot._is_closed = False
-                if hasattr(bot, 'http') and bot.http:
-                    try:
-                        bot.http._HTTPClient__session = None
-                    except Exception:
-                        pass
-                bot.run(token)
-                break
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพักและรอ 60 วินาทีก่อนลองรันใหม่...")
-                    time.sleep(60)
-                else:
-                    print(f"❌ เกิดข้อผิดพลาด HTTPException: {e}")
-                    break
-            except Exception as e:
-                print(f"❌ เกิดข้อผิดพลาดของระบบ: {e}")
-                time.sleep(10)
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if TOKEN:
+        bot.run(TOKEN)
     else:
-        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables! กรุณาตั้งค่าก่อนรันบอท")
+        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables!")
