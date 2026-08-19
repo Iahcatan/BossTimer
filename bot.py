@@ -1009,7 +1009,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 print(f"⚠️ การเล่นเสียง (KO) หมดเวลา (Timeout) ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
                             except Exception as play_err:
-                                print(f"❌ ระบบเล่นเสียงขัดข้อง (KO) ในห้อง {channel.name}: {play_err}")
+                                print(f"❌ ระบบเล่นเสียงขัดข้อง (KO) 비 ในห้อง {channel.name}: {play_err}")
                                 loop.call_soon_threadsafe(play_finished_ko.set)
 
                     if idx < len(target_channels) - 1: await asyncio.sleep(1.5)
@@ -1920,6 +1920,59 @@ async def set_live(interaction: discord.Interaction):
     cached_live_message = msg
     await save_live_config()
     await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", f"📌 ช่อง: <#{interaction.channel_id}>\nMessage ID: `{msg.id}`", discord.Color.teal())
+
+@bot.tree.command(name="attendance", description="แจ้งเตือนเช็คชื่อบอสพร้อมโค้ดและไอเทมดรอป")
+@app_commands.describe(
+    boss_name="ชื่อบอสที่ต้องการเช็คชื่อ",
+    code="โค้ดสำหรับเช็คชื่อ (Code)",
+    drop_item="ไอเทมที่ดรอป (Drop Item)"
+)
+@has_allowed_role()
+async def attendance_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
+    await interaction.response.defer()
+    
+    # 1. แจ้งเตือนข้อความในช่องที่ใช้คำสั่ง
+    embed = discord.Embed(
+        title="📢 แจ้งเตือนเช็คชื่อบอส (Attendance)",
+        color=discord.Color.green(),
+        timestamp=datetime.now(TZ_THAI)
+    )
+    embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
+    embed.add_field(name="🔑 โค้ด (Code)", value=f"**{code}**", inline=True)
+    embed.add_field(name="🎁 ไอเทมดรอป", value=f"`{drop_item}`", inline=False)
+    embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
+    
+    await interaction.followup.send(content="✅ ส่งประกาศเช็คชื่อสำเร็จ!", embed=embed)
+    
+    # ดึงการออกเสียงที่ถูกต้องของชื่อบอสเพื่อภาษาไทย
+    canonical_name = get_boss_canonical_name(boss_name)
+    spoken_name = get_boss_pronunciation(canonical_name)
+    
+    # 2. ส่งเสียงประกาศเข้าทุกห้องเสียงที่มีคนอยู่ (3 ภาษา)
+    spoken_th = f"ประกาศเช็คชื่อบอส {spoken_name} โค้ดคือ {code} ไอเทมที่ดรอปคือ {drop_item} ค่ะ"
+    spoken_en = f"Attendance for boss {boss_name}. The code is {code}. Drop item is {drop_item}."
+    spoken_ko = f"보스 {boss_name} 출석 체크입니다. 코드는 {code} 이며, 드롭 아이템은 {drop_item} 입니다."
+    
+    asyncio.create_task(speak_in_guild(interaction.guild, spoken_th, spoken_en, spoken_ko))
+    
+    # 3. แจ้งเตือน Audit Log ไปยังห้อง boss-attendance
+    if interaction.guild:
+        attendance_channel = discord.utils.get(interaction.guild.text_channels, name="boss-attendance")
+        if attendance_channel:
+            log_embed = discord.Embed(
+                title="📝 Audit Log: ประกาศเช็คชื่อบอส",
+                color=discord.Color.green(),
+                timestamp=datetime.now(TZ_THAI)
+            )
+            log_embed.add_field(name="👤 ผู้ประกาศ", value=f"{interaction.user.mention} (`{interaction.user.name}`)", inline=False)
+            log_embed.add_field(name="👾 ชื่อบอส", value=boss_name, inline=True)
+            log_embed.add_field(name="🔑 โค้ด", value=code, inline=True)
+            log_embed.add_field(name="🎁 ไอเทมดรอป", value=drop_item, inline=True)
+            
+            try:
+                await attendance_channel.send(embed=log_embed)
+            except Exception as e:
+                print(f"❌ ส่ง Audit Log ไปที่ห้อง boss-attendance ไม่สำเร็จ: {e}")
 
 # ==========================================
 # 🚀 11. Run Bot
