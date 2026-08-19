@@ -161,14 +161,16 @@ def get_boss_canonical_name(boss_name: str) -> str:
 
 def get_boss_advance_notice_seconds(boss_name: str) -> int:
     cleaned = boss_name.strip().lower() if boss_name else ""
-    if cleaned == "wadangka": return 1800 # 30 นาทีเสมอ
+    # 🔥 บังคับ Wadangka เป็น 1800 วินาทีเสมอ (คลุมทุกเงื่อนไขชื่อ)
+    if "wadangka" in cleaned or "วาดังการ์" in cleaned: return 1800 
     for key, val in ADVANCE_NOTICE_SECONDS.items():
         if key.lower() == cleaned: return val
     return 300
 
 def get_boss_advance_notice_text(boss_name: str) -> str:
     cleaned = boss_name.strip().lower() if boss_name else ""
-    if cleaned == "wadangka": return "30 นาที" # 30 นาทีเสมอ
+    # 🔥 บังคับ Wadangka เป็น 30 นาทีเสมอ (คลุมทุกเงื่อนไขชื่อ)
+    if "wadangka" in cleaned or "วาดังการ์" in cleaned: return "30 นาที" 
     for key, val in ADVANCE_NOTICE_TEXT.items():
         if key.lower() == cleaned: return val
     return "5 นาที"
@@ -549,7 +551,7 @@ BOSS_PRONUNCIATION = {
     "Bbinikjoe": "บีนิกโจ", "Bigmouse": "บิ๊กเมาส์", "Caligo": "คาลิโก้", "Poison Root Flower": "พอยซัน รูท ฟลาวเวอร์",
     "Contaminated Queen Bee": "คอนทามิเนตเต็ด ควีนบี", "Rotten Pudding": "รอตเทน พุดดิ้ง", "Swamp Flower Monster": "สแวมป์ ฟลาวเวอร์ มอนสเตอร์",
     "Ukpana": "อุคปาน่า", "Darlene the Witch": "ดาร์ลีน เดอะ วิทช์", "Illust": "อิลลัสต์", "Actaemon": "แอคธีมอน",
-    "Aiyo's Protector": "ไอโย โปรเตกเตอร์", "Glucose": "กลูโคส", "Overload": "โอเวอร์โหลด", "Soul Lich": "โซล ลิช",
+    "Aiyo's Protector": "ไอโย โปรเตกเตอร์", "Glucose": "กลูโคส", "Overload": "โอเวอร์โหลด", "โซล ลิช": "โซล ลิช",
     "Platanista": "พลานิสต้า", "Barslaf": "บาร์สลาฟ", "Billiard": "บิลเลียด", "Shaaack": "ชาค",
     "Suuuk": "ซุก", "Sususuk": "ซูซูซุก", "sandgrave": "แซนด์เกรฟ", "Elder Beholder": "เอลเดอร์ บีโฮลเดอร์"
 }
@@ -810,12 +812,8 @@ async def load_custom_bosses():
         for boss_name, data in custom_data.items():
             BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
             BOSS_CD_TEXT[boss_name] = data["cd_text"]
-            if boss_name.strip().lower() == "wadangka":
-                ADVANCE_NOTICE_SECONDS[boss_name] = 1800
-                ADVANCE_NOTICE_TEXT[boss_name] = "30 นาที"
-            else:
-                ADVANCE_NOTICE_SECONDS[boss_name] = data.get("notice_seconds", 300)
-                ADVANCE_NOTICE_TEXT[boss_name] = data.get("notice_text", "5 นาที")
+            ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
+            ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
             if boss_name not in BOSS_PRONUNCIATION:
                 BOSS_PRONUNCIATION[boss_name] = boss_name
 
@@ -1816,7 +1814,9 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
         return
 
     matched_name = get_boss_canonical_name(name)
-    if matched_name.strip().lower() == "wadangka":
+    
+    # 🔥 บังคับ Wadangka ให้แจ้งเตือนล่วงหน้า 30 นาทีเสมอ แม้จะใส่ค่าใน Slash Command เป็นค่าอื่น
+    if "wadangka" in matched_name.lower() or "วาดังการ์" in matched_name:
         notice_minutes = 30
         
     BOSS_RESPAWN_TIMES[matched_name] = timedelta(seconds=total_seconds)
@@ -1982,11 +1982,31 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
                 print(f"❌ ส่ง Audit Log ไปที่ห้อง boss-attendance ไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🚀 11. Run
+# 🚀 11. Run Bot
 # ==========================================
 if __name__ == "__main__":
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if TOKEN:
-        bot.run(TOKEN)
+    token = os.environ.get("DISCORD_TOKEN")
+    if token:
+        while True:
+            try:
+                # 🔧 Reset ป้องกันปัญหา "Session is closed" เมื่อต้อง retry ใหม่
+                bot._is_closed = False
+                if hasattr(bot, 'http') and bot.http:
+                    try:
+                        bot.http._HTTPClient__session = None
+                    except Exception:
+                        pass
+                bot.run(token)
+                break
+            except discord.errors.HTTPException as e:
+                if e.status == 429:
+                    print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพักและรอ 60 วินาทีก่อนลองรันใหม่...")
+                    time.sleep(60)
+                else:
+                    print(f"❌ เกิดข้อผิดพลาด HTTPException: {e}")
+                    break
+            except Exception as e:
+                print(f"❌ เกิดข้อผิดพลาดของระบบ: {e}")
+                time.sleep(10)
     else:
-        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variable!")
+        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables! กรุณาตั้งค่าก่อนรันบอท")
