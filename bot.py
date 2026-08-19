@@ -810,8 +810,12 @@ async def load_custom_bosses():
         for boss_name, data in custom_data.items():
             BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
             BOSS_CD_TEXT[boss_name] = data["cd_text"]
-            ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
-            ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
+            if boss_name.strip().lower() == "wadangka":
+                ADVANCE_NOTICE_SECONDS[boss_name] = 1800
+                ADVANCE_NOTICE_TEXT[boss_name] = "30 นาที"
+            else:
+                ADVANCE_NOTICE_SECONDS[boss_name] = data.get("notice_seconds", 300)
+                ADVANCE_NOTICE_TEXT[boss_name] = data.get("notice_text", "5 นาที")
             if boss_name not in BOSS_PRONUNCIATION:
                 BOSS_PRONUNCIATION[boss_name] = boss_name
 
@@ -1812,6 +1816,9 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
         return
 
     matched_name = get_boss_canonical_name(name)
+    if matched_name.strip().lower() == "wadangka":
+        notice_minutes = 30
+        
     BOSS_RESPAWN_TIMES[matched_name] = timedelta(seconds=total_seconds)
     
     cd_parts = []
@@ -1975,31 +1982,11 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
                 print(f"❌ ส่ง Audit Log ไปที่ห้อง boss-attendance ไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🚀 11. Run Bot
+# 🚀 11. Run
 # ==========================================
 if __name__ == "__main__":
-    token = os.environ.get("DISCORD_TOKEN")
-    if token:
-        while True:
-            try:
-                # 🔧 Reset ป้องกันปัญหา "Session is closed" เมื่อต้อง retry ใหม่
-                bot._is_closed = False
-                if hasattr(bot, 'http') and bot.http:
-                    try:
-                        bot.http._HTTPClient__session = None
-                    except Exception:
-                        pass
-                bot.run(token)
-                break
-            except discord.errors.HTTPException as e:
-                if e.status == 429:
-                    print("⚠️ ติด Rate Limit ตอนเริ่มต้นระบบ กำลังพักและรอ 60 วินาทีก่อนลองรันใหม่...")
-                    time.sleep(60)
-                else:
-                    print(f"❌ เกิดข้อผิดพลาด HTTPException: {e}")
-                    break
-            except Exception as e:
-                print(f"❌ เกิดข้อผิดพลาดของระบบ: {e}")
-                time.sleep(10)
+    TOKEN = os.environ.get("DISCORD_TOKEN")
+    if TOKEN:
+        bot.run(TOKEN)
     else:
-        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variables! กรุณาตั้งค่าก่อนรันบอท")
+        print("❌ ไม่พบ DISCORD_TOKEN ใน Environment Variable!")
