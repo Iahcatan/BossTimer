@@ -551,7 +551,7 @@ BOSS_PRONUNCIATION = {
     "Bbinikjoe": "บีนิกโจ", "Bigmouse": "บิ๊กเมาส์", "Caligo": "คาลิโก้", "Poison Root Flower": "พอยซัน รูท ฟลาวเวอร์",
     "Contaminated Queen Bee": "คอนทามิเนตเต็ด ควีนบี", "Rotten Pudding": "รอตเทน พุดดิ้ง", "Swamp Flower Monster": "สแวมป์ ฟลาวเวอร์ มอนสเตอร์",
     "Ukpana": "อุคปาน่า", "Darlene the Witch": "ดาร์ลีน เดอะ วิทช์", "Illust": "อิลลัสต์", "Actaemon": "แอคธีมอน",
-    "Aiyo's Protector": "ไอโย โปรเตกเตอร์", "Glucose": "กลูโคส", "Overload": "โอเวอร์โหลด", "โซล ลิช": "โซล ลิช",
+    "Aiyo's Protector": "ไอโย โปรเตกเตอร์", "Glucose": "กลูโคส", "Overload": "โอเวอร์โหลด", "Soul Lich": "โซล ลิช",
     "Platanista": "พลานิสต้า", "Barslaf": "บาร์สลาฟ", "Billiard": "บิลเลียด", "Shaaack": "ชาค",
     "Suuuk": "ซุก", "Sususuk": "ซูซูซุก", "sandgrave": "แซนด์เกรฟ", "Elder Beholder": "เอลเดอร์ บีโฮลเดอร์"
 }
@@ -985,7 +985,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 vc.play(audio_source_en, after=after_playing_en)
                                 await asyncio.wait_for(play_finished_en.wait(), timeout=30)
                             except asyncio.TimeoutError:
-                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) 초 ในห้อง {channel.name}")
+                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
                             except Exception as play_err:
                                 print(f"❌ ระบบเล่นเสียงขัดข้อง (EN) ในห้อง {channel.name}: {play_err}")
@@ -1011,7 +1011,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 print(f"⚠️ การเล่นเสียง (KO) หมดเวลา (Timeout) ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
                             except Exception as play_err:
-                                print(f"❌ ระบบเล่นเสียงขัดข้อง (KO) 비 ในห้อง {channel.name}: {play_err}")
+                                print(f"❌ ระบบเล่นเสียงขัดข้อง (KO) ในห้อง {channel.name}: {play_err}")
                                 loop.call_soon_threadsafe(play_finished_ko.set)
 
                     if idx < len(target_channels) - 1: await asyncio.sleep(1.5)
@@ -1934,6 +1934,7 @@ async def set_live(interaction: discord.Interaction):
     code="โค้ดสำหรับเช็คชื่อ (Code)",
     drop_item="ไอเทมที่ดรอป (Drop Item)"
 )
+@app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
 async def attendance_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
     await interaction.response.defer()
