@@ -161,12 +161,14 @@ def get_boss_canonical_name(boss_name: str) -> str:
 
 def get_boss_advance_notice_seconds(boss_name: str) -> int:
     cleaned = boss_name.strip().lower() if boss_name else ""
+    if cleaned == "wadangka": return 1800 # 30 นาทีเสมอ
     for key, val in ADVANCE_NOTICE_SECONDS.items():
         if key.lower() == cleaned: return val
     return 300
 
 def get_boss_advance_notice_text(boss_name: str) -> str:
     cleaned = boss_name.strip().lower() if boss_name else ""
+    if cleaned == "wadangka": return "30 นาที" # 30 นาทีเสมอ
     for key, val in ADVANCE_NOTICE_TEXT.items():
         if key.lower() == cleaned: return val
     return "5 นาที"
@@ -981,7 +983,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 vc.play(audio_source_en, after=after_playing_en)
                                 await asyncio.wait_for(play_finished_en.wait(), timeout=30)
                             except asyncio.TimeoutError:
-                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) ในห้อง {channel.name}")
+                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) 초 ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
                             except Exception as play_err:
                                 print(f"❌ ระบบเล่นเสียงขัดข้อง (EN) ในห้อง {channel.name}: {play_err}")
