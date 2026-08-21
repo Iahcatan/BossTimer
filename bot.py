@@ -20,6 +20,11 @@ from waitress import serve
 import edge_tts
 import imageio_ffmpeg
 
+from keep_alive import keep_alive
+
+# เรียกใช้ Web server จำลองก่อนเริ่มการทำงานของ Bot
+keep_alive()
+
 # 🔥 Firebase Admin SDK Setup
 import firebase_admin
 from firebase_admin import credentials, db
