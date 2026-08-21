@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, request, jsonify
 from waitress import serve
 import edge_tts
 import imageio_ffmpeg
@@ -161,7 +161,6 @@ def get_boss_canonical_name(boss_name: str) -> str:
 
 def get_boss_advance_notice_seconds(boss_name: str) -> int:
     cleaned = boss_name.strip().lower() if boss_name else ""
-    # 🔥 บังคับ Wadangka เป็น 1800 วินาทีเสมอ (คลุมทุกเงื่อนไขชื่อ)
     if "wadangka" in cleaned or "วาดังการ์" in cleaned: return 1800 
     for key, val in ADVANCE_NOTICE_SECONDS.items():
         if key.lower() == cleaned: return val
@@ -169,7 +168,6 @@ def get_boss_advance_notice_seconds(boss_name: str) -> int:
 
 def get_boss_advance_notice_text(boss_name: str) -> str:
     cleaned = boss_name.strip().lower() if boss_name else ""
-    # 🔥 บังคับ Wadangka เป็น 30 นาทีเสมอ (คลุมทุกเงื่อนไขชื่อ)
     if "wadangka" in cleaned or "วาดังการ์" in cleaned: return "30 นาที" 
     for key, val in ADVANCE_NOTICE_TEXT.items():
         if key.lower() == cleaned: return val
@@ -265,6 +263,7 @@ HTML_TEMPLATE = """
         .status-badge { font-size: 0.9rem; padding: 6px 12px; border-radius: 20px; }
         .table { color: #f8fafc; }
         .table-dark { --bs-table-bg: #1e293b; }
+        .form-check-input:checked { background-color: #0d6efd; border-color: #0d6efd; }
     </style>
 </head>
 <body>
@@ -272,6 +271,31 @@ HTML_TEMPLATE = """
         <div class="d-flex justify-content-between align-items-center mb-4">
             <h2>⚔️ Boss Timer Dashboard</h2>
             <span class="badge bg-success status-badge">🟢 Bot Online</span>
+        </div>
+
+        <!-- 🔊 สวิตช์ตั้งค่าเปิด-ปิดการแจ้งเตือนเสียง TTS แยกภาษา -->
+        <div class="card p-4 shadow-sm mb-4">
+            <h4 class="card-title text-info mb-3">🔊 ตั้งค่าการแจ้งเตือนด้วยเสียง (TTS แยกตามภาษา)</h4>
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <div class="form-check form-switch fs-5">
+                        <input class="form-check-input" type="checkbox" id="tts_th" {% if tts_th %}checked{% endif %} onchange="updateTTS('th', this.checked)">
+                        <label class="form-check-label" for="tts_th">🇹🇭 เสียงภาษาไทย (TH)</label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="form-check form-switch fs-5">
+                        <input class="form-check-input" type="checkbox" id="tts_en" {% if tts_en %}checked{% endif %} onchange="updateTTS('en', this.checked)">
+                        <label class="form-check-label" for="tts_en">🇺🇸 เสียงภาษาอังกฤษ (EN)</label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="form-check form-switch fs-5">
+                        <input class="form-check-input" type="checkbox" id="tts_ko" {% if tts_ko %}checked{% endif %} onchange="updateTTS('ko', this.checked)">
+                        <label class="form-check-label" for="tts_ko">🇰🇷 เสียงภาษาเกาหลี (KO)</label>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div class="card p-4 shadow-sm mb-4">
@@ -315,6 +339,26 @@ HTML_TEMPLATE = """
             <small>อัปเดตข้อมูลอัตโนมัติทุกๆ 10 วินาที • Boss Timer Bot 24/7</small>
         </footer>
     </div>
+
+    <script>
+        function updateTTS(lang, enabled) {
+            fetch('/api/toggle_tts', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ lang: lang, enabled: enabled })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (!data.success) {
+                    alert('เกิดข้อผิดพลาดในการบันทึกการตั้งค่า TTS');
+                }
+            })
+            .catch(err => {
+                console.error('Error:', err);
+                alert('ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้');
+            });
+        }
+    </script>
 </body>
 </html>
 """
@@ -356,7 +400,33 @@ def dashboard():
             "recorded_by": data.get("recorded_by", "-")
         })
 
-    return render_template_string(HTML_TEMPLATE, bosses=boss_list)
+    return render_template_string(
+        HTML_TEMPLATE, 
+        bosses=boss_list,
+        tts_th=tts_th_enabled,
+        tts_en=tts_en_enabled,
+        tts_ko=tts_ko_enabled
+    )
+
+@app.route('/api/toggle_tts', methods=['POST'])
+def toggle_tts_api():
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    data = request.get_json() or {}
+    lang = data.get('lang')
+    enabled = parse_bool(data.get('enabled'), True)
+    
+    if lang == 'th':
+        tts_th_enabled = enabled
+    elif lang == 'en':
+        tts_en_enabled = enabled
+    elif lang == 'ko':
+        tts_ko_enabled = enabled
+    else:
+        return jsonify({"success": False, "error": "Invalid language"}), 400
+
+    if is_bot_ready and bot.loop and bot.loop.is_running():
+        asyncio.run_coroutine_threadsafe(save_bot_settings(), bot.loop)
+    return jsonify({"success": True, "lang": lang, "enabled": enabled})
 
 def run_web():
     port = int(os.environ.get("PORT", 5000))
@@ -391,14 +461,18 @@ disconnect_tasks = {}
 bf_notify_enabled = True
 lib_notify_enabled = True
 ppl_notify_enabled = True
+tts_th_enabled = True
+tts_en_enabled = True
+tts_ko_enabled = True
+
 vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
 last_bf_notified_hour = -1
 last_lib_notified_key = ""
 
 cached_live_message = None
 VOICE_THAI = "th-TH-PremwadeeNeural"
-VOICE_ENG = "en-US-AriaNeural"  # 🔥 เพิ่มตัวแปรเสียงภาษาอังกฤษ
-VOICE_KOR = "ko-KR-SunHiNeural" # 🔥 เพิ่มตัวแปรเสียงภาษาเกาหลี
+VOICE_ENG = "en-US-AriaNeural"
+VOICE_KOR = "ko-KR-SunHiNeural"
 
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
@@ -731,17 +805,24 @@ async def save_bot_settings():
     settings_data = {
         "bf_notify_enabled": bf_notify_enabled,
         "lib_notify_enabled": lib_notify_enabled,
-        "ppl_notify_enabled": ppl_notify_enabled
+        "ppl_notify_enabled": ppl_notify_enabled,
+        "tts_th_enabled": tts_th_enabled,
+        "tts_en_enabled": tts_en_enabled,
+        "tts_ko_enabled": tts_ko_enabled
     }
     try: await asyncio.to_thread(db.reference('bot_settings').set, settings_data)
     except Exception: pass
     await asyncio.to_thread(set_db_value, "bf_notify_enabled", bf_notify_enabled)
     await asyncio.to_thread(set_db_value, "lib_notify_enabled", lib_notify_enabled)
     await asyncio.to_thread(set_db_value, "ppl_notify_enabled", ppl_notify_enabled)
+    await asyncio.to_thread(set_db_value, "tts_th_enabled", tts_th_enabled)
+    await asyncio.to_thread(set_db_value, "tts_en_enabled", tts_en_enabled)
+    await asyncio.to_thread(set_db_value, "tts_ko_enabled", tts_ko_enabled)
     await asyncio.to_thread(save_json_local, SETTINGS_FILE, settings_data)
 
 async def load_bot_settings():
     global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
     data = None
     try: data = await asyncio.to_thread(db.reference('bot_settings').get)
     except Exception: pass
@@ -750,15 +831,24 @@ async def load_bot_settings():
         db_bf = get_db_value("bf_notify_enabled", None)
         db_lib = get_db_value("lib_notify_enabled", None)
         db_ppl = get_db_value("ppl_notify_enabled", None)
-        if db_bf is not None: bf_notify_enabled = db_bf
-        if db_lib is not None: lib_notify_enabled = db_lib
-        if db_ppl is not None: ppl_notify_enabled = db_ppl
+        db_th = get_db_value("tts_th_enabled", None)
+        db_en = get_db_value("tts_en_enabled", None)
+        db_ko = get_db_value("tts_ko_enabled", None)
+        if db_bf is not None: bf_notify_enabled = parse_bool(db_bf, True)
+        if db_lib is not None: lib_notify_enabled = parse_bool(db_lib, True)
+        if db_ppl is not None: ppl_notify_enabled = parse_bool(db_ppl, True)
+        if db_th is not None: tts_th_enabled = parse_bool(db_th, True)
+        if db_en is not None: tts_en_enabled = parse_bool(db_en, True)
+        if db_ko is not None: tts_ko_enabled = parse_bool(db_ko, True)
         return
 
     if data:
-        bf_notify_enabled = data.get("bf_notify_enabled", True)
-        lib_notify_enabled = data.get("lib_notify_enabled", True)
-        ppl_notify_enabled = data.get("ppl_notify_enabled", True)
+        bf_notify_enabled = parse_bool(data.get("bf_notify_enabled", True), True)
+        lib_notify_enabled = parse_bool(data.get("lib_notify_enabled", True), True)
+        ppl_notify_enabled = parse_bool(data.get("ppl_notify_enabled", True), True)
+        tts_th_enabled = parse_bool(data.get("tts_th_enabled", True), True)
+        tts_en_enabled = parse_bool(data.get("tts_en_enabled", True), True)
+        tts_ko_enabled = parse_bool(data.get("tts_ko_enabled", True), True)
 
 async def save_vip_config():
     try: await asyncio.to_thread(db.reference('vip_config').set, vip_config)
@@ -827,7 +917,6 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# 🔥 แก้ไข: ย้ายการลงทะเบียน View และการ Sync Command มาไว้ใน setup_hook
 async def setup_hook():
     bot.add_view(QuickActionsView())
     try:
@@ -871,9 +960,16 @@ def clean_display_name(name: str) -> str:
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned if cleaned else "สมาชิก"
 
-# 🔥 ฟังก์ชันแจ้งเตือนด้วยเสียง (รองรับการแจ้งเตือน 3 ภาษาต่อเนื่องกัน)
-async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None, text_ko: str = None, target_channel: discord.VoiceChannel = None):
-    if not guild or not text_th: return
+# 🔥 ฟังก์ชันแจ้งเตือนด้วยเสียง (ตรวจสอบสถานะเปิด-ปิด TTS แต่ละภาษาก่อนเล่น)
+async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str = None, text_ko: str = None, target_channel: discord.VoiceChannel = None):
+    if not guild: return
+    
+    actual_text_th = text_th if (tts_th_enabled and text_th) else None
+    actual_text_en = text_en if (tts_en_enabled and text_en) else None
+    actual_text_ko = text_ko if (tts_ko_enabled and text_ko) else None
+
+    if not (actual_text_th or actual_text_en or actual_text_ko):
+        return
     
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
@@ -898,21 +994,21 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
         if not target_channels: return
 
         unique_id = uuid.uuid4().hex
-        tts_filename_th = f"temp_tts_th_{guild.id}_{unique_id}.mp3"
-        tts_filename_en = f"temp_tts_en_{guild.id}_{unique_id}.mp3" if text_en else None
-        tts_filename_ko = f"temp_tts_ko_{guild.id}_{unique_id}.mp3" if text_ko else None
+        tts_filename_th = f"temp_tts_th_{guild.id}_{unique_id}.mp3" if actual_text_th else None
+        tts_filename_en = f"temp_tts_en_{guild.id}_{unique_id}.mp3" if actual_text_en else None
+        tts_filename_ko = f"temp_tts_ko_{guild.id}_{unique_id}.mp3" if actual_text_ko else None
 
         try:
-            communicate_th = edge_tts.Communicate(text_th, VOICE_THAI, rate="-20%", pitch="+10Hz")
-            await communicate_th.save(tts_filename_th)
-            if not os.path.exists(tts_filename_th) or os.path.getsize(tts_filename_th) == 0: return
+            if actual_text_th:
+                communicate_th = edge_tts.Communicate(actual_text_th, VOICE_THAI, rate="-20%", pitch="+10Hz")
+                await communicate_th.save(tts_filename_th)
             
-            if text_en:
-                communicate_en = edge_tts.Communicate(text_en, VOICE_ENG, rate="-10%", pitch="+0Hz")
+            if actual_text_en:
+                communicate_en = edge_tts.Communicate(actual_text_en, VOICE_ENG, rate="-10%", pitch="+0Hz")
                 await communicate_en.save(tts_filename_en)
                 
-            if text_ko:
-                communicate_ko = edge_tts.Communicate(text_ko, VOICE_KOR, rate="-10%", pitch="+0Hz")
+            if actual_text_ko:
+                communicate_ko = edge_tts.Communicate(actual_text_ko, VOICE_KOR, rate="-10%", pitch="+0Hz")
                 await communicate_ko.save(tts_filename_ko)
         except Exception as tts_err:
             print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS: {tts_err}")
@@ -949,28 +1045,32 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                         vc.stop()
 
                     if vc.is_connected():
-                        audio_source_th = discord.FFmpegPCMAudio(
-                            tts_filename_th, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
-                        )
-                        loop = asyncio.get_running_loop()
-                        play_finished_th = asyncio.Event()
+                        played_any = False
+                        
+                        if actual_text_th and tts_filename_th and os.path.exists(tts_filename_th) and os.path.getsize(tts_filename_th) > 0:
+                            audio_source_th = discord.FFmpegPCMAudio(
+                                tts_filename_th, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
+                            )
+                            loop = asyncio.get_running_loop()
+                            play_finished_th = asyncio.Event()
 
-                        def after_playing_th(error):
-                            if error: print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง (TH) ใน {channel.name}: {error}")
-                            loop.call_soon_threadsafe(play_finished_th.set)
+                            def after_playing_th(error):
+                                if error: print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง (TH) ใน {channel.name}: {error}")
+                                loop.call_soon_threadsafe(play_finished_th.set)
 
-                        try:
-                            vc.play(audio_source_th, after=after_playing_th)
-                            await asyncio.wait_for(play_finished_th.wait(), timeout=30)
-                        except asyncio.TimeoutError:
-                            print(f"⚠️ การเล่นเสียง (TH) หมดเวลา (Timeout) 매ห้อง {channel.name}")
-                            if vc.is_playing(): vc.stop()
-                        except Exception as play_err:
-                            print(f"❌ ระบบเล่นเสียงขัดข้อง (TH) ในห้อง {channel.name}: {play_err}")
-                            loop.call_soon_threadsafe(play_finished_th.set)
+                            try:
+                                vc.play(audio_source_th, after=after_playing_th)
+                                await asyncio.wait_for(play_finished_th.wait(), timeout=30)
+                                played_any = True
+                            except asyncio.TimeoutError:
+                                print(f"⚠️ การเล่นเสียง (TH) หมดเวลา (Timeout) ในห้อง {channel.name}")
+                                if vc.is_playing(): vc.stop()
+                            except Exception as play_err:
+                                print(f"❌ ระบบเล่นเสียงขัดข้อง (TH) ในห้อง {channel.name}: {play_err}")
+                                loop.call_soon_threadsafe(play_finished_th.set)
 
-                        if text_en and vc.is_connected() and os.path.exists(tts_filename_en) and os.path.getsize(tts_filename_en) > 0:
-                            await asyncio.sleep(0.5)
+                        if actual_text_en and vc.is_connected() and tts_filename_en and os.path.exists(tts_filename_en) and os.path.getsize(tts_filename_en) > 0:
+                            if played_any: await asyncio.sleep(0.5)
                             
                             audio_source_en = discord.FFmpegPCMAudio(
                                 tts_filename_en, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
@@ -984,6 +1084,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                             try:
                                 vc.play(audio_source_en, after=after_playing_en)
                                 await asyncio.wait_for(play_finished_en.wait(), timeout=30)
+                                played_any = True
                             except asyncio.TimeoutError:
                                 print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
@@ -991,8 +1092,8 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 print(f"❌ ระบบเล่นเสียงขัดข้อง (EN) ในห้อง {channel.name}: {play_err}")
                                 loop.call_soon_threadsafe(play_finished_en.set)
                                 
-                        if text_ko and vc.is_connected() and os.path.exists(tts_filename_ko) and os.path.getsize(tts_filename_ko) > 0:
-                            await asyncio.sleep(0.5)
+                        if actual_text_ko and vc.is_connected() and tts_filename_ko and os.path.exists(tts_filename_ko) and os.path.getsize(tts_filename_ko) > 0:
+                            if played_any: await asyncio.sleep(0.5)
                             
                             audio_source_ko = discord.FFmpegPCMAudio(
                                 tts_filename_ko, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
@@ -1006,6 +1107,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                             try:
                                 vc.play(audio_source_ko, after=after_playing_ko)
                                 await asyncio.wait_for(play_finished_ko.wait(), timeout=30)
+                                played_any = True
                             except asyncio.TimeoutError:
                                 print(f"⚠️ การเล่นเสียง (KO) หมดเวลา (Timeout) ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
@@ -1022,7 +1124,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                         except: pass
 
         finally:
-            if os.path.exists(tts_filename_th):
+            if tts_filename_th and os.path.exists(tts_filename_th):
                 try: os.remove(tts_filename_th)
                 except Exception: pass
             if tts_filename_en and os.path.exists(tts_filename_en):
@@ -1054,14 +1156,14 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     if before.channel != after.channel and after.channel is not None:
         if vip_config.get("enabled", False) and member.id == vip_config.get("user_id"):
             greeting_text = vip_config.get("message", "")
-            if greeting_text: asyncio.create_task(speak_in_guild(member.guild, greeting_text, target_channel=after.channel))
+            if greeting_text: asyncio.create_task(speak_in_guild(member.guild, text_th=greeting_text, target_channel=after.channel))
         elif ppl_notify_enabled:
             user_name = clean_display_name(member.display_name)
             channel_name = clean_display_name(after.channel.name)
             greeting_text_th = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}"
             greeting_text_en = f"Welcome {user_name} to {channel_name}."
             greeting_text_ko = f"{user_name}님, {channel_name} 방에 오신 것을 환영합니다."
-            asyncio.create_task(speak_in_guild(member.guild, greeting_text_th, greeting_text_en, greeting_text_ko, target_channel=after.channel))
+            asyncio.create_task(speak_in_guild(member.guild, text_th=greeting_text_th, text_en=greeting_text_en, text_ko=greeting_text_ko, target_channel=after.channel))
 
 @bot.event
 async def on_ready():
@@ -1079,8 +1181,6 @@ async def on_ready():
     await load_live_config()
     await load_vip_config()
 
-    # 🔥 ลบ bot.add_view() และ bot.tree.sync() ออกจาก on_ready แล้วย้ายไปไว้ที่ setup_hook 
-    # เพื่อป้องกันการ sync รัวๆ จนติด Rate Limit จาก Discord
     await asyncio.sleep(3)
     
     if not check_boss_notifications.is_running(): check_boss_notifications.start()
@@ -1134,7 +1234,7 @@ async def check_bf_notifications():
                     spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
                     spoken_text_en = "Battlefield will start in 3 minutes."
                     spoken_text_ko = "배틀필드가 3분 후에 시작됩니다."
-                    asyncio.create_task(speak_in_guild(guild, spoken_text_th, spoken_text_en, spoken_text_ko))
+                    asyncio.create_task(speak_in_guild(guild, text_th=spoken_text_th, text_en=spoken_text_en, text_ko=spoken_text_ko))
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
 
@@ -1176,7 +1276,7 @@ async def check_library_boss_notifications():
                     spoken_text_th = "Library Boss ถึงเวลาเตรียมตัวแล้วค่ะ"
                     spoken_text_en = "It's time to prepare for Library Boss."
                     spoken_text_ko = "도서관 보스 준비 시간입니다."
-                    asyncio.create_task(speak_in_guild(guild, spoken_text_th, spoken_text_en, spoken_text_ko))
+                    asyncio.create_task(speak_in_guild(guild, text_th=spoken_text_th, text_en=spoken_text_en, text_ko=spoken_text_ko))
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_library_boss_notifications': {e}")
 
@@ -1262,7 +1362,7 @@ async def check_boss_notifications():
                         spoken_th = f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"
                         spoken_en = f"Boss {boss_name} will spawn in {notice_text_en}."
                         spoken_ko = f"보스 {boss_name}가 {notice_text_ko} 후에 나타납니다."
-                        asyncio.create_task(speak_in_guild(guild, spoken_th, spoken_en, spoken_ko))
+                        asyncio.create_task(speak_in_guild(guild, text_th=spoken_th, text_en=spoken_en, text_ko=spoken_ko))
                         notified_guild_ids.add(guild.id)
                     
                 with schedule_lock:
@@ -1306,7 +1406,7 @@ async def check_boss_notifications():
                         spoken_th = f"บอส {spoken_name} เกิดแล้วค่ะ"
                         spoken_en = f"Boss {boss_name} has spawned."
                         spoken_ko = f"보스 {boss_name}가 나타났습니다."
-                        asyncio.create_task(speak_in_guild(guild, spoken_th, spoken_en, spoken_ko))
+                        asyncio.create_task(speak_in_guild(guild, text_th=spoken_th, text_en=spoken_en, text_ko=spoken_ko))
                         notified_guild_ids.add(guild.id)
                     
                 with schedule_lock:
@@ -1524,7 +1624,7 @@ class QuickActionsView(discord.ui.View):
         spoken_text_th = f"เรียกคนลุยบอส {spoken_boss} ด่วนค่ะ"
         spoken_text_en = f"Calling everyone for boss {canonical_name} immediately."
         spoken_text_ko = f"보스 {canonical_name} 레이드에 당장 참여하세요."
-        if guild: asyncio.create_task(speak_in_guild(guild, spoken_text_th, spoken_text_en, spoken_text_ko))
+        if guild: asyncio.create_task(speak_in_guild(guild, text_th=spoken_text_th, text_en=spoken_text_en, text_ko=spoken_text_ko))
         await send_audit_log(guild, interaction.user, "กดปุ่มเรียกคน (Quick Action)", f"🔔 เรียกคนลุยบอส: `{canonical_name}`", discord.Color.gold())
 
 @bot.tree.command(name="panel", description="ส่งข้อความ Interactive Embed พร้อมปุ่มกด Quick Actions ในช่องนี้")
@@ -1544,11 +1644,52 @@ async def send_quick_panel(interaction: discord.Interaction):
     await interaction.followup.send(embed=embed, view=view)
     embed_summary, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
     if tts_text_th and interaction.guild:
-        asyncio.create_task(speak_in_guild(interaction.guild, tts_text_th, tts_text_en, tts_text_ko))
+        asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # ==========================================
 # 🔊 9. Voice & Notify Commands
 # ==========================================
+@bot.tree.command(name="tts", description="ตั้งค่าเปิด-ปิดการแจ้งเตือนเสียง TTS แยกตามภาษา (ไทย, อังกฤษ, เกาหลี)")
+@app_commands.describe(lang="เลือกภาษาที่ต้องการตั้งค่า", status="เลือกเปิด (on) หรือปิด (off)")
+@app_commands.choices(
+    lang=[
+        app_commands.Choice(name="🇹🇭 ภาษาไทย (TH)", value="th"),
+        app_commands.Choice(name="🇺🇸 ภาษาอังกฤษ (EN)", value="en"),
+        app_commands.Choice(name="🇰🇷 ภาษาเกาหลี (KO)", value="ko")
+    ],
+    status=[
+        app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"),
+        app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")
+    ]
+)
+@has_allowed_role()
+async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Choice[str], status: app_commands.Choice[str]):
+    await interaction.response.defer()
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    is_on = (status.value == "on")
+    lang_name = ""
+    
+    if lang.value == "th":
+        tts_th_enabled = is_on
+        lang_name = "🇹🇭 ภาษาไทย"
+    elif lang.value == "en":
+        tts_en_enabled = is_on
+        lang_name = "🇺🇸 ภาษาอังกฤษ"
+    elif lang.value == "ko":
+        tts_ko_enabled = is_on
+        lang_name = "🇰🇷 ภาษาเกาหลี"
+
+    await save_bot_settings()
+    status_text = "🟢 **เปิด**" if is_on else "🔴 **ปิด**"
+    color = discord.Color.green() if is_on else discord.Color.red()
+    embed = discord.Embed(
+        title="⚙️ ตั้งค่าการแจ้งเตือนด้วยเสียง (TTS)",
+        description=f"{status_text} การแจ้งเตือนเสียง {lang_name} เรียบร้อยแล้ว!\n*(ข้อมูลซิงค์กับ Dashboard และ Firebase)*",
+        color=color
+    )
+    await interaction.followup.send(embed=embed)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่า TTS เสียง (/tts)", f"ภาษา: `{lang.value.upper()}` | สถานะ: `{status.value.upper()}`", color)
+
 @bot.tree.command(name="notify", description="เปิดหรือปิดระบบแจ้งเตือนสงคราม Battlefield (BF)")
 @app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
 @app_commands.choices(status=[app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"), app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")])
@@ -1598,7 +1739,7 @@ async def toggle_vip_greet(interaction: discord.Interaction, status: app_command
     global vip_config
     if status.value == "on":
         if not user or not message:
-            await interaction.followup.send("❌ **ข้อมูลไม่ครบถ้วน!** กรุณาระบุทั้ง **user** 및 **message**", ephemeral=True)
+            await interaction.followup.send("❌ **ข้อมูลไม่ครบถ้วน!** กรุณาระบุทั้ง **user** และ **message**", ephemeral=True)
             return
         vip_config = {"enabled": True, "user_id": user.id, "user_name": user.display_name, "message": message}
         await save_vip_config()
@@ -1660,7 +1801,7 @@ async def notice_command(interaction: discord.Interaction, message: str):
     embed = discord.Embed(title="📢 ประกาศข้อความเสียง (Global Notice)", description=f"**ข้อความ:** {message}\n\nกำลังไล่ประกาศในทุกห้องเสียงที่มีสมาชิกอยู่...", color=discord.Color.blue())
     embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
     await interaction.followup.send(embed=embed, ephemeral=True)
-    asyncio.create_task(speak_in_guild(interaction.guild, message))
+    asyncio.create_task(speak_in_guild(interaction.guild, text_th=message))
 
 # ==========================================
 # ⚔️ 10. Boss Slash Commands
@@ -1734,7 +1875,7 @@ async def boss_time_slash(interaction: discord.Interaction):
         await interaction.followup.send(tts_text_th)
         return
     await interaction.followup.send(embed=embed)
-    asyncio.create_task(speak_in_guild(interaction.guild, tts_text_th, tts_text_en, tts_text_ko))
+    asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
     await send_audit_log(interaction.guild, interaction.user, "เช็กเวลาบอสพร้อม TTS (/time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
 @bot.command(name="time")
@@ -1744,7 +1885,7 @@ async def boss_time_prefix(ctx: commands.Context):
         await ctx.send(tts_text_th)
         return
     await ctx.send(embed=embed)
-    asyncio.create_task(speak_in_guild(ctx.guild, tts_text_th, tts_text_en, tts_text_ko))
+    asyncio.create_task(speak_in_guild(ctx.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
     await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
@@ -1921,7 +2062,6 @@ async def set_live(interaction: discord.Interaction):
 async def attendance_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
     await interaction.response.defer()
     
-    # 1. แจ้งเตือนข้อความในช่องที่ใช้คำสั่ง
     embed = discord.Embed(
         title="📢 แจ้งเตือนเช็คชื่อบอส (Attendance)",
         color=discord.Color.green(),
@@ -1934,18 +2074,15 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
     
     await interaction.followup.send(content="✅ ส่งประกาศเช็คชื่อสำเร็จ!", embed=embed)
     
-    # ดึงการออกเสียงที่ถูกต้องของชื่อบอสเพื่อภาษาไทย
     canonical_name = get_boss_canonical_name(boss_name)
     spoken_name = get_boss_pronunciation(canonical_name)
     
-    # 2. ส่งเสียงประกาศเข้าทุกห้องเสียงที่มีคนอยู่ (3 ภาษา)
     spoken_th = f"ประกาศเช็คชื่อบอส {spoken_name} โค้ดคือ {code} ไอเทมที่ดรอปคือ {drop_item} ค่ะ"
     spoken_en = f"Attendance for boss {boss_name}. The code is {code}. Drop item is {drop_item}."
     spoken_ko = f"보스 {boss_name} 출석 체크입니다. 코드는 {code} 이며, 드롭 아이템은 {drop_item} 입니다."
     
-    asyncio.create_task(speak_in_guild(interaction.guild, spoken_th, spoken_en, spoken_ko))
+    asyncio.create_task(speak_in_guild(interaction.guild, text_th=spoken_th, text_en=spoken_en, text_ko=spoken_ko))
     
-    # 3. แจ้งเตือน Audit Log ไปยังห้อง boss-attendance
     if interaction.guild:
         attendance_channel = discord.utils.get(interaction.guild.text_channels, name="boss-attendance")
         if attendance_channel:
