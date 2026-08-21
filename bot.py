@@ -20,11 +20,6 @@ from waitress import serve
 import edge_tts
 import imageio_ffmpeg
 
-from keep_alive import keep_alive
-
-# เรียกใช้ Web server จำลองก่อนเริ่มการทำงานของ Bot
-keep_alive()
-
 # 🔥 Firebase Admin SDK Setup
 import firebase_admin
 from firebase_admin import credentials, db
@@ -993,7 +988,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 vc.play(audio_source_en, after=after_playing_en)
                                 await asyncio.wait_for(play_finished_en.wait(), timeout=30)
                             except asyncio.TimeoutError:
-                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) ในห้อง {channel.name}")
+                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) 가 ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
                             except Exception as play_err:
                                 print(f"❌ ระบบเล่นเสียงขัดข้อง (EN) ในห้อง {channel.name}: {play_err}")
