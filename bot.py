@@ -20,6 +20,11 @@ from waitress import serve
 import edge_tts
 import imageio_ffmpeg
 
+from keep_alive import keep_alive
+
+# เรียกใช้ Web server จำลองก่อนเริ่มการทำงานของ Bot
+keep_alive()
+
 # 🔥 Firebase Admin SDK Setup
 import firebase_admin
 from firebase_admin import credentials, db
@@ -696,7 +701,6 @@ def start_firebase_listener(loop):
     except Exception as e:
         print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
 
-# 🔥 เพิ่ม Listener สำหรับอ่านค่า Bot Settings แบบ Realtime จากเว็บ
 def start_firebase_settings_listener(loop):
     def listener(event):
         global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
@@ -870,9 +874,7 @@ def clean_display_name(name: str) -> str:
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned if cleaned else "สมาชิก"
 
-# 🔥 แก้ไขฟังก์ชันแจงเตือนด้วยเสียงเพื่อรองรับการเปิด-ปิดในแต่ละภาษา
 async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None, text_ko: str = None, target_channel: discord.VoiceChannel = None):
-    # ปรับเงื่อนไขใหม่: อนุญาตให้ทำงานถ้ามีข้อความภาษาใดภาษาหนึ่ง
     if not guild or (not text_th and not text_en and not text_ko): return
     
     if guild.id not in voice_locks:
@@ -949,7 +951,6 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                         vc.stop()
 
                     if vc.is_connected():
-                        # เล่นเสียงภาษาไทย (ถ้าเปิด)
                         if text_th and os.path.exists(tts_filename_th) and os.path.getsize(tts_filename_th) > 0:
                             audio_source_th = discord.FFmpegPCMAudio(
                                 tts_filename_th, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
@@ -971,9 +972,8 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 print(f"❌ ระบบเล่นเสียงขัดข้อง (TH) ในห้อง {channel.name}: {play_err}")
                                 loop.call_soon_threadsafe(play_finished_th.set)
 
-                        # เล่นเสียงภาษาอังกฤษ (ถ้าเปิด)
                         if text_en and vc.is_connected() and os.path.exists(tts_filename_en) and os.path.getsize(tts_filename_en) > 0:
-                            if text_th: await asyncio.sleep(0.5) # พักหายใจถ้ามีเสียงไทยมาก่อน
+                            if text_th: await asyncio.sleep(0.5)
                             
                             audio_source_en = discord.FFmpegPCMAudio(
                                 tts_filename_en, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
@@ -988,15 +988,14 @@ async def speak_in_guild(guild: discord.Guild, text_th: str, text_en: str = None
                                 vc.play(audio_source_en, after=after_playing_en)
                                 await asyncio.wait_for(play_finished_en.wait(), timeout=30)
                             except asyncio.TimeoutError:
-                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) 가 ในห้อง {channel.name}")
+                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) ในห้อง {channel.name}")
                                 if vc.is_playing(): vc.stop()
                             except Exception as play_err:
                                 print(f"❌ ระบบเล่นเสียงขัดข้อง (EN) ในห้อง {channel.name}: {play_err}")
                                 loop.call_soon_threadsafe(play_finished_en.set)
                                 
-                        # เล่นเสียงภาษาเกาหลี (ถ้าเปิด)
                         if text_ko and vc.is_connected() and os.path.exists(tts_filename_ko) and os.path.getsize(tts_filename_ko) > 0:
-                            if text_th or text_en: await asyncio.sleep(0.5) # พักหายใจถ้ามีเสียงก่อนหน้า
+                            if text_th or text_en: await asyncio.sleep(0.5)
                             
                             audio_source_ko = discord.FFmpegPCMAudio(
                                 tts_filename_ko, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
@@ -1064,7 +1063,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             user_name = clean_display_name(member.display_name)
             channel_name = clean_display_name(after.channel.name)
             
-            # ตรวจสอบว่าภาษาไหนเปิดใช้งานบ้าง
             greeting_text_th = f"ยินดีต้อนรับคุณ {user_name} เข้าสู่ห้อง{channel_name}" if tts_th_enabled else None
             greeting_text_en = f"Welcome {user_name} to {channel_name}." if tts_en_enabled else None
             greeting_text_ko = f"{user_name}님, {channel_name} 방에 오신 것을 환영합니다." if tts_ko_enabled else None
@@ -1087,7 +1085,6 @@ async def on_ready():
     await load_live_config()
     await load_vip_config()
 
-    # ไม่มี QuickActionsView ใน source ที่ให้มา จึงอาจต้องตรวจสอบ class นี้นะครับ หากไม่มีให้ลบบรรทัดล่างออก
     try: bot.add_view(QuickActionsView()) 
     except: pass
 
@@ -1102,7 +1099,6 @@ async def on_ready():
     if not check_bf_notifications.is_running(): check_bf_notifications.start()
     if not check_library_boss_notifications.is_running(): check_library_boss_notifications.start()
     
-    # ไม่มี update_live_embed และ check_auto_disconnect ใน source ที่ให้มา ถ้าลูปเหล่านี้มีอยู่ในโค้ดจริงของคุณ อย่าลืมนำกลับมาด้วยครับ
     try:
         if not update_live_embed.is_running(): update_live_embed.start()
         if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
@@ -1152,7 +1148,6 @@ async def check_bf_notifications():
                             await channel.send(content=send_content, embed=embed)
                         except Exception as e: print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {e}")
                     
-                    # ตรวจสอบภาษาที่เปิดอยู่
                     spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ" if tts_th_enabled else None
                     spoken_text_en = "Battlefield will start in 3 minutes." if tts_en_enabled else None
                     spoken_text_ko = "배틀필드가 3분 후에 시작됩니다." if tts_ko_enabled else None
@@ -1197,7 +1192,6 @@ async def check_library_boss_notifications():
                             await channel.send(content=send_content, embed=embed)
                         except Exception as e: print(f"❌ ส่งข้อความเตือน Library Boss ไม่สำเร็จ: {e}")
 
-                    # ตรวจสอบภาษาที่เปิดอยู่
                     spoken_text_th = "Library Boss ถึงเวลาเตรียมตัวแล้วค่ะ" if tts_th_enabled else None
                     spoken_text_en = "It's time to prepare for Library Boss." if tts_en_enabled else None
                     spoken_text_ko = "도서관 보스 준비 시간입니다." if tts_ko_enabled else None
@@ -1244,5 +1238,69 @@ async def check_boss_notifications():
                         fb_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
                     if fb_channel:
                         channels_to_notify.append(fb_channel)
+
+            time_to_spawn = (spawn_time - now).total_seconds()
+            advance_sec = get_boss_advance_notice_seconds(boss_name)
+
+            if 0 < time_to_spawn <= advance_sec and not notified_advance:
+                data["notified_advance"] = True
+                changed = True
+                notice_text_str = get_boss_advance_notice_text(boss_name)
+                for ch in channels_to_notify:
+                    try:
+                        embed = discord.Embed(
+                            title=f"⚠️ แจ้งเตือนบอสใกล้เกิด: {boss_name}",
+                            description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_text_str}**!\n⏰ เวลาเกิด: **{spawn_time.strftime('%H:%M:%S')} น.**",
+                            color=discord.Color.orange()
+                        )
+                        await ch.send(embed=embed)
+                    except Exception as ex:
+                        print(f"❌ ส่งข้อความเตือนล่วงหน้าไม่สำเร็จ: {ex}")
+
+                pronounce_name = get_boss_pronunciation(boss_name)
+                adv_text_en = get_boss_advance_notice_text_en(boss_name)
+                adv_text_ko = get_boss_advance_notice_text_ko(boss_name)
+                
+                spoken_th = f"บอส {pronounce_name} จะเกิดในอีก {notice_text_str}ค่ะ" if tts_th_enabled else None
+                spoken_en = f"Boss {boss_name} will spawn in {adv_text_en}." if tts_en_enabled else None
+                spoken_ko = f"보스 {boss_name}가 {adv_text_ko} 후에 스폰됩니다." if tts_ko_enabled else None
+
+                for guild in bot.guilds:
+                    asyncio.create_task(speak_in_guild(guild, spoken_th, spoken_en, spoken_ko))
+
+            elif time_to_spawn <= 0 and not notified_spawn:
+                data["notified_spawn"] = True
+                changed = True
+                for ch in channels_to_notify:
+                    try:
+                        embed = discord.Embed(
+                            title=f"⚔️ บอสเกิดแล้ว!: {boss_name}",
+                            description=f"บอส **{boss_name}** เกิดแล้วครับ! ลุยกันเลย!",
+                            color=discord.Color.red()
+                        )
+                        await ch.send(embed=embed)
+                    except Exception as ex:
+                        print(f"❌ ส่งข้อความแจ้งเตือนบอสเกิดไม่สำเร็จ: {ex}")
+
+                pronounce_name = get_boss_pronunciation(boss_name)
+                spoken_th = f"บอส {pronounce_name} เกิดแล้วค่ะ ลุยเลย" if tts_th_enabled else None
+                spoken_en = f"Boss {boss_name} has spawned. Let's go!" if tts_en_enabled else None
+                spoken_ko = f"보스 {boss_name}가 스폰되었습니다. 출격하세요!" if tts_ko_enabled else None
+
+                for guild in bot.guilds:
+                    asyncio.create_task(speak_in_guild(guild, spoken_th, spoken_en, spoken_ko))
+
+        if changed:
+            await save_boss_data()
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_boss_notifications': {e}")
+
+# ==========================================
+# 🚀 Run Bot (เพิ่มส่วนนี้เพื่อให้สคริปต์ทำงานต่อเนื่องและเปิด Port บน Render ได้สำเร็จ)
+# ==========================================
+if __name__ == "__main__":
+    TOKEN = os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN")
+    if not TOKEN:
+        print("❌ ไม่พบ Token ของบอส กรุณาตั้งค่า Environment Variable ชื่อ DISCORD_TOKEN หรือ TOKEN")
+    else:
+        bot.run(TOKEN)
