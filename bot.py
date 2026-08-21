@@ -20,11 +20,6 @@ from waitress import serve
 import edge_tts
 import imageio_ffmpeg
 
-from keep_alive import keep_alive
-
-# เรียกใช้ Web server จำลองก่อนเริ่มการทำงานของ Bot
-keep_alive()
-
 # 🔥 Firebase Admin SDK Setup
 import firebase_admin
 from firebase_admin import credentials, db
@@ -1296,7 +1291,7 @@ async def check_boss_notifications():
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_boss_notifications': {e}")
 
 # ==========================================
-# 🚀 Run Bot (เพิ่มส่วนนี้เพื่อให้สคริปต์ทำงานต่อเนื่องและเปิด Port บน Render ได้สำเร็จ)
+# 🚀 Run Bot
 # ==========================================
 if __name__ == "__main__":
     TOKEN = os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN")
