@@ -67,9 +67,9 @@ def parse_bool(val, default=False) -> bool:
         return bool(val)
     if isinstance(val, str):
         cleaned = val.strip().lower()
-        if cleaned in ('true', '1', 'yes'):
+        if cleaned in ('true', '1', 'yes', 'on'):
             return True
-        if cleaned in ('false', '0', 'no'):
+        if cleaned in ('false', '0', 'no', 'off'):
             return False
     return default
 
@@ -413,7 +413,8 @@ def toggle_tts_api():
     global tts_th_enabled, tts_en_enabled, tts_ko_enabled
     data = request.get_json() or {}
     lang = data.get('lang')
-    enabled = parse_bool(data.get('enabled'), True)
+    raw_enabled = data.get('enabled')
+    enabled = parse_bool(raw_enabled, True)
     
     if lang == 'th':
         tts_th_enabled = enabled
@@ -424,8 +425,7 @@ def toggle_tts_api():
     else:
         return jsonify({"success": False, "error": "Invalid language"}), 400
 
-    if is_bot_ready and bot.loop and bot.loop.is_running():
-        asyncio.run_coroutine_threadsafe(save_bot_settings(), bot.loop)
+    save_bot_settings_sync()
     return jsonify({"success": True, "lang": lang, "enabled": enabled})
 
 def run_web():
@@ -801,7 +801,7 @@ def start_firebase_listener(loop):
     except Exception as e:
         print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
 
-async def save_bot_settings():
+def save_bot_settings_sync():
     settings_data = {
         "bf_notify_enabled": bf_notify_enabled,
         "lib_notify_enabled": lib_notify_enabled,
@@ -810,45 +810,51 @@ async def save_bot_settings():
         "tts_en_enabled": tts_en_enabled,
         "tts_ko_enabled": tts_ko_enabled
     }
-    try: await asyncio.to_thread(db.reference('bot_settings').set, settings_data)
-    except Exception: pass
-    await asyncio.to_thread(set_db_value, "bf_notify_enabled", bf_notify_enabled)
-    await asyncio.to_thread(set_db_value, "lib_notify_enabled", lib_notify_enabled)
-    await asyncio.to_thread(set_db_value, "ppl_notify_enabled", ppl_notify_enabled)
-    await asyncio.to_thread(set_db_value, "tts_th_enabled", tts_th_enabled)
-    await asyncio.to_thread(set_db_value, "tts_en_enabled", tts_en_enabled)
-    await asyncio.to_thread(set_db_value, "tts_ko_enabled", tts_ko_enabled)
-    await asyncio.to_thread(save_json_local, SETTINGS_FILE, settings_data)
+    try:
+        db.reference('bot_settings').set(settings_data)
+    except Exception:
+        pass
+    set_db_value("bf_notify_enabled", bf_notify_enabled)
+    set_db_value("lib_notify_enabled", lib_notify_enabled)
+    set_db_value("ppl_notify_enabled", ppl_notify_enabled)
+    set_db_value("tts_th_enabled", tts_th_enabled)
+    set_db_value("tts_en_enabled", tts_en_enabled)
+    set_db_value("tts_ko_enabled", tts_ko_enabled)
+    save_json_local(SETTINGS_FILE, settings_data)
+
+async def save_bot_settings():
+    await asyncio.to_thread(save_bot_settings_sync)
 
 async def load_bot_settings():
     global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
     global tts_th_enabled, tts_en_enabled, tts_ko_enabled
     data = None
-    try: data = await asyncio.to_thread(db.reference('bot_settings').get)
-    except Exception: pass
+    try: 
+        data = await asyncio.to_thread(db.reference('bot_settings').get)
+    except Exception: 
+        pass
 
-    if not data:
-        db_bf = get_db_value("bf_notify_enabled", None)
-        db_lib = get_db_value("lib_notify_enabled", None)
-        db_ppl = get_db_value("ppl_notify_enabled", None)
-        db_th = get_db_value("tts_th_enabled", None)
-        db_en = get_db_value("tts_en_enabled", None)
-        db_ko = get_db_value("tts_ko_enabled", None)
-        if db_bf is not None: bf_notify_enabled = parse_bool(db_bf, True)
-        if db_lib is not None: lib_notify_enabled = parse_bool(db_lib, True)
-        if db_ppl is not None: ppl_notify_enabled = parse_bool(db_ppl, True)
-        if db_th is not None: tts_th_enabled = parse_bool(db_th, True)
-        if db_en is not None: tts_en_enabled = parse_bool(db_en, True)
-        if db_ko is not None: tts_ko_enabled = parse_bool(db_ko, True)
-        return
+    if data and isinstance(data, dict):
+        if "bf_notify_enabled" in data: bf_notify_enabled = parse_bool(data["bf_notify_enabled"], True)
+        if "lib_notify_enabled" in data: lib_notify_enabled = parse_bool(data["lib_notify_enabled"], True)
+        if "ppl_notify_enabled" in data: ppl_notify_enabled = parse_bool(data["ppl_notify_enabled"], True)
+        if "tts_th_enabled" in data: tts_th_enabled = parse_bool(data["tts_th_enabled"], True)
+        if "tts_en_enabled" in data: tts_en_enabled = parse_bool(data["tts_en_enabled"], True)
+        if "tts_ko_enabled" in data: tts_ko_enabled = parse_bool(data["tts_ko_enabled"], True)
 
-    if data:
-        bf_notify_enabled = parse_bool(data.get("bf_notify_enabled", True), True)
-        lib_notify_enabled = parse_bool(data.get("lib_notify_enabled", True), True)
-        ppl_notify_enabled = parse_bool(data.get("ppl_notify_enabled", True), True)
-        tts_th_enabled = parse_bool(data.get("tts_th_enabled", True), True)
-        tts_en_enabled = parse_bool(data.get("tts_en_enabled", True), True)
-        tts_ko_enabled = parse_bool(data.get("tts_ko_enabled", True), True)
+    db_bf = get_db_value("bf_notify_enabled", None)
+    db_lib = get_db_value("lib_notify_enabled", None)
+    db_ppl = get_db_value("ppl_notify_enabled", None)
+    db_th = get_db_value("tts_th_enabled", None)
+    db_en = get_db_value("tts_en_enabled", None)
+    db_ko = get_db_value("tts_ko_enabled", None)
+
+    if db_bf is not None: bf_notify_enabled = parse_bool(db_bf, bf_notify_enabled)
+    if db_lib is not None: lib_notify_enabled = parse_bool(db_lib, lib_notify_enabled)
+    if db_ppl is not None: ppl_notify_enabled = parse_bool(db_ppl, ppl_notify_enabled)
+    if db_th is not None: tts_th_enabled = parse_bool(db_th, tts_th_enabled)
+    if db_en is not None: tts_en_enabled = parse_bool(db_en, tts_en_enabled)
+    if db_ko is not None: tts_ko_enabled = parse_bool(db_ko, tts_ko_enabled)
 
 async def save_vip_config():
     try: await asyncio.to_thread(db.reference('vip_config').set, vip_config)
@@ -1666,16 +1672,20 @@ async def send_quick_panel(interaction: discord.Interaction):
 async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Choice[str], status: app_commands.Choice[str]):
     await interaction.response.defer()
     global tts_th_enabled, tts_en_enabled, tts_ko_enabled
-    is_on = (status.value == "on")
+    
+    lang_val = lang.value if isinstance(lang, app_commands.Choice) else str(lang)
+    status_val = status.value if isinstance(status, app_commands.Choice) else str(status)
+    
+    is_on = (status_val == "on")
     lang_name = ""
     
-    if lang.value == "th":
+    if lang_val == "th":
         tts_th_enabled = is_on
         lang_name = "🇹🇭 ภาษาไทย"
-    elif lang.value == "en":
+    elif lang_val == "en":
         tts_en_enabled = is_on
         lang_name = "🇺🇸 ภาษาอังกฤษ"
-    elif lang.value == "ko":
+    elif lang_val == "ko":
         tts_ko_enabled = is_on
         lang_name = "🇰🇷 ภาษาเกาหลี"
 
@@ -1688,7 +1698,7 @@ async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Ch
         color=color
     )
     await interaction.followup.send(embed=embed)
-    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่า TTS เสียง (/tts)", f"ภาษา: `{lang.value.upper()}` | สถานะ: `{status.value.upper()}`", color)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่า TTS เสียง (/tts)", f"ภาษา: `{lang_val.upper()}` | สถานะ: `{status_val.upper()}`", color)
 
 @bot.tree.command(name="notify", description="เปิดหรือปิดระบบแจ้งเตือนสงคราม Battlefield (BF)")
 @app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
@@ -1697,7 +1707,8 @@ async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Ch
 async def toggle_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
     await interaction.response.defer()
     global bf_notify_enabled
-    if status.value == "on":
+    status_val = status.value if isinstance(status, app_commands.Choice) else str(status)
+    if status_val == "on":
         bf_notify_enabled = True
         msg = "🟢 **เปิด** ระบบแจ้งเตือน Battlefield (BF) เรียบร้อยแล้ว!"
         color = discord.Color.green()
@@ -1708,7 +1719,7 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
     await save_bot_settings()
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือน BF", description=msg, color=color)
     await interaction.followup.send(embed=embed)
-    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือน BF (/notify)", f"เปลี่ยนสถานะเป็น: `{status.value.upper()}`", color)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือน BF (/notify)", f"เปลี่ยนสถานะเป็น: `{status_val.upper()}`", color)
 
 @bot.tree.command(name="ppl", description="เปิดหรือปิดระบบแจ้งเตือนเสียงต้อนรับสมาชิกเข้าห้องเสียง (ทั่วไป)")
 @app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) การแจ้งเตือน")
@@ -1717,7 +1728,8 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
 async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
     await interaction.response.defer()
     global ppl_notify_enabled
-    if status.value == "on":
+    status_val = status.value if isinstance(status, app_commands.Choice) else str(status)
+    if status_val == "on":
         ppl_notify_enabled = True
         msg = "🟢 **เปิด** ระบบแจ้งเตือนต้อนรับสมาชิกเข้าห้องเสียงเรียบร้อยแล้ว!"
         color = discord.Color.green()
@@ -1728,7 +1740,7 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
     await save_bot_settings()
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้องเสียง", description=msg, color=color)
     await interaction.followup.send(embed=embed)
-    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)", f"เปลี่ยนสถานะเป็น: `{status.value.upper()}`", color)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)", f"เปลี่ยนสถานะเป็น: `{status_val.upper()}`", color)
 
 @bot.tree.command(name="vip", description="[Admin Only] เปิด/ปิดและตั้งค่าระบบทักทายคนพิเศษ")
 @app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) ระบบทักทายคนพิเศษ", user="เลือกสมาชิกคนพิเศษ", message="ข้อความพูดทักทายคนพิเศษ")
@@ -1737,7 +1749,8 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
 async def toggle_vip_greet(interaction: discord.Interaction, status: app_commands.Choice[str], user: discord.Member = None, message: str = None):
     await interaction.response.defer()
     global vip_config
-    if status.value == "on":
+    status_val = status.value if isinstance(status, app_commands.Choice) else str(status)
+    if status_val == "on":
         if not user or not message:
             await interaction.followup.send("❌ **ข้อมูลไม่ครบถ้วน!** กรุณาระบุทั้ง **user** และ **message**", ephemeral=True)
             return
@@ -2002,111 +2015,39 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
     else:
         await interaction.followup.send(f"❌ ไม่พบบอส **{boss_name}** ในตารางนับถอยหลังขณะนี้", ephemeral=True)
 
-@bot.tree.command(name="status", description="เช็กสถานะเวลาบอสทั้งหมดที่กำลังนับถอยหลัง")
-async def boss_status(interaction: discord.Interaction):
-    await interaction.response.defer()
-    with schedule_lock: schedule_copy = boss_schedule.copy()
-    if not schedule_copy:
-        embed = discord.Embed(title="📜 ตารางเวลาบอส", description="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ\nใช้คำสั่ง `/kill [ชื่อบอส]` เพื่อเริ่มบันทึกเวลาได้เลยครับ", color=discord.Color.blue())
-        await interaction.followup.send(embed=embed)
-        return
-
-    now = datetime.now(TZ_THAI)
-    embed = discord.Embed(title="📜 ตารางเวลาบอสเกิดทั้งหมด", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.blue())
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
-    
-    display_bosses = sorted_bosses[:20]
-    for boss, data in display_bosses:
-        spawn_time = parse_to_thai_datetime(data["spawn_time"])
-        if not spawn_time: continue
-        time_left_sec = (spawn_time - now).total_seconds()
-        
-        if time_left_sec <= 0: time_left_str = "เกิดแล้ว!"
-        else:
-            m, s = divmod(int(time_left_sec), 60)
-            h, m = divmod(m, 60)
-            if h > 0: time_left_str = f"อีก {h} ชม. {m} นาที"
-            else: time_left_str = f"อีก {m} นาที {s} วินาที"
-
-        notice_text = get_boss_advance_notice_text(boss)
-        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*", inline=False)
-
-    if len(sorted_bosses) > 20:
-        embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="setlive", description="ตั้งค่าป้ายไฟนับถอยหลังเวลาบอสเกิด Real-time ในช่องนี้")
+@bot.tree.command(name="status", description="เช็กสถานะการทำงานของบอทและการตั้งค่าการแจ้งเตือนทั้งหมด")
 @has_allowed_role()
-async def set_live(interaction: discord.Interaction):
+async def bot_status(interaction: discord.Interaction):
     await interaction.response.defer()
-    now = datetime.now(TZ_THAI)
-    embed = discord.Embed(title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time", description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.teal())
-    embed.add_field(name="📌 สถานะ", value="กำลังเริ่มต้นระบบ...", inline=False)
-    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
-
-    msg = await interaction.followup.send(embed=embed)
-    global live_message_config, cached_live_message
-    live_message_config = {"channel_id": interaction.channel_id, "message_id": msg.id}
-    cached_live_message = msg
-    await save_live_config()
-    await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", f"📌 ช่อง: <#{interaction.channel_id}>\nMessage ID: `{msg.id}`", discord.Color.teal())
-
-@bot.tree.command(name="attendance", description="แจ้งเตือนเช็คชื่อบอสพร้อมโค้ดและไอเทมดรอป")
-@app_commands.describe(
-    boss_name="ชื่อบอสที่ต้องการเช็คชื่อ",
-    code="โค้ดสำหรับเช็คชื่อ (Code)",
-    drop_item="ไอเทมที่ดรอป (Drop Item)"
-)
-@has_allowed_role()
-async def attendance_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
-    await interaction.response.defer()
-    
-    embed = discord.Embed(
-        title="📢 แจ้งเตือนเช็คชื่อบอส (Attendance)",
-        color=discord.Color.green(),
-        timestamp=datetime.now(TZ_THAI)
+    embed = discord.Embed(title="📊 สถานะการทำงานของบอท", color=discord.Color.blue())
+    embed.add_field(
+        name="🔊 TTS เสียงแจ้งเตือน",
+        value=f"🇹🇭 ไทย: {'🟢 เปิด' if tts_th_enabled else '🔴 ปิด'}\n"
+              f"🇺🇸 อังกฤษ: {'🟢 เปิด' if tts_en_enabled else '🔴 ปิด'}\n"
+              f"🇰🇷 เกาหลี: {'🟢 เปิด' if tts_ko_enabled else '🔴 ปิด'}",
+        inline=True
     )
-    embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-    embed.add_field(name="🔑 โค้ด (Code)", value=f"**{code}**", inline=True)
-    embed.add_field(name="🎁 ไอเทมดรอป", value=f"`{drop_item}`", inline=False)
-    embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
-    
-    await interaction.followup.send(content="✅ ส่งประกาศเช็คชื่อสำเร็จ!", embed=embed)
-    
-    canonical_name = get_boss_canonical_name(boss_name)
-    spoken_name = get_boss_pronunciation(canonical_name)
-    
-    spoken_th = f"ประกาศเช็คชื่อบอส {spoken_name} โค้ดคือ {code} ไอเทมที่ดรอปคือ {drop_item} ค่ะ"
-    spoken_en = f"Attendance for boss {boss_name}. The code is {code}. Drop item is {drop_item}."
-    spoken_ko = f"보스 {boss_name} 출석 체크입니다. 코드는 {code} 이며, 드롭 아이템은 {drop_item} 입니다."
-    
-    asyncio.create_task(speak_in_guild(interaction.guild, text_th=spoken_th, text_en=spoken_en, text_ko=spoken_ko))
-    
-    if interaction.guild:
-        attendance_channel = discord.utils.get(interaction.guild.text_channels, name="boss-attendance")
-        if attendance_channel:
-            log_embed = discord.Embed(
-                title="📝 Audit Log: ประกาศเช็คชื่อบอส",
-                color=discord.Color.green(),
-                timestamp=datetime.now(TZ_THAI)
-            )
-            log_embed.add_field(name="👤 ผู้ประกาศ", value=f"{interaction.user.mention} (`{interaction.user.name}`)", inline=False)
-            log_embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-            log_embed.add_field(name="🔑 โค้ด (Code)", value=f"**{code}**", inline=True)
-            log_embed.add_field(name="🎁 ไอเทมดรอป", value=f"`{drop_item}`", inline=False)
-            log_embed.set_footer(text=f"User ID: {interaction.user.id}")
-            try:
-                await attendance_channel.send(embed=log_embed)
-            except Exception as e:
-                print(f"❌ ส่ง Audit Log ใน boss-attendance ไม่สำเร็จ: {e}")
+    embed.add_field(
+        name="⚔️ ระบบแจ้งเตือนกิจกรรม",
+        value=f"Battlefield (BF): {'🟢 เปิด' if bf_notify_enabled else '🔴 ปิด'}\n"
+              f"Library Boss: {'🟢 เปิด' if lib_notify_enabled else '🔴 ปิด'}\n"
+              f"ต้อนรับคนเข้าห้อง: {'🟢 เปิด' if ppl_notify_enabled else '🔴 ปิด'}",
+        inline=True
+    )
+    if interaction.guild and interaction.guild.voice_client:
+        vc_status = f"🔊 เชื่อมต่อกับ `{interaction.guild.voice_client.channel.name}`"
+    else:
+        vc_status = "⚪ ไม่ได้อยู่ในห้องเสียง"
+    embed.add_field(name="🎙️ สถานะการเชื่อมต่อเสียง", value=vc_status, inline=False)
+    embed.set_footer(text=f"ร้องขอโดย {interaction.user.display_name}")
+    await interaction.followup.send(embed=embed)
 
 # ==========================================
 # 🚀 11. Run Bot Entry Point
 # ==========================================
 if __name__ == "__main__":
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if TOKEN:
-        bot.run(TOKEN)
+    token = os.environ.get("DISCORD_TOKEN", "")
+    if token:
+        bot.run(token)
     else:
-        print("⚠️ กรุณาตั้งค่า DISCORD_TOKEN ใน Environment Variable หรือระบุ Token สำหรับรันบอท")
+        print("⚠️ กรุณาตั้งค่า Environment Variable 'DISCORD_TOKEN' ก่อนรันบอท")
