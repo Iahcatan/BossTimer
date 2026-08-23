@@ -462,6 +462,7 @@ DATA_FILE = "boss_data.json"
 CUSTOM_BOSSES_FILE = "custom_bosses.json"
 LIVE_CONFIG_FILE = "live_config.json"
 VIP_CONFIG_FILE = "vip_config.json"
+VOICE_CONFIG_FILE = "voice_config.json"
 SETTINGS_FILE = "bot_settings.json"
 
 DEFAULT_TARGET_ROLE_IDS = []
@@ -477,7 +478,11 @@ LIVE_CHANNEL_NAME = "boss-schedule"
 
 voice_empty_start = {}
 voice_locks = {}
+voice_connect_locks = {}
 disconnect_tasks = {}
+voice_config = {}
+last_voice_connect_attempt = {}
+last_channel_fetch_attempt = {}
 
 bf_notify_enabled = True
 lib_notify_enabled = True
@@ -767,60 +772,147 @@ async def load_boss_data():
         print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
 def start_firebase_listener(loop):
+    """Firebase listener: ใช้ event.data โดยตรง เพื่อลด read/API spam"""
     def listener(event):
         global is_updating_from_bot
-        if not is_bot_ready or is_updating_from_bot: return
-
+        if not is_bot_ready or is_updating_from_bot:
+            return
         try:
-            ref_boss = db.reference('boss_schedule')
-            snapshot = ref_boss.get()
-            if snapshot and isinstance(snapshot, dict):
-                with schedule_lock:
-                    for boss_name, data in snapshot.items():
-                        if not isinstance(data, dict): continue
-                        
-                        canonical_name = get_boss_canonical_name(boss_name)
-                        raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
-                        st = parse_to_thai_datetime(raw_st)
-                        if not st: continue
-
-                        raw_kt = data.get("kill_time") or data.get("die_time") or data.get("killed_at")
-                        if raw_kt:
-                            kt = parse_to_thai_datetime(raw_kt)
-                            if kt and abs((st - kt).total_seconds()) < 5:
-                                cd = get_boss_respawn_time(canonical_name)
-                                st = kt + cd
-
-                        existing = boss_schedule.get(canonical_name) or boss_schedule.get(boss_name)
-                        rec_by = data.get("recorded_by") or data.get("recordedBy") or (existing.get("recorded_by") if existing else "-")
-                        
-                        notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
-                        notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
-
-                        if existing and existing.get("spawn_time") == st:
-                            notified_adv = existing.get("notified_advance", notified_adv)
-                            notified_spwn = existing.get("notified_spawn", notified_spwn)
-
-                        boss_schedule[canonical_name] = {
-                            "spawn_time": st,
-                            "channel_id": data.get("channel_id") or (existing.get("channel_id") if existing else None),
-                            "notified_advance": notified_adv,
-                            "notified_spawn": notified_spwn,
-                            "recorded_by": rec_by
-                        }
-                    
-                    for key in list(boss_schedule.keys()):
-                        if key not in snapshot and get_boss_canonical_name(key) not in [get_boss_canonical_name(k) for k in snapshot.keys()]:
-                            del boss_schedule[key]
+            snapshot = event.data
+            if snapshot is None:
+                snapshot = {}
+            if not isinstance(snapshot, dict):
+                return
+            with schedule_lock:
+                old_schedule = dict(boss_schedule)
+                new_schedule = {}
+                for boss_name, data in snapshot.items():
+                    if not isinstance(data, dict):
+                        continue
+                    canonical_name = get_boss_canonical_name(boss_name)
+                    raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
+                    st = parse_to_thai_datetime(raw_st)
+                    if not st:
+                        continue
+                    existing = old_schedule.get(canonical_name)
+                    rec_by = data.get("recorded_by") or data.get("recordedBy") or (existing.get("recorded_by") if existing else "-")
+                    new_schedule[canonical_name] = {
+                        "spawn_time": st,
+                        "channel_id": data.get("channel_id") or (existing.get("channel_id") if existing else None),
+                        "notified_advance": parse_bool(data.get("notified_advance", data.get("notifiedNotice", False))),
+                        "notified_spawn": parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False))),
+                        "recorded_by": rec_by
+                    }
+                boss_schedule.clear()
+                boss_schedule.update(new_schedule)
         except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดใน Firebase Listener: {e}")
+            print(f"❌ Firebase Listener boss_schedule ผิดพลาด: {e}")
 
     try:
-        ref_boss = db.reference('boss_schedule')
+        ref_boss = db.reference("boss_schedule")
         ref_boss.listen(listener)
-        print("🟢 Firebase Listener พร้อมทำงานเรียบร้อย!")
+        print("🟢 Firebase Listener พร้อมทำงาน (event.data, ลด API read ซ้ำ)")
     except Exception as e:
         print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
+
+
+async def save_voice_config():
+    """บันทึกการตั้งค่าห้อง Voice แบบถาวรลง Firebase และ local SQLite/JSON"""
+    with schedule_lock:
+        data = {str(gid): dict(cfg) for gid, cfg in voice_config.items()}
+    try:
+        await asyncio.to_thread(db.reference("voice_config").set, data)
+    except Exception as e:
+        print(f"⚠️ บันทึก voice_config ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "voice_config", data)
+    await asyncio.to_thread(save_json_local, VOICE_CONFIG_FILE, data)
+
+async def load_voice_config():
+    """โหลดห้อง Voice ที่ตั้งไว้จาก Firebase เมื่อบอทเริ่มทำงาน"""
+    global voice_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("voice_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด voice_config จาก Firebase ไม่สำเร็จ: {e}")
+    if not data:
+        data = get_db_value("voice_config", None)
+    if isinstance(data, dict):
+        normalized = {}
+        for gid, cfg in data.items():
+            if not isinstance(cfg, dict):
+                continue
+            channel_id = cfg.get("voice_channel_id") or cfg.get("voiceChannelId")
+            try:
+                channel_id = int(channel_id) if channel_id is not None else None
+            except (TypeError, ValueError):
+                channel_id = None
+            if channel_id:
+                normalized[str(gid)] = {
+                    "voice_channel_id": channel_id,
+                    "guild_id": int(gid) if str(gid).isdigit() else gid,
+                    "channel_name": cfg.get("channel_name", ""),
+                    "enabled": parse_bool(cfg.get("enabled", True), True),
+                    "updated_by": cfg.get("updated_by", ""),
+                    "updated_at": cfg.get("updated_at", "")
+                }
+        voice_config = normalized
+    print(f"🔊 โหลด voice_config สำเร็จ {len(voice_config)} เซิร์ฟเวอร์")
+
+
+def get_configured_voice_channel(guild: discord.Guild):
+    if not guild:
+        return None
+    cfg = voice_config.get(str(guild.id))
+    if not cfg or not parse_bool(cfg.get("enabled", True), True):
+        return None
+    channel_id = cfg.get("voice_channel_id")
+    if not channel_id:
+        return None
+    channel = guild.get_channel(int(channel_id))
+    if isinstance(channel, discord.VoiceChannel):
+        return channel
+    return None
+
+async def ensure_configured_voice(guild: discord.Guild):
+    """เชื่อมต่อ/ย้ายไปห้องที่ตั้งไว้ โดยใช้ lock + cooldown ป้องกัน connect/disconnect loop"""
+    if not guild:
+        return None
+    target = get_configured_voice_channel(guild)
+    if not target:
+        return guild.voice_client if guild.voice_client and guild.voice_client.is_connected() else None
+
+    if guild.id not in voice_connect_locks:
+        voice_connect_locks[guild.id] = asyncio.Lock()
+
+    async with voice_connect_locks[guild.id]:
+        vc = guild.voice_client
+        if vc and vc.is_connected():
+            if vc.channel and vc.channel.id == target.id:
+                return vc
+            # ย้ายครั้งเดียว ไม่ disconnect/connect ใหม่
+            try:
+                await vc.move_to(target)
+                return vc
+            except Exception as e:
+                print(f"⚠️ ย้าย Voice ไป {target.name} ไม่สำเร็จ: {e}")
+                return None
+
+        now = time.monotonic()
+        last_attempt = last_voice_connect_attempt.get(guild.id, 0.0)
+        if now - last_attempt < 30:
+            return None
+        last_voice_connect_attempt[guild.id] = now
+        try:
+            vc = await target.connect(reconnect=True, timeout=20)
+            print(f"🔊 เชื่อมต่อ Voice ถาวร: {guild.name} -> {target.name}")
+            return vc
+        except discord.ClientException as e:
+            # ถ้ามี client เก่าค้างอยู่ ให้รอ reconnect event แทนการยิง connect ซ้ำ
+            print(f"⚠️ Discord Voice Client ยังไม่พร้อมใน {guild.name}: {e}")
+        except Exception as e:
+            print(f"❌ เชื่อมต่อ Voice {guild.name}/{target.name} ไม่สำเร็จ: {e}")
+        return None
 
 async def save_bot_settings():
     settings_data = {
@@ -983,188 +1075,98 @@ def clean_display_name(name: str) -> str:
 
 # 🔥 ฟังก์ชันแจ้งเตือนด้วยเสียง (ตรวจสอบสถานะเปิด-ปิด TTS แต่ละภาษาก่อนเล่น)
 async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str = None, text_ko: str = None, target_channel: discord.VoiceChannel = None):
-    if not guild: return
-    
+    """พูด TTS ในห้องที่ตั้งค่าไว้ โดยคง Voice connection ไว้และไม่ disconnect หลังพูด"""
+    if not guild:
+        return
+
     actual_text_th = text_th if (tts_th_enabled and text_th) else None
     actual_text_en = text_en if (tts_en_enabled and text_en) else None
     actual_text_ko = text_ko if (tts_ko_enabled and text_ko) else None
-
     if not (actual_text_th or actual_text_en or actual_text_ko):
         return
-    
+
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
 
-    if guild.id in disconnect_tasks:
-        disconnect_tasks[guild.id].cancel()
-        del disconnect_tasks[guild.id]
-
     async with voice_locks[guild.id]:
-        if target_channel:
-            target_channels = [target_channel]
-        else:
-            target_channels = [
-                channel for channel in guild.voice_channels
-                if len(channel.members) > 0 and any(not m.bot for m in channel.members)
-            ]
-            if not target_channels and guild.voice_client and guild.voice_client.channel:
-                target_channels = [guild.voice_client.channel]
-            if not target_channels and guild.voice_channels:
-                target_channels = [guild.voice_channels[0]]
-
-        if not target_channels: return
-
-        unique_id = uuid.uuid4().hex
-        tts_filename_th = f"temp_tts_th_{guild.id}_{unique_id}.mp3" if actual_text_th else None
-        tts_filename_en = f"temp_tts_en_{guild.id}_{unique_id}.mp3" if actual_text_en else None
-        tts_filename_ko = f"temp_tts_ko_{guild.id}_{unique_id}.mp3" if actual_text_ko else None
-
-        try:
-            if actual_text_th:
-                communicate_th = edge_tts.Communicate(actual_text_th, VOICE_THAI, rate="-20%", pitch="+10Hz")
-                await communicate_th.save(tts_filename_th)
-            
-            if actual_text_en:
-                communicate_en = edge_tts.Communicate(actual_text_en, VOICE_ENG, rate="-10%", pitch="+0Hz")
-                await communicate_en.save(tts_filename_en)
-                
-            if actual_text_ko:
-                communicate_ko = edge_tts.Communicate(actual_text_ko, VOICE_KOR, rate="-10%", pitch="+0Hz")
-                await communicate_ko.save(tts_filename_ko)
-        except Exception as tts_err:
-            print(f"❌ เกิดข้อผิดพลาดในการแปลง TTS: {tts_err}")
+        configured = get_configured_voice_channel(guild)
+        channel = target_channel or configured
+        if channel is None:
+            vc_existing = guild.voice_client
+            if vc_existing and vc_existing.is_connected():
+                channel = vc_existing.channel
+        if channel is None:
+            print(f"⚠️ ยังไม่ได้ตั้ง /setvoice สำหรับเซิร์ฟเวอร์ {guild.name}; ข้าม TTS เพื่อป้องกันการเข้า/ออก Voice รัว ๆ")
             return
 
-        ffmpeg_executable = get_ffmpeg_path()
-        try:
-            for idx, channel in enumerate(target_channels):
+        # ถ้าเป็นห้องที่ตั้งค่าไว้ ให้ ensure connection; ถ้า target_channel เป็นห้องชั่วคราวก็ใช้ connection เดิม/ย้ายได้
+        if configured is not None:
+            vc = await ensure_configured_voice(guild)
+        else:
+            vc = guild.voice_client
+            if vc and vc.is_connected() and vc.channel.id != channel.id:
                 try:
-                    vc = guild.voice_client
-                    
-                    if vc is None:
-                        try:
-                            vc = await channel.connect(reconnect=True, timeout=15)
-                        except discord.ClientException:
-                            if guild.voice_client:
-                                await guild.voice_client.disconnect(force=True)
-                            vc = await channel.connect(reconnect=True, timeout=15)
-                    else:
-                        if not vc.is_connected():
-                            try: await vc.disconnect(force=True)
-                            except: pass
-                            vc = await channel.connect(reconnect=True, timeout=15)
-                        elif vc.channel.id != channel.id:
-                            try:
-                                await vc.move_to(channel)
-                            except discord.ClientException:
-                                await vc.disconnect(force=True)
-                                vc = await channel.connect(reconnect=True, timeout=15)
-                    
-                    await asyncio.sleep(1.0)
-
-                    if vc.is_playing(): 
-                        vc.stop()
-
-                    if vc.is_connected():
-                        played_any = False
-                        
-                        if actual_text_th and tts_filename_th and os.path.exists(tts_filename_th) and os.path.getsize(tts_filename_th) > 0:
-                            audio_source_th = discord.FFmpegPCMAudio(
-                                tts_filename_th, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
-                            )
-                            loop = asyncio.get_running_loop()
-                            play_finished_th = asyncio.Event()
-
-                            def after_playing_th(error):
-                                if error: print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง (TH) ใน {channel.name}: {error}")
-                                loop.call_soon_threadsafe(play_finished_th.set)
-
-                            try:
-                                vc.play(audio_source_th, after=after_playing_th)
-                                await asyncio.wait_for(play_finished_th.wait(), timeout=30)
-                                played_any = True
-                            except asyncio.TimeoutError:
-                                print(f"⚠️ การเล่นเสียง (TH) หมดเวลา (Timeout) ในห้อง {channel.name}")
-                                if vc.is_playing(): vc.stop()
-                            except Exception as play_err:
-                                print(f"❌ ระบบเล่นเสียงขัดข้อง (TH) ในห้อง {channel.name}: {play_err}")
-                                loop.call_soon_threadsafe(play_finished_th.set)
-
-                        if actual_text_en and vc.is_connected() and tts_filename_en and os.path.exists(tts_filename_en) and os.path.getsize(tts_filename_en) > 0:
-                            if played_any: await asyncio.sleep(0.5)
-                            
-                            audio_source_en = discord.FFmpegPCMAudio(
-                                tts_filename_en, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
-                            )
-                            play_finished_en = asyncio.Event()
-
-                            def after_playing_en(error):
-                                if error: print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง (EN) ใน {channel.name}: {error}")
-                                loop.call_soon_threadsafe(play_finished_en.set)
-
-                            try:
-                                vc.play(audio_source_en, after=after_playing_en)
-                                await asyncio.wait_for(play_finished_en.wait(), timeout=30)
-                                played_any = True
-                            except asyncio.TimeoutError:
-                                print(f"⚠️ การเล่นเสียง (EN) หมดเวลา (Timeout) ในห้อง {channel.name}")
-                                if vc.is_playing(): vc.stop()
-                            except Exception as play_err:
-                                print(f"❌ ระบบเล่นเสียงขัดข้อง (EN) ในห้อง {channel.name}: {play_err}")
-                                loop.call_soon_threadsafe(play_finished_en.set)
-                                
-                        if actual_text_ko and vc.is_connected() and tts_filename_ko and os.path.exists(tts_filename_ko) and os.path.getsize(tts_filename_ko) > 0:
-                            if played_any: await asyncio.sleep(0.5)
-                            
-                            audio_source_ko = discord.FFmpegPCMAudio(
-                                tts_filename_ko, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn"
-                            )
-                            play_finished_ko = asyncio.Event()
-
-                            def after_playing_ko(error):
-                                if error: print(f"❌ เกิดข้อผิดพลาดขณะเล่นเสียง (KO) ใน {channel.name}: {error}")
-                                loop.call_soon_threadsafe(play_finished_ko.set)
-
-                            try:
-                                vc.play(audio_source_ko, after=after_playing_ko)
-                                await asyncio.wait_for(play_finished_ko.wait(), timeout=30)
-                                played_any = True
-                            except asyncio.TimeoutError:
-                                print(f"⚠️ การเล่นเสียง (KO) หมดเวลา (Timeout) ในห้อง {channel.name}")
-                                if vc.is_playing(): vc.stop()
-                            except Exception as play_err:
-                                print(f"❌ ระบบเล่นเสียงขัดข้อง (KO) ในห้อง {channel.name}: {play_err}")
-                                loop.call_soon_threadsafe(play_finished_ko.set)
-
-                    if idx < len(target_channels) - 1: await asyncio.sleep(1.5)
-                
+                    await vc.move_to(channel)
                 except Exception as e:
-                    print(f"❌ เกิดข้อผิดพลาดในการเข้าห้องเสียง {channel.name}: {e}")
-                    if guild.voice_client:
-                        try: await guild.voice_client.disconnect(force=True)
-                        except: pass
+                    print(f"⚠️ ย้าย Voice ไป {channel.name} ไม่สำเร็จ: {e}")
+                    return
+            elif vc is None:
+                # ไม่สร้าง connection ชั่วคราวถ้ายังไม่มี /setvoice
+                print(f"⚠️ ห้อง {channel.name} ยังไม่มี connection และยังไม่ได้ตั้ง /setvoice")
+                return
 
-        finally:
-            if tts_filename_th and os.path.exists(tts_filename_th):
-                try: os.remove(tts_filename_th)
-                except Exception: pass
-            if tts_filename_en and os.path.exists(tts_filename_en):
-                try: os.remove(tts_filename_en)
-                except Exception: pass
-            if tts_filename_ko and os.path.exists(tts_filename_ko):
-                try: os.remove(tts_filename_ko)
-                except Exception: pass
+        if not vc or not vc.is_connected():
+            return
 
-    async def auto_disconnect_after_delay():
+        unique_id = uuid.uuid4().hex
+        tts_files = []
+        if actual_text_th: tts_files.append(("th", actual_text_th, VOICE_THAI, f"temp_tts_th_{guild.id}_{unique_id}.mp3", "-20%", "+10Hz"))
+        if actual_text_en: tts_files.append(("en", actual_text_en, VOICE_ENG, f"temp_tts_en_{guild.id}_{unique_id}.mp3", "-10%", "+0Hz"))
+        if actual_text_ko: tts_files.append(("ko", actual_text_ko, VOICE_KOR, f"temp_tts_ko_{guild.id}_{unique_id}.mp3", "-10%", "+0Hz"))
+
         try:
-            await asyncio.sleep(10)
-            if guild.voice_client and guild.voice_client.is_connected():
-                await guild.voice_client.disconnect(force=True)
-                print(f"🔌 ออกจากห้องเสียงอัตโนมัติเนื่องจากไม่มีการใช้งานเกิน 10 วินาที ในเซิร์ฟเวอร์: {guild.name}")
-        except asyncio.CancelledError:
-            pass
+            for _, text, voice, filename, rate, pitch in tts_files:
+                try:
+                    await edge_tts.Communicate(text, voice, rate=rate, pitch=pitch).save(filename)
+                except Exception as e:
+                    print(f"❌ สร้าง TTS ไม่สำเร็จ ({_}): {e}")
 
-    disconnect_tasks[guild.id] = asyncio.create_task(auto_disconnect_after_delay())
+            ffmpeg_executable = get_ffmpeg_path()
+            loop = asyncio.get_running_loop()
+            for idx, (_, _, _, filename, _, _) in enumerate(tts_files):
+                if not os.path.exists(filename) or os.path.getsize(filename) <= 0:
+                    continue
+                if not vc.is_connected():
+                    break
+                if vc.is_playing():
+                    vc.stop()
+                    await asyncio.sleep(0.2)
+
+                finished = asyncio.Event()
+                def after_playing(error, event=finished, lang=tts_files[idx][0]):
+                    if error:
+                        print(f"❌ เล่น TTS {lang} ผิดพลาดใน {guild.name}: {error}")
+                    loop.call_soon_threadsafe(event.set)
+
+                source = discord.FFmpegPCMAudio(filename, executable=ffmpeg_executable, before_options="-loglevel error", options="-vn")
+                try:
+                    vc.play(source, after=after_playing)
+                    await asyncio.wait_for(finished.wait(), timeout=45)
+                except asyncio.TimeoutError:
+                    print(f"⚠️ TTS timeout ใน {guild.name}")
+                    if vc.is_playing():
+                        vc.stop()
+                except Exception as e:
+                    print(f"❌ เล่นเสียง TTS ไม่สำเร็จใน {guild.name}: {e}")
+                if idx < len(tts_files) - 1:
+                    await asyncio.sleep(0.4)
+        finally:
+            for _, _, _, filename, _, _ in tts_files:
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except Exception:
+                    pass
 
 # ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
@@ -1201,6 +1203,12 @@ async def on_ready():
     await load_boss_data()
     await load_live_config()
     await load_vip_config()
+    await load_voice_config()
+
+    # เชื่อมต่อห้อง Voice ที่บันทึกไว้ครั้งเดียวต่อเซิร์ฟเวอร์
+    for guild in bot.guilds:
+        if get_configured_voice_channel(guild):
+            asyncio.create_task(ensure_configured_voice(guild))
 
     await asyncio.sleep(3)
     
@@ -1326,8 +1334,15 @@ async def check_boss_notifications():
             if channel_id:
                 channel = bot.get_channel(channel_id)
                 if not channel:
-                    try: channel = await bot.fetch_channel(channel_id)
-                    except Exception: channel = None
+                    # อย่า fetch Discord API ทุก 10 วินาทีเมื่อ channel หาไม่เจอ
+                    now_mono = time.monotonic()
+                    last_fetch = last_channel_fetch_attempt.get(channel_id, 0.0)
+                    if now_mono - last_fetch >= 300:
+                        last_channel_fetch_attempt[channel_id] = now_mono
+                        try:
+                            channel = await bot.fetch_channel(channel_id)
+                        except Exception:
+                            channel = None
 
             channels_to_notify = []
             if channel:
@@ -1509,6 +1524,13 @@ async def check_auto_disconnect():
             vc = guild.voice_client
             if vc and vc.is_connected() and vc.channel:
                 human_members = [m for m in vc.channel.members if not m.bot]
+                # ห้องที่ตั้งด้วย /setvoice ต้องคง connection ไว้ ไม่ให้ task นี้ตัดสาย
+                configured = get_configured_voice_channel(guild)
+                if configured and vc.channel and vc.channel.id == configured.id:
+                    if guild.id in voice_empty_start:
+                        del voice_empty_start[guild.id]
+                    continue
+
                 if len(human_members) == 0:
                     if guild.id not in voice_empty_start:
                         voice_empty_start[guild.id] = now
@@ -1774,6 +1796,39 @@ async def toggle_vip_greet(interaction: discord.Interaction, status: app_command
         await interaction.followup.send(embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "ปิดระบบทักทายคนพิเศษ (/vip)", "ยกเลิกข้อมูลคนพิเศษเรียบร้อยแล้ว", discord.Color.red())
 
+@bot.tree.command(name="setvoice", description="ตั้งค่าห้อง Voice สำหรับ Boss TTS แบบถาวร")
+@app_commands.describe(channel="ห้อง Voice ที่ต้องการให้บอทเข้าและประกาศ (เว้นว่าง = ห้องที่คุณอยู่)")
+@has_allowed_role()
+async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
+    await interaction.response.defer(ephemeral=True)
+    target = channel
+    if target is None:
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.followup.send("❌ กรุณาเข้าห้อง Voice ก่อน หรือเลือกห้อง Voice ในคำสั่ง /setvoice", ephemeral=True)
+            return
+        target = interaction.user.voice.channel
+
+    guild_id = interaction.guild.id
+    voice_config[str(guild_id)] = {
+        "guild_id": guild_id,
+        "voice_channel_id": int(target.id),
+        "channel_name": target.name,
+        "enabled": True,
+        "updated_by": str(interaction.user.id),
+        "updated_at": datetime.now(TZ_THAI).isoformat()
+    }
+    await save_voice_config()
+
+    vc = await ensure_configured_voice(interaction.guild)
+    status = "🟢 เชื่อมต่อสำเร็จ" if vc and vc.is_connected() else "🟡 บันทึกค่าแล้ว แต่ยังเชื่อมต่อ Voice ไม่สำเร็จ (จะลองใหม่โดยไม่ยิงซ้ำ)"
+    embed = discord.Embed(title="🔊 ตั้งค่าห้อง Voice สำเร็จ", color=discord.Color.green() if vc else discord.Color.orange())
+    embed.add_field(name="ห้อง Voice", value=f"{target.mention}", inline=False)
+    embed.add_field(name="voice_channel_id", value=f"`{target.id}`", inline=False)
+    embed.add_field(name="Firebase", value="`voice_config`", inline=True)
+    embed.add_field(name="สถานะ", value=status, inline=True)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าห้อง Voice (/setvoice)", f"🔊 ห้อง: {target.mention}\nID: `{target.id}`", discord.Color.green())
+
 @bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
 async def join_voice(interaction: discord.Interaction):
     await interaction.response.defer()
@@ -1793,7 +1848,10 @@ async def leave_voice(interaction: discord.Interaction):
     guild = interaction.guild
     if guild.voice_client:
         await guild.voice_client.disconnect()
-        await interaction.followup.send("👋 ออกจากห้องเสียงเรียบร้อยแล้ว!")
+    if str(guild.id) in voice_config:
+        voice_config[str(guild.id)]["enabled"] = False
+        await save_voice_config()
+        await interaction.followup.send("👋 ออกจากห้องเสียงแล้ว และปิดการเชื่อมต่อถาวรของ /setvoice ชั่วคราวแล้วครับ")
     else:
         await interaction.followup.send("❌ บอทไม่ได้อยู่ในห้องเสียงใดๆ ในขณะนี้", ephemeral=True)
 
@@ -2125,9 +2183,41 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
 # ==========================================
 # 🚀 11. Run Bot Entry Point
 # ==========================================
+async def run_bot_with_backoff(token: str):
+    """ลดปัญหา 429 ตอน startup โดยไม่ restart/login ซ้ำถี่ ๆ"""
+    backoff = 60
+    while True:
+        try:
+            await bot.start(token, reconnect=True)
+            return
+        except discord.HTTPException as e:
+            if getattr(e, "status", None) == 429:
+                retry_after = getattr(e, "retry_after", None)
+                delay = max(float(retry_after or 0), float(backoff))
+                print(f"🛑 Discord API 429 ตอน login/start — หยุด retry {delay:.0f} วินาที เพื่อไม่ให้โดน global rate limit ซ้ำ")
+                try:
+                    await bot.close()
+                except Exception:
+                    pass
+                await asyncio.sleep(delay)
+                backoff = min(backoff * 2, 900)
+                continue
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            print(f"⚠️ Discord connection error: {e} — retry ใน {backoff} วินาที")
+            try:
+                await bot.close()
+            except Exception:
+                pass
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 300)
+
 if __name__ == "__main__":
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
-        bot.run(TOKEN)
+        try:
+            asyncio.run(run_bot_with_backoff(TOKEN))
+        except KeyboardInterrupt:
+            print("🛑 หยุดบอทแล้ว")
     else:
         print("⚠️ กรุณาตั้งค่า DISCORD_TOKEN ใน Environment Variable หรือระบุ Token สำหรับรันบอท")
