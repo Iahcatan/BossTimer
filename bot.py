@@ -27,18 +27,39 @@ from firebase_admin import credentials, db
 # ==========================================
 # 🔥 0. เชื่อมต่อ Firebase Realtime Database
 # ==========================================
-FIREBASE_KEY_PATH = "firebase-key.json"
-DATABASE_URL = "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
+# อ่านค่าการเชื่อมต่อจาก Environment Variable แทนการเก็บ Service Account Key
+# รองรับทั้ง FIREBASE_SERVICE_ACCOUNT_JSON (JSON string) และ
+# FIREBASE_SERVICE_ACCOUNT_BASE64 (Base64 ของ JSON)
+# DATABASE_URL ใช้ค่าจาก Environment Variable เช่นกัน
+FIREBASE_SERVICE_ACCOUNT_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON", "").strip()
+FIREBASE_SERVICE_ACCOUNT_BASE64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_BASE64", "").strip()
+DATABASE_URL = os.environ.get(
+    "FIREBASE_DATABASE_URL",
+    "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
+).strip()
 
 if not firebase_admin._apps:
-    if os.path.exists(FIREBASE_KEY_PATH):
-        cred = credentials.Certificate(FIREBASE_KEY_PATH)
-        firebase_admin.initialize_app(cred, {
-            'databaseURL': DATABASE_URL
-        })
-        print("✅ เชื่อมต่อ Firebase Realtime Database สำเร็จ!")
-    else:
-        print(f"⚠️ ไม่พบไฟล์ {FIREBASE_KEY_PATH} ในโฟลเดอร์บอท! กรุณาตรวจสอบไฟล์ Service Account Key")
+    try:
+        firebase_service_account = None
+
+        if FIREBASE_SERVICE_ACCOUNT_JSON:
+            firebase_service_account = json.loads(FIREBASE_SERVICE_ACCOUNT_JSON)
+        elif FIREBASE_SERVICE_ACCOUNT_BASE64:
+            decoded_key = base64.b64decode(FIREBASE_SERVICE_ACCOUNT_BASE64).decode("utf-8")
+            firebase_service_account = json.loads(decoded_key)
+
+        if firebase_service_account:
+            cred = credentials.Certificate(firebase_service_account)
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': DATABASE_URL
+            })
+            print("✅ เชื่อมต่อ Firebase Realtime Database สำเร็จ!")
+        else:
+            raise ValueError(
+                "ไม่พบ FIREBASE_SERVICE_ACCOUNT_JSON หรือ FIREBASE_SERVICE_ACCOUNT_BASE64 ใน Environment Variable"
+            )
+    except Exception as e:
+        print(f"❌ ไม่สามารถเชื่อมต่อ Firebase Realtime Database ได้: {e}")
 
 # ==========================================
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
