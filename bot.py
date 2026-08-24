@@ -76,6 +76,28 @@ is_bot_ready = False
 is_updating_from_bot = False
 
 # ==========================================
+# 🌐 ส่วนสร้าง Web Server สำหรับ Render (Keep Alive)
+# ==========================================
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Bot is running online!"
+
+def run_web():
+    # ดึงค่า PORT จาก Render ถ้าไม่มีให้ใช้ 5000
+    port = int(os.environ.get("PORT", 5000))
+    # ใช้ waitress (serve) ในการรันแทน app.run() จะเสถียรกว่าบนโปรดักชั่น
+    serve(app, host="0.0.0.0", port=port)
+
+def keep_alive():
+    # รันเว็บเซิร์ฟเวอร์ใน Thread แยก เพื่อไม่ให้บล็อกการทำงานของบอท
+    t = threading.Thread(target=run_web)
+    t.daemon = True # ให้ Thread ปิดตัวอัตโนมัติเมื่อบอทหลักดับ
+    t.start()
+2. วิธีเรียกใช้งานก่อนรันบอท
+
+# ==========================================
 # ⚙️ 2. ตั้งค่า Timezone ไทย & Helper Functions
 # ==========================================
 TZ_THAI = timezone(timedelta(hours=7))
