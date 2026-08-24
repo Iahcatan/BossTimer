@@ -2276,6 +2276,7 @@ async def run_bot_with_backoff(token: str):
             raise
 
 if __name__ == "__main__":
+    keep_alive()
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
         try:
