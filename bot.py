@@ -1,5 +1,3 @@
-bot_firebase_env_FIXED_v2.py
-
 
 import os
 import json
