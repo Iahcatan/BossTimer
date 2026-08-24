@@ -95,7 +95,7 @@ def keep_alive():
     t = threading.Thread(target=run_web)
     t.daemon = True # ให้ Thread ปิดตัวอัตโนมัติเมื่อบอทหลักดับ
     t.start()
-2. วิธีเรียกใช้งานก่อนรันบอท
+
 
 # ==========================================
 # ⚙️ 2. ตั้งค่า Timezone ไทย & Helper Functions
