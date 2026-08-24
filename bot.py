@@ -1256,12 +1256,48 @@ async def on_ready():
     print(f"🔊 ใช้ FFmpeg จากตำแหน่ง: {get_ffmpeg_path()}")
 
     init_db()
+
+try:
     await load_bot_settings()
+    print("✅ load_bot_settings สำเร็จ")
+except Exception as e:
+    print(f"❌ load_bot_settings ERROR: {e}")
+    traceback.print_exc()
+
+try:
     await load_custom_bosses()
+    print("✅ load_custom_bosses สำเร็จ")
+except Exception as e:
+    print(f"❌ load_custom_bosses ERROR: {e}")
+    traceback.print_exc()
+
+try:
     await load_boss_data()
+    print("✅ load_boss_data สำเร็จ")
+except Exception as e:
+    print(f"❌ load_boss_data ERROR: {e}")
+    traceback.print_exc()
+
+try:
     await load_live_config()
+    print("✅ load_live_config สำเร็จ")
+except Exception as e:
+    print(f"❌ load_live_config ERROR: {e}")
+    traceback.print_exc()
+
+try:
     await load_vip_config()
+    print("✅ load_vip_config สำเร็จ")
+except Exception as e:
+    print(f"❌ load_vip_config ERROR: {e}")
+    traceback.print_exc()
+
+try:
     await load_voice_config()
+    print("✅ load_voice_config สำเร็จ")
+except Exception as e:
+    print(f"❌ load_voice_config ERROR: {e}")
+    traceback.print_exc()
 
     # เชื่อมต่อห้อง Voice ที่บันทึกไว้ครั้งเดียวต่อเซิร์ฟเวอร์
     for guild in bot.guilds:
