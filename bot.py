@@ -1038,18 +1038,33 @@ async def save_custom_bosses_to_github():
     await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, custom_data)
 
 async def load_custom_bosses():
-    custom_data = None
-    try: custom_data = await asyncio.to_thread(db.reference('custom_bosses').get)
-    except Exception: pass
-    if not custom_data: custom_data = get_db_value("custom_bosses", None)
-    if custom_data:
-        for boss_name, data in custom_data.items():
-            BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
-            BOSS_CD_TEXT[boss_name] = data["cd_text"]
-            ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
-            ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
-            if boss_name not in BOSS_PRONUNCIATION:
-                BOSS_PRONUNCIATION[boss_name] = boss_name
+    """
+    ฟังก์ชันสำหรับโหลดข้อมูลบอสที่กำหนดเอง
+    """
+    global BOSS_RESPAWN_TIMES
+    try:
+        # สมมติว่าดึงข้อมูลมาจาก Firebase หรือฐานข้อมูลของคุณในลักษณะนี้
+        ref = db.reference("custom_bosses") # ปรับเปลี่ยนตาม Path จริงในโค้ดของคุณ
+        boss_data = ref.get()
+
+        if not boss_data:
+            print("ℹ️ ไม่พบข้อมูลบอสในระบบ หรือข้อมูลว่างเปล่า")
+            return
+
+        # วนลูปอ่านข้อมูลแต่ละตัว
+        for boss_name, data in boss_data.items():
+            # 🛡️ ป้องกัน Error: เช็คก่อนว่า data เป็น dictionary จริงๆ หรือไม่
+            if isinstance(data, dict):
+                total_seconds = data.get("total_seconds", 0)
+                BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=total_seconds)
+            else:
+                # กรณีที่ข้อมูลใน Firebase ผิดพลาดกลายเป็น True/False หรือค่าอื่น
+                print(f"⚠️ ข้อมูลของบอส '{boss_name}' ผิดรูปแบบ (ไม่ใช่ dictionary): {data}")
+                
+        print("✅ โหลดข้อมูลบอสสำเร็จ!")
+
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดขณะโหลดข้อมูลบอส: {e}")
 
 # ==========================================
 # 🤖 6. Discord Bot Setup & Voice Helper
