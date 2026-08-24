@@ -1,4 +1,5 @@
 import asyncio
+import os
 import traceback
 
 from bot import bot, keep_alive, run_bot_with_backoff
@@ -7,56 +8,88 @@ from bot import bot, keep_alive, run_bot_with_backoff
 @bot.listen("on_ready")
 async def force_sync_commands():
     """
-    Sync slash commands แบบ Guild หลัง Bot login
-    เพื่อให้คำสั่งใช้งานได้ทันทีใน Server
+    Sync Slash Commands หลัง Bot login
     """
     try:
-        print("🔄 FORCE SYNC: เริ่มซิงค์ Slash Commands...")
+        print("=" * 60)
+        print("🔄 FORCE SYNC: เริ่มซิงค์ Slash Commands")
+        print(f"🤖 Bot: {bot.user}")
+        print(f"🏠 Guilds: {len(bot.guilds)}")
+        print("=" * 60)
 
-        # Global sync
+        # Global commands
         global_commands = await bot.tree.sync()
+
         print(
-            f"🌍 Global Slash Commands Sync สำเร็จ: "
-            f"{len(global_commands)} คำสั่ง"
+            f"🌍 Global Sync สำเร็จ: "
+            f"{len(global_commands)} commands"
         )
 
-        # Guild sync
+        # สำคัญ:
+        # ต้อง copy global commands เข้าแต่ละ guild ก่อน
         for guild in bot.guilds:
             try:
-                guild_commands = await bot.tree.sync(guild=guild)
+                bot.tree.copy_global_to(guild=guild)
 
-                print(
-                    f"🏠 Guild Sync สำเร็จ: "
-                    f"{guild.name} ({guild.id}) = "
-                    f"{len(guild_commands)} คำสั่ง"
+                guild_commands = await bot.tree.sync(
+                    guild=guild
                 )
 
-            except Exception as guild_error:
+                print(
+                    f"✅ Guild Sync สำเร็จ: "
+                    f"{guild.name} "
+                    f"({guild.id}) -> "
+                    f"{len(guild_commands)} commands"
+                )
+
+            except Exception as e:
                 print(
                     f"❌ Guild Sync ไม่สำเร็จ: "
                     f"{guild.name} ({guild.id})"
                 )
-                print(guild_error)
+                print(repr(e))
+                traceback.print_exc()
 
-        print("✅ FORCE SYNC Slash Commands เสร็จสมบูรณ์")
+        print("=" * 60)
+        print("✅ FORCE SYNC เสร็จสมบูรณ์")
+        print("=" * 60)
 
     except Exception as e:
-        print("❌ FORCE SYNC Slash Commands ล้มเหลว")
-        print(e)
+        print("❌ FORCE SYNC ล้มเหลว")
+        print(repr(e))
         traceback.print_exc()
 
 
 async def main():
+    print("=" * 60)
+    print("🚀 SKYNET STARTING")
+    print("=" * 60)
+
+    # Render Web Server
+    print("🌐 Starting web server...")
     keep_alive()
 
-    token = __import__("os").environ.get("DISCORD_TOKEN")
+    # Discord Token
+    token = os.environ.get("DISCORD_TOKEN")
 
     if not token:
-        print("❌ ไม่พบ DISCORD_TOKEN")
+        print("❌ ERROR: ไม่พบ DISCORD_TOKEN")
         return
 
-    await run_bot_with_backoff(token)
+    print("🔑 พบ DISCORD_TOKEN")
+    print("🔌 กำลังเริ่ม Discord Bot...")
+
+    try:
+        await run_bot_with_backoff(token)
+    except Exception as e:
+        print("❌ Discord Bot หยุดทำงาน")
+        print(repr(e))
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("🛑 Bot stopped")
