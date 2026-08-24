@@ -1257,65 +1257,114 @@ async def on_ready():
 
     init_db()
 
-try:
-    await load_bot_settings()
-    print("✅ load_bot_settings สำเร็จ")
-except Exception as e:
-    print(f"❌ load_bot_settings ERROR: {e}")
-    traceback.print_exc()
+    # ==========================================
+    # 🔥 โหลด Firebase แต่ละส่วนแยกกัน
+    # เพื่อไม่ให้ Firebase จุดหนึ่งผิดพลาด
+    # แล้วทำให้ Discord Bot ทั้งหมดหยุด
+    # ==========================================
 
-try:
-    await load_custom_bosses()
-    print("✅ load_custom_bosses สำเร็จ")
-except Exception as e:
-    print(f"❌ load_custom_bosses ERROR: {e}")
-    traceback.print_exc()
+    try:
+        await load_bot_settings()
+        print("✅ load_bot_settings สำเร็จ")
+    except Exception as e:
+        print(f"❌ load_bot_settings ERROR: {e}")
+        traceback.print_exc()
 
-try:
-    await load_boss_data()
-    print("✅ load_boss_data สำเร็จ")
-except Exception as e:
-    print(f"❌ load_boss_data ERROR: {e}")
-    traceback.print_exc()
+    try:
+        await load_custom_bosses()
+        print("✅ load_custom_bosses สำเร็จ")
+    except Exception as e:
+        print(f"❌ load_custom_bosses ERROR: {e}")
+        traceback.print_exc()
 
-try:
-    await load_live_config()
-    print("✅ load_live_config สำเร็จ")
-except Exception as e:
-    print(f"❌ load_live_config ERROR: {e}")
-    traceback.print_exc()
+    try:
+        await load_boss_data()
+        print("✅ load_boss_data สำเร็จ")
+    except Exception as e:
+        print(f"❌ load_boss_data ERROR: {e}")
+        traceback.print_exc()
 
-try:
-    await load_vip_config()
-    print("✅ load_vip_config สำเร็จ")
-except Exception as e:
-    print(f"❌ load_vip_config ERROR: {e}")
-    traceback.print_exc()
+    try:
+        await load_live_config()
+        print("✅ load_live_config สำเร็จ")
+    except Exception as e:
+        print(f"❌ load_live_config ERROR: {e}")
+        traceback.print_exc()
 
-try:
-    await load_voice_config()
-    print("✅ load_voice_config สำเร็จ")
-except Exception as e:
-    print(f"❌ load_voice_config ERROR: {e}")
-    traceback.print_exc()
+    try:
+        await load_vip_config()
+        print("✅ load_vip_config สำเร็จ")
+    except Exception as e:
+        print(f"❌ load_vip_config ERROR: {e}")
+        traceback.print_exc()
 
-    # เชื่อมต่อห้อง Voice ที่บันทึกไว้ครั้งเดียวต่อเซิร์ฟเวอร์
+    try:
+        await load_voice_config()
+        print("✅ load_voice_config สำเร็จ")
+    except Exception as e:
+        print(f"❌ load_voice_config ERROR: {e}")
+        traceback.print_exc()
+
+    # ==========================================
+    # 🔊 เชื่อมต่อ Voice Channel ที่บันทึกไว้
+    # ==========================================
+
     for guild in bot.guilds:
-        if get_configured_voice_channel(guild):
-            asyncio.create_task(ensure_configured_voice(guild))
+        try:
+            if get_configured_voice_channel(guild):
+                asyncio.create_task(
+                    ensure_configured_voice(guild)
+                )
+        except Exception as e:
+            print(
+                f"❌ เชื่อมต่อ Voice ของ "
+                f"{guild.name} ไม่สำเร็จ: {e}"
+            )
+
+    # ==========================================
+    # ⏳ รอให้ข้อมูล Firebase โหลดเสร็จ
+    # ==========================================
 
     await asyncio.sleep(3)
-    
-    if not check_boss_notifications.is_running(): check_boss_notifications.start()
-    if not check_bf_notifications.is_running(): check_bf_notifications.start()
-    if not check_library_boss_notifications.is_running(): check_library_boss_notifications.start()
-    if not update_live_embed.is_running(): update_live_embed.start()
-    if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
+
+    # ==========================================
+    # ⏰ เริ่ม Background Tasks
+    # ==========================================
+
+    if not check_boss_notifications.is_running():
+        check_boss_notifications.start()
+
+    if not check_bf_notifications.is_running():
+        check_bf_notifications.start()
+
+    if not check_library_boss_notifications.is_running():
+        check_library_boss_notifications.start()
+
+    if not update_live_embed.is_running():
+        update_live_embed.start()
+
+    if not check_auto_disconnect.is_running():
+        check_auto_disconnect.start()
+
+    # ==========================================
+    # 🟢 Bot พร้อมใช้งาน
+    # ==========================================
 
     is_bot_ready = True
-    loop = asyncio.get_running_loop()
-    threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
 
+    loop = asyncio.get_running_loop()
+
+    threading.Thread(
+        target=start_firebase_listener,
+        args=(loop,),
+        daemon=True
+    ).start()
+
+    print("=" * 60)
+    print("🟢 DISCORD BOT READY")
+    print(f"🤖 Bot: {bot.user}")
+    print(f"🏠 Guilds: {len(bot.guilds)}")
+    print("=" * 60)
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
 # ==========================================
