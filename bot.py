@@ -449,11 +449,35 @@ def toggle_tts_api():
         asyncio.run_coroutine_threadsafe(save_bot_settings(), bot.loop)
     return jsonify({"success": True, "lang": lang, "enabled": enabled})
 
-def run_web():
-    port = int(os.environ.get("PORT", 5000))
-    serve(app, host="0.0.0.0", port=port)
+_web_server_started = False
+_web_server_lock = threading.Lock()
 
-threading.Thread(target=run_web, daemon=True).start()
+def run_web():
+    global _web_server_started
+    port = int(os.environ.get("PORT", 5000))
+    with _web_server_lock:
+        if _web_server_started:
+            return
+        _web_server_started = True
+    print(f"🌐 Starting Flask/Waitress on 0.0.0.0:{port}")
+    try:
+        serve(app, host="0.0.0.0", port=port, threads=4, expose_tracebacks=False)
+    except OSError as e:
+        # Render can briefly restart/rebind a worker. Do not crash the Discord bot thread.
+        if getattr(e, "errno", None) == 98:
+            print(f"⚠️ PORT {port} ถูกใช้งานอยู่แล้ว — ไม่เปิด Web Server ซ้ำ")
+        else:
+            print(f"❌ Web Server หยุดทำงาน: {e}")
+    except Exception as e:
+        print(f"❌ Web Server error: {e}")
+
+def keep_alive():
+    global _web_server_started
+    with _web_server_lock:
+        if _web_server_started:
+            return
+    t = threading.Thread(target=run_web, name="render-web", daemon=True)
+    t.start()
 
 # ==========================================
 # ⚙️ Config & Global Variables
@@ -705,116 +729,127 @@ def save_json_local(filename: str, data: dict):
     except Exception as e:
         print(f"❌ เซฟ {filename} ลง local ไม่สำเร็จ: {e}")
 
+def _schedule_record_to_firebase(boss_name: str, data: dict) -> dict:
+    """Single canonical boss_schedule schema used by Discord and Dashboard."""
+    spawn_dt = parse_to_thai_datetime(data.get("spawnTimeMs") or data.get("spawn_time"))
+    kill_dt = parse_to_thai_datetime(data.get("killTimeMs") or data.get("kill_time_ms") or data.get("kill_time"))
+    if not spawn_dt:
+        raise ValueError(f"ไม่มี spawnTimeMs ที่ถูกต้องสำหรับ {boss_name}")
+    spawn_ms = int(spawn_dt.timestamp() * 1000)
+    kill_ms = int(kill_dt.timestamp() * 1000) if kill_dt else None
+    notice = data.get("noticeMinutes")
+    if notice is None:
+        notice = int(get_boss_advance_notice_seconds(boss_name) / 60)
+    try:
+        notice = max(1, int(notice))
+    except (TypeError, ValueError):
+        notice = int(get_boss_advance_notice_seconds(boss_name) / 60)
+    record = {
+        "spawnTimeMs": spawn_ms,
+        "noticeMinutes": notice,
+        "recordedBy": data.get("recordedBy") or data.get("recorded_by") or "-",
+        "notifiedNotice": parse_bool(data.get("notifiedNotice", data.get("notified_advance", False))),
+        "notifiedSpawn": parse_bool(data.get("notifiedSpawn", data.get("notified_spawn", False))),
+    }
+    if kill_ms is not None:
+        record["killTimeMs"] = kill_ms
+    channel_id = data.get("channelId") or data.get("channel_id")
+    if channel_id is not None:
+        try: record["channelId"] = int(channel_id)
+        except (TypeError, ValueError): pass
+    voice_channel_id = data.get("voiceChannelId") or data.get("voice_channel_id")
+    if voice_channel_id is not None:
+        try: record["voiceChannelId"] = int(voice_channel_id)
+        except (TypeError, ValueError): pass
+    return record
+
+def _firebase_to_internal(boss_name: str, data: dict) -> dict | None:
+    try:
+        record = _schedule_record_to_firebase(boss_name, data)
+    except Exception:
+        return None
+    # Keep the existing task/UI code stable while Firebase remains canonical.
+    return {
+        "spawn_time": parse_to_thai_datetime(record["spawnTimeMs"]),
+        "killTimeMs": record.get("killTimeMs"),
+        "channel_id": record.get("channelId"),
+        "voice_channel_id": record.get("voiceChannelId"),
+        "notified_advance": record.get("notifiedNotice", False),
+        "notified_spawn": record.get("notifiedSpawn", False),
+        "noticeMinutes": record.get("noticeMinutes", 5),
+        "recorded_by": record.get("recordedBy", "-"),
+    }
+
 async def save_boss_data():
     global is_updating_from_bot
     with schedule_lock:
-        data_to_save = {}
+        firebase_data = {}
         for boss_name, data in boss_schedule.items():
-            st = parse_to_thai_datetime(data["spawn_time"])
-            if not st: continue
-            spawn_ms = int(st.timestamp() * 1000)
-            rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-            data_to_save[boss_name] = {
-                "spawn_time": st.isoformat(),
-                "spawnTimeMs": spawn_ms,
-                "channel_id": data.get("channel_id"),
-                "notified_advance": parse_bool(data.get("notified_advance", False)),
-                "notified_spawn": parse_bool(data.get("notified_spawn", False)),
-                "noticeMinutes": int(get_boss_advance_notice_seconds(boss_name) / 60),
-                "recorded_by": rec_by,
-                "recordedBy": rec_by
-            }
-    
+            try:
+                firebase_data[boss_name] = _schedule_record_to_firebase(boss_name, data)
+            except Exception as e:
+                print(f"⚠️ ข้ามข้อมูลบอส {boss_name}: {e}")
     try:
         is_updating_from_bot = True
-        ref_boss = db.reference('boss_schedule')
-        await asyncio.to_thread(ref_boss.set, data_to_save)
+        await asyncio.to_thread(db.reference("boss_schedule").set, firebase_data)
     except Exception as e:
-        print(f"❌ บันทึกตารางบอสลง Firebase ไม่สำเร็จ: {e}")
+        print(f"❌ บันทึก boss_schedule ลง Firebase ไม่สำเร็จ: {e}")
     finally:
         is_updating_from_bot = False
-
-    await asyncio.to_thread(set_db_value, "boss_schedule", data_to_save)
-    await asyncio.to_thread(save_json_local, DATA_FILE, data_to_save)
+    await asyncio.to_thread(set_db_value, "boss_schedule", firebase_data)
+    await asyncio.to_thread(save_json_local, DATA_FILE, firebase_data)
 
 async def load_boss_data():
     global boss_schedule
     saved_data = None
     try:
-        ref_boss = db.reference('boss_schedule')
-        saved_data = await asyncio.to_thread(ref_boss.get)
+        saved_data = await asyncio.to_thread(db.reference("boss_schedule").get)
     except Exception as e:
-        print(f"⚠️ ดึงข้อมูลบอสจาก Firebase ไม่สำเร็จ: {e}")
-
+        print(f"⚠️ ดึง boss_schedule จาก Firebase ไม่สำเร็จ: {e}")
     if not saved_data:
         saved_data = get_db_value("boss_schedule", None)
-
-    if saved_data and isinstance(saved_data, dict):
-        with schedule_lock:
-            boss_schedule.clear()
-            for boss_name, data in saved_data.items():
-                if isinstance(data, dict):
-                    raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
-                    st = parse_to_thai_datetime(raw_st)
-                    if st:
-                        canonical_name = get_boss_canonical_name(boss_name)
-                        notified_adv = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
-                        notified_spwn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
-                        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-                        
-                        boss_schedule[canonical_name] = {
-                            "spawn_time": st,
-                            "channel_id": data.get("channel_id"),
-                            "notified_advance": notified_adv,
-                            "notified_spawn": notified_spwn,
-                            "recorded_by": rec_by
-                        }
-        print(f"✅ โหลดตารางบอสจาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
+    if not isinstance(saved_data, dict):
+        saved_data = {}
+    with schedule_lock:
+        boss_schedule.clear()
+        for boss_name, data in saved_data.items():
+            if not isinstance(data, dict):
+                continue
+            canonical = get_boss_canonical_name(boss_name)
+            internal = _firebase_to_internal(canonical, data)
+            if internal:
+                boss_schedule[canonical] = internal
+    print(f"✅ โหลด boss_schedule จาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
 def start_firebase_listener(loop):
-    """Firebase listener: ใช้ event.data โดยตรง เพื่อลด read/API spam"""
+    """Safe listener: always read the boss_schedule root, never trust event.data as the full tree."""
     def listener(event):
         global is_updating_from_bot
         if not is_bot_ready or is_updating_from_bot:
             return
         try:
-            snapshot = event.data
-            if snapshot is None:
-                snapshot = {}
+            snapshot = db.reference("boss_schedule").get()
             if not isinstance(snapshot, dict):
-                return
+                snapshot = {}
+            new_schedule = {}
+            for boss_name, data in snapshot.items():
+                if not isinstance(data, dict):
+                    continue
+                canonical = get_boss_canonical_name(boss_name)
+                internal = _firebase_to_internal(canonical, data)
+                if internal:
+                    new_schedule[canonical] = internal
             with schedule_lock:
-                old_schedule = dict(boss_schedule)
-                new_schedule = {}
-                for boss_name, data in snapshot.items():
-                    if not isinstance(data, dict):
-                        continue
-                    canonical_name = get_boss_canonical_name(boss_name)
-                    raw_st = data.get("spawnTimeMs") or data.get("spawn_time")
-                    st = parse_to_thai_datetime(raw_st)
-                    if not st:
-                        continue
-                    existing = old_schedule.get(canonical_name)
-                    rec_by = data.get("recorded_by") or data.get("recordedBy") or (existing.get("recorded_by") if existing else "-")
-                    new_schedule[canonical_name] = {
-                        "spawn_time": st,
-                        "channel_id": data.get("channel_id") or (existing.get("channel_id") if existing else None),
-                        "notified_advance": parse_bool(data.get("notified_advance", data.get("notifiedNotice", False))),
-                        "notified_spawn": parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False))),
-                        "recorded_by": rec_by
-                    }
                 boss_schedule.clear()
                 boss_schedule.update(new_schedule)
+            print(f"🔄 Firebase boss_schedule sync: {len(new_schedule)} รายการ")
         except Exception as e:
             print(f"❌ Firebase Listener boss_schedule ผิดพลาด: {e}")
-
     try:
-        ref_boss = db.reference("boss_schedule")
-        ref_boss.listen(listener)
-        print("🟢 Firebase Listener พร้อมทำงาน (event.data, ลด API read ซ้ำ)")
+        db.reference("boss_schedule").listen(listener)
+        print("🟢 Firebase Listener พร้อมทำงานแบบ safe root-sync")
     except Exception as e:
         print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
-
 
 async def save_voice_config():
     """บันทึกการตั้งค่าห้อง Voice แบบถาวรลง Firebase และ local SQLite/JSON"""
@@ -1125,11 +1160,16 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
         if actual_text_ko: tts_files.append(("ko", actual_text_ko, VOICE_KOR, f"temp_tts_ko_{guild.id}_{unique_id}.mp3", "-10%", "+0Hz"))
 
         try:
-            for _, text, voice, filename, rate, pitch in tts_files:
-                try:
-                    await edge_tts.Communicate(text, voice, rate=rate, pitch=pitch).save(filename)
-                except Exception as e:
-                    print(f"❌ สร้าง TTS ไม่สำเร็จ ({_}): {e}")
+            # Give edge-tts an explicit session so aiohttp resources are always closed.
+            async with aiohttp.ClientSession() as tts_session:
+                for _, text, voice, filename, rate, pitch in tts_files:
+                    try:
+                        communicator = edge_tts.Communicate(
+                            text, voice, rate=rate, pitch=pitch, session=tts_session
+                        )
+                        await communicator.save(filename)
+                    except Exception as e:
+                        print(f"❌ สร้าง TTS ไม่สำเร็จ ({_}): {e}")
 
             ffmpeg_executable = get_ffmpeg_path()
             loop = asyncio.get_running_loop()
@@ -1549,15 +1589,22 @@ async def check_auto_disconnect():
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_auto_disconnect': {e}")
 
 async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    all_bosses = sorted(BOSS_RESPAWN_TIMES.keys())
-    if not current:
-        return [app_commands.Choice(name=boss, value=boss) for boss in all_bosses[:25]]
-    choices = [
-        app_commands.Choice(name=boss, value=boss)
-        for boss in all_bosses
-        if current.lower() in boss.lower()
-    ]
-    return choices[:25]
+    """Discord autocomplete must finish fast and return <=25 valid choices."""
+    try:
+        needle = (current or "").strip().casefold()
+        names = sorted({str(x).strip() for x in BOSS_RESPAWN_TIMES.keys() if str(x).strip()}, key=str.casefold)
+        if needle:
+            names = [x for x in names if needle in x.casefold()]
+        result = []
+        for boss in names[:25]:
+            # Discord Choice name/value max 100 chars.
+            value = boss[:100]
+            label = boss[:100]
+            result.append(app_commands.Choice(name=label, value=value))
+        return result
+    except Exception as e:
+        print(f"⚠️ boss autocomplete error: {e}")
+        return []
 
 # ==========================================
 # 🎛️ 8. Dynamic Boss Select & Quick Actions
@@ -1596,9 +1643,11 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
         with schedule_lock:
             boss_schedule[canonical_name] = {
                 "spawn_time": next_spawn,
+                "killTimeMs": int(boss_died_at.timestamp() * 1000),
                 "channel_id": interaction.channel_id,
                 "notified_advance": is_already_past,
                 "notified_spawn": is_already_past,
+                "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
                 "recorded_by": user_name
             }
         await save_boss_data()
@@ -1988,9 +2037,11 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     with schedule_lock:
         boss_schedule[canonical_name] = {
             "spawn_time": next_spawn,
+            "killTimeMs": int(boss_died_at.timestamp() * 1000),
             "channel_id": interaction.channel_id,
             "notified_advance": is_already_past,
             "notified_spawn": is_already_past,
+            "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
             "recorded_by": user_name
         }
     await save_boss_data()
@@ -2007,54 +2058,53 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
     await interaction.followup.send(embed=embed)
     await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", f"👾 บอส: `{canonical_name}`\n👤 ผู้บันทึก: `{user_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
 
-@bot.tree.command(name="addboss", description="เพิ่มบอสใหม่หรือแก้ไขเวลา คูลดาวน์ / เวลาเตือนล่วงหน้า")
-@app_commands.describe(name="ชื่อบอสที่ต้องการเพิ่มหรือแก้ไข", hours="จำนวนชั่วโมงคูลดาวน์", minutes="จำนวนนาทีคูลดาวน์", seconds="จำนวนวินาทีคูลดาวน์", notice_minutes="เวลาที่ต้องการให้เตือนล่วงหน้า (นาที)")
+add_group = app_commands.Group(name="add", description="คำสั่งจัดการข้อมูลบอส")
+bot.tree.add_command(add_group)
+
+@add_group.command(name="boss", description="เพิ่มบอสใหม่เข้าไปในระบบ (ไม่สร้าง Timer)")
+@app_commands.describe(
+    name="ชื่อบอสใหม่",
+    hours="คูลดาวน์ชั่วโมง (ใช้กำหนดค่าให้ /kill; ไม่สร้าง Timer)",
+    minutes="คูลดาวน์นาที",
+    seconds="คูลดาวน์วินาที",
+    notice_minutes="แจ้งเตือนล่วงหน้ากี่นาที"
+)
 @has_allowed_role()
-async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, minutes: int = 0, seconds: int = 0, notice_minutes: int = 5):
+async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, minutes: int = 30, seconds: int = 0, notice_minutes: int = 5):
     await interaction.response.defer()
-    total_seconds = (hours * 3600) + (minutes * 60) + seconds
-    if total_seconds <= 0:
-        await interaction.followup.send("❌ เวลาคูลดาวน์รวมต้องมากกว่า 0 วินาทีครับ!", ephemeral=True)
+    name = (name or "").strip()
+    if not name:
+        await interaction.followup.send("❌ กรุณาระบุชื่อบอส", ephemeral=True)
         return
-
-    matched_name = get_boss_canonical_name(name)
-    
-    if "wadangka" in matched_name.lower() or "วาดังการ์" in matched_name:
+    if any(c in name for c in "/\\.#$[]"):
+        await interaction.followup.send("❌ ชื่อบอสมีอักขระที่ Firebase ไม่อนุญาต (/ . # $ [ ])", ephemeral=True)
+        return
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    if total_seconds <= 0 or notice_minutes < 1:
+        await interaction.followup.send("❌ CD ต้องมากกว่า 0 วินาที และ notice ต้องอย่างน้อย 1 นาที", ephemeral=True)
+        return
+    canonical = get_boss_canonical_name(name)
+    if canonical in BOSS_RESPAWN_TIMES and canonical in DEFAULT_BOSS_NAMES:
+        await interaction.followup.send(f"⚠️ บอส **{canonical}** มีอยู่ในระบบแล้ว — /addboss ใช้เพิ่มชื่อบอสใหม่เท่านั้น ไม่สร้าง Timer", ephemeral=True)
+        return
+    if "wadangka" in canonical.lower() or "วาดังการ์" in canonical:
         notice_minutes = 30
-        
-    BOSS_RESPAWN_TIMES[matched_name] = timedelta(seconds=total_seconds)
-    
-    cd_parts = []
-    if hours > 0: cd_parts.append(f"{hours} ชั่วโมง")
-    if minutes > 0: cd_parts.append(f"{minutes} นาที")
-    if seconds > 0: cd_parts.append(f"{seconds} วินาที")
-    cd_text = " ".join(cd_parts) if cd_parts else "0 วินาที"
-    
-    BOSS_CD_TEXT[matched_name] = cd_text
-    ADVANCE_NOTICE_SECONDS[matched_name] = notice_minutes * 60
-    ADVANCE_NOTICE_TEXT[matched_name] = f"{notice_minutes} นาที"
-    if matched_name not in BOSS_PRONUNCIATION: BOSS_PRONUNCIATION[matched_name] = matched_name
-
+    BOSS_RESPAWN_TIMES[canonical] = timedelta(seconds=total_seconds)
+    BOSS_CD_TEXT[canonical] = (f"{hours} ชั่วโมง " if hours else "") + (f"{minutes} นาที " if minutes else "") + (f"{seconds} วินาที" if seconds else "")
+    BOSS_CD_TEXT[canonical] = BOSS_CD_TEXT[canonical].strip() or "0 วินาที"
+    ADVANCE_NOTICE_SECONDS[canonical] = notice_minutes * 60
+    ADVANCE_NOTICE_TEXT[canonical] = f"{notice_minutes} นาที"
+    BOSS_PRONUNCIATION.setdefault(canonical, canonical)
     await save_custom_bosses_to_github()
-
-    user_name = interaction.user.display_name
-    with schedule_lock:
-        boss_schedule[matched_name] = {
-            "spawn_time": datetime.now(TZ_THAI),
-            "channel_id": interaction.channel_id,
-            "notified_advance": True,
-            "notified_spawn": True,
-            "recorded_by": user_name
-        }
-    await save_boss_data()
-
-    embed = discord.Embed(title="✅ เพิ่ม/แก้ไขบอสสำเร็จ", color=discord.Color.green())
-    embed.add_field(name="👾 ชื่อบอส", value=f"`{matched_name}`", inline=True)
-    embed.add_field(name="⏳ คูลดาวน์", value=cd_text, inline=True)
-    embed.add_field(name="🔔 เตือนล่วงหน้า", value=f"{notice_minutes} นาที", inline=True)
-    
-    await interaction.followup.send(embed=embed)
-    await send_audit_log(interaction.guild, interaction.user, "เพิ่ม/แก้ไขบอส (/addboss)", f"➕ บอส: `{matched_name}`\n⏳ คูลดาวน์: {cd_text}", discord.Color.green())
+    # IMPORTANT: /addboss never writes boss_schedule.
+    await interaction.followup.send(
+        f"✅ เพิ่มบอส **{canonical}** เข้า Boss Definition สำเร็จ\n"
+        f"⏳ CD สำหรับ /kill: **{BOSS_CD_TEXT[canonical]}**\n"
+        f"🔔 แจ้งเตือนล่วงหน้า: **{notice_minutes} นาที**\n"
+        f"📌 ยังไม่ได้สร้าง Timer — ใช้ `/kill {canonical}` เมื่อบอสตาย",
+        ephemeral=False
+    )
+    await send_audit_log(interaction.guild, interaction.user, "เพิ่มบอส (/addboss)", f"➕ `{canonical}` | CD {BOSS_CD_TEXT[canonical]} | ไม่มีการสร้าง boss_schedule", discord.Color.green())
 
 @bot.tree.command(name="delboss", description="ลบบอสออกจากตารางนับถอยหลัง")
 @app_commands.describe(boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการลบ")
@@ -2184,80 +2234,70 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
 # 🚀 11. Run Bot Entry Point
 # ==========================================
 async def run_bot_with_backoff(token: str):
-    """เริ่ม Discord bot แบบ backoff โดยไม่ปิด aiohttp session ระหว่าง retry.
-
-    สำคัญ: discord.py จะปิด HTTP session เมื่อเรียก bot.close().
-    ถ้าเรียก close() แล้วนำ bot ตัวเดิมกลับมา bot.start() อีกครั้ง
-    รอบถัดไปอาจจบด้วย RuntimeError: Session is closed.
-    """
-    backoff = 120
-
+    """Run Discord with bounded retry and explicitly close failed HTTP sessions."""
+    backoff = 10
     while True:
         try:
             print("🔌 กำลังเชื่อมต่อ Discord Gateway...")
             await bot.start(token, reconnect=True)
             print("🛑 Discord bot stopped normally.")
             return
-
         except discord.HTTPException as e:
             status = getattr(e, "status", None)
-
             if status == 429:
-                retry_after = getattr(e, "retry_after", None)
-                try:
-                    retry_after = float(retry_after or 0)
-                except (TypeError, ValueError):
-                    retry_after = 0.0
-
-                delay = max(retry_after, float(backoff))
-
-                print(
-                    f"🛑 Discord API 429 ตอน login/start — "
-                    f"รอ {delay:.0f} วินาที แล้วค่อยลองใหม่ "
-                    f"(ไม่ปิด HTTP session)"
-                )
-
-                # ห้าม bot.close() ที่นี่
-                await asyncio.sleep(delay)
-                backoff = min(backoff * 2, 900)
-                continue
-
-            print(
-                f"❌ Discord HTTP error ระหว่าง startup: "
-                f"status={status}, error={e}"
-            )
-            raise
-
+                retry_after = getattr(e, "retry_after", 0)
+                try: retry_after = float(retry_after or 0)
+                except (TypeError, ValueError): retry_after = 0
+                delay = max(retry_after, backoff)
+                print(f"🛑 Discord 429 — รอ {delay:.0f} วินาทีก่อนเชื่อมต่อใหม่")
+            else:
+                delay = backoff
+                print(f"❌ Discord HTTP error status={status}: {e}")
+            try:
+                await bot.close()
+            except Exception as close_error:
+                print(f"⚠️ ปิด Discord HTTP session หลัง error ไม่สำเร็จ: {close_error}")
+            await asyncio.sleep(delay)
+            backoff = min(backoff * 2, 300)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(
-                f"⚠️ Discord connection error: {e} — "
-                f"รอ {backoff} วินาทีก่อน retry "
-                f"(ไม่ปิด HTTP session)"
-            )
-
-            # ห้าม bot.close() ที่นี่เช่นกัน
+            print(f"⚠️ Discord connection error: {e} — ปิด session แล้ว retry ใน {backoff} วินาที")
+            try:
+                await bot.close()
+            except Exception as close_error:
+                print(f"⚠️ ปิด Discord HTTP session ไม่สำเร็จ: {close_error}")
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 300)
-
         except RuntimeError as e:
             if "Session is closed" in str(e):
-                print(
-                    "❌ Discord HTTP session ถูกปิดก่อน retry "
-                    "ไม่ควรเกิดจาก startup handler เวอร์ชันนี้"
-                )
-                print(
-                    "🛑 หยุด process เพื่อให้ Render restart process ใหม่ "
-                    "แทนการสร้าง login loop ที่ยิง Discord API ซ้ำ"
-                )
-                raise
+                print("⚠️ Discord session ถูกปิด — จะสร้าง session ใหม่ในรอบถัดไป")
+                try: await bot.close()
+                except Exception: pass
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
+                continue
+            raise
+        except Exception as e:
+            print(f"❌ Discord startup error: {e}")
+            traceback.print_exc()
+            try: await bot.close()
+            except Exception: pass
             raise
 
 if __name__ == "__main__":
+    # Render needs the HTTP listener immediately; start it exactly once.
+    keep_alive()
     TOKEN = os.environ.get("DISCORD_TOKEN")
     if TOKEN:
         try:
             asyncio.run(run_bot_with_backoff(TOKEN))
         except KeyboardInterrupt:
             print("🛑 หยุดบอทแล้ว")
+        finally:
+            # Only close the Discord aiohttp session when the process is really shutting down.
+            try:
+                if not bot.is_closed():
+                    asyncio.run(bot.close())
+            except Exception as e:
+                print(f"⚠️ ปิด Discord client ไม่สำเร็จ: {e}")
     else:
         print("⚠️ กรุณาตั้งค่า DISCORD_TOKEN ใน Environment Variable หรือระบุ Token สำหรับรันบอท")
