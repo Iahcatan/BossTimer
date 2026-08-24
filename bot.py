@@ -746,6 +746,9 @@ def _schedule_record_to_firebase(boss_name: str, data: dict) -> dict:
         notice = int(get_boss_advance_notice_seconds(boss_name) / 60)
     record = {
         "spawnTimeMs": spawn_ms,
+        # Keep both fields because the Dashboard/Firebase Rules use spawn_time
+        # while the bot/UI use spawnTimeMs.
+        "spawn_time": datetime.fromtimestamp(spawn_ms / 1000, tz=TZ_THAI).isoformat(),
         "noticeMinutes": notice,
         "recordedBy": data.get("recordedBy") or data.get("recorded_by") or "-",
         "notifiedNotice": parse_bool(data.get("notifiedNotice", data.get("notified_advance", False))),
@@ -791,7 +794,10 @@ async def save_boss_data():
                 print(f"⚠️ ข้ามข้อมูลบอส {boss_name}: {e}")
     try:
         is_updating_from_bot = True
-        await asyncio.to_thread(db.reference("boss_schedule").set, firebase_data)
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("boss_schedule").set, firebase_data),
+            timeout=8
+        )
     except Exception as e:
         print(f"❌ บันทึก boss_schedule ลง Firebase ไม่สำเร็จ: {e}")
     finally:
@@ -856,7 +862,10 @@ async def save_voice_config():
     with schedule_lock:
         data = {str(gid): dict(cfg) for gid, cfg in voice_config.items()}
     try:
-        await asyncio.to_thread(db.reference("voice_config").set, data)
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("voice_config").set, data),
+            timeout=8
+        )
     except Exception as e:
         print(f"⚠️ บันทึก voice_config ลง Firebase ไม่สำเร็จ: {e}")
     await asyncio.to_thread(set_db_value, "voice_config", data)
@@ -1087,6 +1096,15 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         else: await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
         print(f"❌ เกิดข้อผิดพลาดของระบบ: {error}")
+        traceback.print_exc()
+        try:
+            message = "❌ คำสั่งเกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง"
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+        except Exception as handler_error:
+            print(f"❌ ไม่สามารถส่ง error response ให้ Discord ได้: {handler_error}")
 
 def get_ffmpeg_path():
     try: return imageio_ffmpeg.get_ffmpeg_exe()
@@ -1849,34 +1867,78 @@ async def toggle_vip_greet(interaction: discord.Interaction, status: app_command
 @app_commands.describe(channel="ห้อง Voice ที่ต้องการให้บอทเข้าและประกาศ (เว้นว่าง = ห้องที่คุณอยู่)")
 @has_allowed_role()
 async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
-    await interaction.response.defer(ephemeral=True)
-    target = channel
-    if target is None:
-        if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.followup.send("❌ กรุณาเข้าห้อง Voice ก่อน หรือเลือกห้อง Voice ในคำสั่ง /setvoice", ephemeral=True)
-            return
-        target = interaction.user.voice.channel
+    # Acknowledge immediately. Never wait for Firebase/Discord Voice before responding.
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception as e:
+        print(f"❌ /setvoice defer failed: {e}")
+        return
 
-    guild_id = interaction.guild.id
-    voice_config[str(guild_id)] = {
-        "guild_id": guild_id,
-        "voice_channel_id": int(target.id),
-        "channel_name": target.name,
-        "enabled": True,
-        "updated_by": str(interaction.user.id),
-        "updated_at": datetime.now(TZ_THAI).isoformat()
-    }
-    await save_voice_config()
+    try:
+        target = channel
+        if target is None:
+            if not interaction.user.voice or not interaction.user.voice.channel:
+                await interaction.followup.send(
+                    "❌ กรุณาเข้าห้อง Voice ก่อน หรือเลือกห้อง Voice ในคำสั่ง /setvoice",
+                    ephemeral=True
+                )
+                return
+            target = interaction.user.voice.channel
 
-    vc = await ensure_configured_voice(interaction.guild)
-    status = "🟢 เชื่อมต่อสำเร็จ" if vc and vc.is_connected() else "🟡 บันทึกค่าแล้ว แต่ยังเชื่อมต่อ Voice ไม่สำเร็จ (จะลองใหม่โดยไม่ยิงซ้ำ)"
-    embed = discord.Embed(title="🔊 ตั้งค่าห้อง Voice สำเร็จ", color=discord.Color.green() if vc else discord.Color.orange())
-    embed.add_field(name="ห้อง Voice", value=f"{target.mention}", inline=False)
-    embed.add_field(name="voice_channel_id", value=f"`{target.id}`", inline=False)
-    embed.add_field(name="Firebase", value="`voice_config`", inline=True)
-    embed.add_field(name="สถานะ", value=status, inline=True)
-    await interaction.followup.send(embed=embed, ephemeral=True)
-    await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าห้อง Voice (/setvoice)", f"🔊 ห้อง: {target.mention}\nID: `{target.id}`", discord.Color.green())
+        guild_id = interaction.guild.id
+        voice_config[str(guild_id)] = {
+            "guild_id": guild_id,
+            "voice_channel_id": int(target.id),
+            "channel_name": target.name,
+            "enabled": True,
+            "updated_by": str(interaction.user.id),
+            "updated_at": datetime.now(TZ_THAI).isoformat()
+        }
+
+        # Respond first so Discord never reports "The application did not respond".
+        await interaction.followup.send(
+            f"🔊 บันทึกห้อง Voice **{target.name}** แล้ว\n"
+            f"ID: `{target.id}`\n"
+            f"กำลังเชื่อมต่อ Voice และบันทึก Firebase...",
+            ephemeral=True
+        )
+
+        async def finish_voice_setup():
+            try:
+                await asyncio.wait_for(save_voice_config(), timeout=8)
+            except Exception as e:
+                print(f"❌ /setvoice Firebase save failed: {e}")
+
+            try:
+                vc = await asyncio.wait_for(
+                    ensure_configured_voice(interaction.guild),
+                    timeout=25
+                )
+                status = "🟢 เชื่อมต่อ Voice สำเร็จ" if vc and vc.is_connected() else "🟡 บันทึกค่าแล้ว แต่เชื่อมต่อ Voice ไม่สำเร็จ"
+                print(f"🔊 /setvoice {interaction.guild.name}: {status}")
+            except Exception as e:
+                print(f"❌ /setvoice voice connection failed: {e}")
+
+            try:
+                await send_audit_log(
+                    interaction.guild,
+                    interaction.user,
+                    "ตั้งค่าห้อง Voice (/setvoice)",
+                    f"🔊 ห้อง: {target.mention}\nID: `{target.id}`",
+                    discord.Color.green()
+                )
+            except Exception as e:
+                print(f"⚠️ /setvoice audit log failed: {e}")
+
+        asyncio.create_task(finish_voice_setup())
+
+    except Exception as e:
+        print(f"❌ /setvoice unexpected error: {e}")
+        traceback.print_exc()
+        try:
+            await interaction.followup.send(f"❌ /setvoice เกิดข้อผิดพลาด: `{e}`", ephemeral=True)
+        except Exception:
+            pass
 
 @bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
 async def join_voice(interaction: discord.Interaction):
@@ -2017,46 +2079,103 @@ async def boss_time_prefix(ctx: commands.Context):
     await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
-@app_commands.describe(boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา", kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน")
+@app_commands.describe(
+    boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
+    kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน"
+)
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None):
-    await interaction.response.defer()
-    canonical_name = get_boss_canonical_name(boss_name)
-    now = datetime.now(TZ_THAI)
-    try: boss_died_at = parse_time_input(kill_time, now)
-    except ValueError:
-        await interaction.followup.send("❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอกแบบ **17:30** หรือ **1730**", ephemeral=True)
+    # Acknowledge immediately.
+    try:
+        await interaction.response.defer()
+    except Exception as e:
+        print(f"❌ /kill defer failed: {e}")
         return
 
-    respawn_time = get_boss_respawn_time(canonical_name)
-    next_spawn = boss_died_at + respawn_time
-    is_already_past = next_spawn <= now
-    user_name = interaction.user.display_name
+    try:
+        canonical_name = get_boss_canonical_name(boss_name)
+        now = datetime.now(TZ_THAI)
 
-    with schedule_lock:
-        boss_schedule[canonical_name] = {
-            "spawn_time": next_spawn,
+        try:
+            boss_died_at = parse_time_input(kill_time, now)
+        except ValueError:
+            await interaction.followup.send(
+                "❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอกแบบ **17:30** หรือ **1730**",
+                ephemeral=True
+            )
+            return
+
+        respawn_time = get_boss_respawn_time(canonical_name)
+        next_spawn = boss_died_at + respawn_time
+        is_already_past = next_spawn <= now
+        user_name = interaction.user.display_name
+
+        record = {
+            "spawn_time": next_spawn.isoformat(),
             "killTimeMs": int(boss_died_at.timestamp() * 1000),
-            "channel_id": interaction.channel_id,
-            "notified_advance": is_already_past,
-            "notified_spawn": is_already_past,
+            "channelId": interaction.channel_id,
+            "notifiedNotice": is_already_past,
+            "notifiedSpawn": is_already_past,
             "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
-            "recorded_by": user_name
+            "recordedBy": user_name,
+            "spawnTimeMs": int(next_spawn.timestamp() * 1000)
         }
-    await save_boss_data()
-    cd_text = get_boss_cd_text(canonical_name)
 
-    embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
-    embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
-    embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
-    embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
-    embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
-    embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
-    embed.set_footer(text=f"บันทึกโดย {user_name}")
+        with schedule_lock:
+            boss_schedule[canonical_name] = {
+                "spawn_time": next_spawn,
+                "killTimeMs": record["killTimeMs"],
+                "channel_id": interaction.channel_id,
+                "notified_advance": is_already_past,
+                "notified_spawn": is_already_past,
+                "noticeMinutes": record["noticeMinutes"],
+                "recorded_by": user_name
+            }
 
-    await interaction.followup.send(embed=embed)
-    await send_audit_log(interaction.guild, interaction.user, "บันทึกเวลาบอสตาย (/kill)", f"👾 บอส: `{canonical_name}`\n👤 ผู้บันทึก: `{user_name}`\n🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}", discord.Color.red())
+        cd_text = get_boss_cd_text(canonical_name)
+
+        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
+        embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
+        embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
+        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
+        embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
+        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
+        embed.set_footer(text=f"บันทึกโดย {user_name}")
+
+        # Send Discord response before any Firebase/local I/O.
+        await interaction.followup.send(embed=embed)
+
+        async def persist_kill():
+            try:
+                await asyncio.wait_for(save_boss_data(), timeout=10)
+                print(f"💾 /kill saved: {canonical_name} -> {next_spawn.isoformat()}")
+            except Exception as e:
+                print(f"❌ /kill Firebase save failed: {e}")
+                traceback.print_exc()
+
+            try:
+                await send_audit_log(
+                    interaction.guild,
+                    interaction.user,
+                    "บันทึกเวลาบอสตาย (/kill)",
+                    f"👾 บอส: `{canonical_name}`\n"
+                    f"👤 ผู้บันทึก: `{user_name}`\n"
+                    f"🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}",
+                    discord.Color.red()
+                )
+            except Exception as e:
+                print(f"⚠️ /kill audit log failed: {e}")
+
+        asyncio.create_task(persist_kill())
+
+    except Exception as e:
+        print(f"❌ /kill unexpected error: {e}")
+        traceback.print_exc()
+        try:
+            await interaction.followup.send(f"❌ /kill เกิดข้อผิดพลาด: `{e}`", ephemeral=True)
+        except Exception:
+            pass
 
 add_group = app_commands.Group(name="add", description="คำสั่งจัดการข้อมูลบอส")
 bot.tree.add_command(add_group)
