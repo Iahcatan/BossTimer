@@ -90,7 +90,15 @@ def run_web():
     # ใช้ waitress (serve) ในการรันแทน app.run() จะเสถียรกว่าบนโปรดักชั่น
     serve(app, host="0.0.0.0", port=port)
 
+# ตัวแปรเช็คสถานะการรันเว็บ (ป้องกันการเปิดซ้ำซ้อนจนเกิด Error [Errno 98])
+_web_server_started = False
+
 def keep_alive():
+    global _web_server_started
+    if _web_server_started:
+        return  # ถ้าเปิดไปแล้ว ให้ข้ามการเปิดซ้ำ
+    
+    _web_server_started = True
     # รันเว็บเซิร์ฟเวอร์ใน Thread แยก เพื่อไม่ให้บล็อกการทำงานของบอท
     t = threading.Thread(target=run_web)
     t.daemon = True # ให้ Thread ปิดตัวอัตโนมัติเมื่อบอทหลักดับ
