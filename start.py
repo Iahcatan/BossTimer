@@ -1,9 +1,7 @@
 import asyncio
 import os
 import traceback
-from datetime import datetime, timezone
 
-import discord
 import bot as bot_module
 
 # ============================================================
@@ -46,79 +44,16 @@ if _original_load_custom_bosses is not None:
     bot_module.load_custom_bosses = safe_load_custom_bosses
 
 # ------------------------------------------------------------
-# Fast /status runtime patch.
-#
-# bot.py already contains /status. We replace only its callback at
-# runtime so the first Discord response is a direct ACK rather than
-# waiting on Firebase, locks, voice or any other work.
+# IMPORTANT /status note
 # ------------------------------------------------------------
-async def _fast_status_callback(interaction: discord.Interaction):
-    try:
-        latency_ms = round(bot_module.bot.latency * 1000, 1)
-        guild_count = len(bot_module.bot.guilds)
-        voice_count = sum(
-            1 for guild in bot_module.bot.guilds
-            if guild.voice_client and guild.voice_client.is_connected()
-        )
-        firebase_state = (
-            "🟢 initialized"
-            if getattr(bot_module.firebase_admin, "_apps", {})
-            else "🔴 not initialized"
-        )
-
-        embed = discord.Embed(
-            title="🟢 SKYNET Status",
-            color=discord.Color.green(),
-            timestamp=datetime.now(timezone.utc),
-        )
-        embed.add_field(name="🤖 Bot", value=str(bot_module.bot.user), inline=False)
-        embed.add_field(name="📡 Gateway", value=f"🟢 Online ({latency_ms} ms)", inline=True)
-        embed.add_field(name="🏠 Guilds", value=str(guild_count), inline=True)
-        embed.add_field(name="🔊 Voice", value=str(voice_count), inline=True)
-        embed.add_field(name="🔥 Firebase", value=firebase_state, inline=True)
-        embed.add_field(
-            name="📋 Local Commands",
-            value=str(len(bot_module.bot.tree.get_commands())),
-            inline=True,
-        )
-        embed.add_field(
-            name="⏰ Thailand",
-            value=datetime.now(bot_module.TZ_THAI).strftime("%H:%M:%S"),
-            inline=True,
-        )
-        embed.set_footer(text="SKYNET • /status diagnostic")
-
-        # IMPORTANT: direct initial response. No defer/followup dependency.
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        print(
-            "✅ /status handled | "
-            f"user={interaction.user} "
-            f"guild={getattr(interaction.guild, 'id', None)} "
-            f"latency={latency_ms}ms"
-        )
-    except Exception as exc:
-        print(f"❌ /status handler error: {exc!r}")
-        traceback.print_exc()
-        try:
-            if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    f"❌ /status error: `{type(exc).__name__}: {exc}`",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.followup.send(
-                    f"❌ /status error: `{type(exc).__name__}: {exc}`",
-                    ephemeral=True,
-                )
-        except Exception:
-            pass
-
-status_command = bot_module.bot.tree.get_command("status")
-if status_command is not None:
-    status_command.callback = _fast_status_callback
-    print("🩹 /status fast-response patch installed")
-else:
-    print("⚠️ /status command was not found during startup patch")
+# /status is defined in bot.py and must remain owned by bot.py.
+# Do NOT replace Command.callback here: discord.py 2.7 exposes
+# Command.callback as a read-only property. The previous runtime
+# patch attempted to assign it and caused startup to exit with:
+# AttributeError: property 'callback' of 'Command' object has no setter
+#
+# bot.py's /status only reads the local boss schedule and therefore
+# does not need a runtime callback replacement.
 
 _sync_lock = asyncio.Lock()
 _sync_complete = False
@@ -201,9 +136,11 @@ async def sync_commands_once():
 bot_module.sync_commands_once = sync_commands_once
 
 @bot_module.bot.listen("on_interaction")
-async def interaction_diagnostic(interaction: discord.Interaction):
+async def interaction_diagnostic(interaction):
     try:
-        if interaction.type != discord.InteractionType.application_command:
+        # Do not perform any await/defer/response here.
+        # This listener is diagnostic only and must never consume the interaction.
+        if interaction.type != interaction.InteractionType.application_command:
             return
         command_name = None
         try:
