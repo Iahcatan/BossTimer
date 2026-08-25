@@ -1,0 +1,50 @@
+name: Apply Gateway lifecycle patch
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch bot.py Gateway lifecycle
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+
+          path = Path("bot.py")
+          text = path.read_text(encoding="utf-8")
+
+          marker = "# ==========================================\n# 🚀 11. Run Bot Entry Point\n# =========================================="
+          idx = text.find(marker)
+          if idx < 0:
+              raise SystemExit("Gateway entry-point marker not found; refusing to modify bot.py")
+
+          replacement = '''# ==========================================\n# 🚀 11. Bot Entry Point\n# ==========================================\n# IMPORTANT:\n# bot.py is NOT a Discord Gateway lifecycle owner.\n# start.py is the single owner of bot.start()/retry/reset.\n#\n# Firebase, Dashboard, Slash Commands, Voice, TTS and background tasks\n# remain defined above and are imported by start.py.\n# Render should always start the application with: python start.py\n# ==========================================\n\nif __name__ == "__main__":\n    print("⚠️ bot.py ไม่ได้เป็น Entry Point อีกต่อไป")\n    print("➡️ กรุณาใช้: python start.py")\n'''
+
+          new_text = text[:idx] + replacement
+          if new_text == text:
+              raise SystemExit("bot.py was not changed")
+          path.write_text(new_text, encoding="utf-8")
+          print("Patched bot.py: removed Gateway retry loop and direct bot.start() entry point")
+
+      - name: Remove patch workflow and commit
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-gateway-lifecycle-patch.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bot.py .github/workflows/apply-gateway-lifecycle-patch.yml
+          git diff --cached --quiet && { echo "No changes to commit"; exit 0; }
+          git commit -m "fix: make start.py the single Discord Gateway owner"
+          git push
