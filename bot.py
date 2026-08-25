@@ -2466,73 +2466,17 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
                 print(f"❌ ส่ง Audit Log ใน boss-attendance ไม่สำเร็จ: {e}")
 
 # ==========================================
-# 🚀 11. Run Bot Entry Point
+# 🚀 11. Bot Entry Point
 # ==========================================
-async def run_bot_with_backoff(token: str):
-    """Run Discord with bounded retry and explicitly close failed HTTP sessions."""
-    backoff = 10
-    while True:
-        try:
-            print("🔌 กำลังเชื่อมต่อ Discord Gateway...")
-            await bot.start(token, reconnect=True)
-            print("🛑 Discord bot stopped normally.")
-            return
-        except discord.HTTPException as e:
-            status = getattr(e, "status", None)
-            if status == 429:
-                retry_after = getattr(e, "retry_after", 0)
-                try: retry_after = float(retry_after or 0)
-                except (TypeError, ValueError): retry_after = 0
-                delay = max(retry_after, backoff)
-                print(f"🛑 Discord 429 — รอ {delay:.0f} วินาทีก่อนเชื่อมต่อใหม่")
-            else:
-                delay = backoff
-                print(f"❌ Discord HTTP error status={status}: {e}")
-            try:
-                await bot.close()
-            except Exception as close_error:
-                print(f"⚠️ ปิด Discord HTTP session หลัง error ไม่สำเร็จ: {close_error}")
-            await asyncio.sleep(delay)
-            backoff = min(backoff * 2, 300)
-        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-            print(f"⚠️ Discord connection error: {e} — ปิด session แล้ว retry ใน {backoff} วินาที")
-            try:
-                await bot.close()
-            except Exception as close_error:
-                print(f"⚠️ ปิด Discord HTTP session ไม่สำเร็จ: {close_error}")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 300)
-        except RuntimeError as e:
-            if "Session is closed" in str(e):
-                print("⚠️ Discord session ถูกปิด — จะสร้าง session ใหม่ในรอบถัดไป")
-                try: await bot.close()
-                except Exception: pass
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 300)
-                continue
-            raise
-        except Exception as e:
-            print(f"❌ Discord startup error: {e}")
-            traceback.print_exc()
-            try: await bot.close()
-            except Exception: pass
-            raise
+# IMPORTANT:
+# bot.py is NOT a Discord Gateway lifecycle owner.
+# start.py is the single owner of bot.start()/retry/reset.
+#
+# Firebase, Dashboard, Slash Commands, Voice, TTS and background tasks
+# remain defined above and are imported by start.py.
+# Render should always start the application with: python start.py
+# ==========================================
 
 if __name__ == "__main__":
-    # Render needs the HTTP listener immediately; start it exactly once.
-    keep_alive()
-    TOKEN = os.environ.get("DISCORD_TOKEN")
-    if TOKEN:
-        try:
-            asyncio.run(run_bot_with_backoff(TOKEN))
-        except KeyboardInterrupt:
-            print("🛑 หยุดบอทแล้ว")
-        finally:
-            # Only close the Discord aiohttp session when the process is really shutting down.
-            try:
-                if not bot.is_closed():
-                    asyncio.run(bot.close())
-            except Exception as e:
-                print(f"⚠️ ปิด Discord client ไม่สำเร็จ: {e}")
-    else:
-        print("⚠️ กรุณาตั้งค่า DISCORD_TOKEN ใน Environment Variable หรือระบุ Token สำหรับรันบอท")
+    print("⚠️ bot.py ไม่ได้เป็น Entry Point อีกต่อไป")
+    print("➡️ กรุณาใช้: python start.py")
