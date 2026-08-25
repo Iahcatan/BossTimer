@@ -1052,17 +1052,48 @@ async def save_custom_bosses_to_github():
 
 async def load_custom_bosses():
     custom_data = None
-    try: custom_data = await asyncio.to_thread(db.reference('custom_bosses').get)
-    except Exception: pass
-    if not custom_data: custom_data = get_db_value("custom_bosses", None)
-    if custom_data:
-        for boss_name, data in custom_data.items():
-            BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
-            BOSS_CD_TEXT[boss_name] = data["cd_text"]
-            ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
-            ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
-            if boss_name not in BOSS_PRONUNCIATION:
-                BOSS_PRONUNCIATION[boss_name] = boss_name
+    try:
+        custom_data = await asyncio.to_thread(db.reference("custom_bosses").get)
+    except Exception as e:
+        print(f"⚠️ อ่าน custom_bosses จาก Firebase ไม่สำเร็จ: {e}")
+
+    if not custom_data:
+        custom_data = get_db_value("custom_bosses", None)
+
+    if not isinstance(custom_data, dict):
+        if custom_data is not None:
+            print("⚠️ custom_bosses ไม่ใช่ object — ข้ามข้อมูลเก่า/placeholder")
+        return
+
+    for boss_name, data in custom_data.items():
+        if not isinstance(data, dict):
+            print(f"⚠️ ข้าม custom_bosses[{boss_name!r}] เพราะไม่ใช่ object")
+            continue
+
+        total_seconds = data.get("total_seconds")
+        if not isinstance(total_seconds, (int, float)) or total_seconds <= 0:
+            print(f"⚠️ ข้าม custom boss {boss_name!r}: total_seconds ไม่ถูกต้อง")
+            continue
+
+        notice_seconds = data.get("notice_seconds", 300)
+        if not isinstance(notice_seconds, (int, float)) or notice_seconds < 0:
+            notice_seconds = 300
+
+        cd_text = data.get("cd_text")
+        if not isinstance(cd_text, str) or not cd_text.strip():
+            cd_text = f"{int(total_seconds // 60)} นาที"
+
+        notice_text = data.get("notice_text")
+        if not isinstance(notice_text, str) or not notice_text.strip():
+            notice_text = f"{int(notice_seconds // 60)} นาที"
+
+        boss_name = str(boss_name)
+        BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=float(total_seconds))
+        BOSS_CD_TEXT[boss_name] = cd_text
+        ADVANCE_NOTICE_SECONDS[boss_name] = int(notice_seconds)
+        ADVANCE_NOTICE_TEXT[boss_name] = notice_text
+        if boss_name not in BOSS_PRONUNCIATION:
+            BOSS_PRONUNCIATION[boss_name] = boss_name
 
 # ==========================================
 # 🤖 6. Discord Bot Setup & Voice Helper
