@@ -6,11 +6,20 @@ from datetime import datetime, timezone
 import discord
 import bot as bot_module
 
-COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "0.5"))
+# ============================================================
+# SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
+# ============================================================
+# start.py owns command synchronization only.
+# bot.py remains the owner of Firebase, Boss Timer, /kill,
+# /setvoice, /status, TTS, Voice, Dashboard and background tasks.
 
-# IMPORTANT: bot.py's setup_hook performs a global tree.sync().
-# That is intentionally NOT called here because setup_hook runs before
-# Gateway READY. We use a minimal hook and sync per-guild after READY.
+COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
+
+# ------------------------------------------------------------
+# Preserve persistent bot setup without doing any Gateway work.
+# discord.py runs setup_hook BEFORE READY, so never wait_until_ready()
+# or sync guild commands from setup_hook.
+# ------------------------------------------------------------
 async def patched_setup_hook():
     try:
         if hasattr(bot_module, "QuickActionsView"):
@@ -21,7 +30,9 @@ async def patched_setup_hook():
 
 bot_module.bot.setup_hook = patched_setup_hook
 
-# Protect startup from old/invalid custom_bosses records.
+# ------------------------------------------------------------
+# Protect startup from malformed legacy custom_bosses data.
+# ------------------------------------------------------------
 _original_load_custom_bosses = getattr(bot_module, "load_custom_bosses", None)
 if _original_load_custom_bosses is not None:
     async def safe_load_custom_bosses():
@@ -34,6 +45,81 @@ if _original_load_custom_bosses is not None:
             traceback.print_exc()
     bot_module.load_custom_bosses = safe_load_custom_bosses
 
+# ------------------------------------------------------------
+# Fast /status runtime patch.
+#
+# bot.py already contains /status. We replace only its callback at
+# runtime so the first Discord response is a direct ACK rather than
+# waiting on Firebase, locks, voice or any other work.
+# ------------------------------------------------------------
+async def _fast_status_callback(interaction: discord.Interaction):
+    try:
+        latency_ms = round(bot_module.bot.latency * 1000, 1)
+        guild_count = len(bot_module.bot.guilds)
+        voice_count = sum(
+            1 for guild in bot_module.bot.guilds
+            if guild.voice_client and guild.voice_client.is_connected()
+        )
+        firebase_state = (
+            "🟢 initialized"
+            if getattr(bot_module.firebase_admin, "_apps", {})
+            else "🔴 not initialized"
+        )
+
+        embed = discord.Embed(
+            title="🟢 SKYNET Status",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="🤖 Bot", value=str(bot_module.bot.user), inline=False)
+        embed.add_field(name="📡 Gateway", value=f"🟢 Online ({latency_ms} ms)", inline=True)
+        embed.add_field(name="🏠 Guilds", value=str(guild_count), inline=True)
+        embed.add_field(name="🔊 Voice", value=str(voice_count), inline=True)
+        embed.add_field(name="🔥 Firebase", value=firebase_state, inline=True)
+        embed.add_field(
+            name="📋 Local Commands",
+            value=str(len(bot_module.bot.tree.get_commands())),
+            inline=True,
+        )
+        embed.add_field(
+            name="⏰ Thailand",
+            value=datetime.now(bot_module.TZ_THAI).strftime("%H:%M:%S"),
+            inline=True,
+        )
+        embed.set_footer(text="SKYNET • /status diagnostic")
+
+        # IMPORTANT: direct initial response. No defer/followup dependency.
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        print(
+            "✅ /status handled | "
+            f"user={interaction.user} "
+            f"guild={getattr(interaction.guild, 'id', None)} "
+            f"latency={latency_ms}ms"
+        )
+    except Exception as exc:
+        print(f"❌ /status handler error: {exc!r}")
+        traceback.print_exc()
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"❌ /status error: `{type(exc).__name__}: {exc}`",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    f"❌ /status error: `{type(exc).__name__}: {exc}`",
+                    ephemeral=True,
+                )
+        except Exception:
+            pass
+
+status_command = bot_module.bot.tree.get_command("status")
+if status_command is not None:
+    status_command.callback = _fast_status_callback
+    print("🩹 /status fast-response patch installed")
+else:
+    print("⚠️ /status command was not found during startup patch")
+
 _sync_lock = asyncio.Lock()
 _sync_complete = False
 
@@ -41,9 +127,11 @@ async def sync_commands_once():
     global _sync_complete
     if _sync_complete:
         return
+
     async with _sync_lock:
         if _sync_complete:
             return
+
         await bot_module.bot.wait_until_ready()
         if COMMAND_SYNC_DELAY > 0:
             await asyncio.sleep(COMMAND_SYNC_DELAY)
@@ -82,11 +170,20 @@ async def sync_commands_once():
                 bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
                 remote_names = sorted(command.qualified_name for command in synced)
-                print(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
+                print(
+                    f"✅ Guild Sync: {guild.name} ({guild.id}) -> "
+                    f"{len(remote_names)} commands"
+                )
                 print("🔎 Remote Guild Commands: " + ", ".join(remote_names))
+
                 missing_remote = sorted(required - set(remote_names))
                 if missing_remote:
-                    print("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
+                    print(
+                        "❌ Required commands missing on "
+                        + guild.name
+                        + ": "
+                        + ", ".join(missing_remote)
+                    )
                 else:
                     print("🟢 Required commands verified: /status /kill /setvoice")
                 successful += 1
@@ -119,10 +216,12 @@ async def interaction_diagnostic(interaction: discord.Interaction):
                 command_name = interaction.data.get("name")
             except Exception:
                 command_name = "unknown"
-        print("📥 INTERACTION RECEIVED | "
-              f"command={command_name!r} user={interaction.user} "
-              f"guild={getattr(interaction.guild, 'id', None)} "
-              f"channel={getattr(interaction, 'channel_id', None)}")
+        print(
+            "📥 INTERACTION RECEIVED | "
+            f"command={command_name!r} user={interaction.user} "
+            f"guild={getattr(interaction.guild, 'id', None)} "
+            f"channel={getattr(interaction, 'channel_id', None)}"
+        )
     except Exception as exc:
         print(f"⚠️ interaction diagnostic failed: {exc!r}")
 
