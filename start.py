@@ -10,17 +10,23 @@ import bot as bot_module
 # ============================================================
 # SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
 # ============================================================
-# This file is the single owner of Slash Command synchronization.
-# bot.py remains the owner of Firebase, Boss Timer, /kill, /setvoice,
-# TTS, Voice, Dashboard, background tasks and command implementations.
+# start.py is the single startup entry point on Render.
+# bot.py remains the owner of Firebase, Boss Timer, TTS, Voice,
+# Dashboard and the existing command callbacks.
+#
+# IMPORTANT:
+# Discord global application-command sync can take a long time to
+# propagate. For this project we deliberately sync to every guild
+# directly after the Gateway is ready.
 
 COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
+
 # ------------------------------------------------------------
-# /status diagnostic command
+# /status
 # ------------------------------------------------------------
-# bot.py currently has no /status command. Register it here so the
-# command always has a real callback and ACKs immediately.
+# Register a local diagnostic command only when bot.py does not
+# already provide one.
 if bot_module.bot.tree.get_command("status") is None:
 
     @bot_module.bot.tree.command(
@@ -28,6 +34,7 @@ if bot_module.bot.tree.get_command("status") is None:
         description="ตรวจสอบสถานะ SKYNET Bot, Discord Gateway และ Firebase",
     )
     async def status_command(interaction: discord.Interaction):
+        # ACK immediately. Never put Firebase/Voice work before this.
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception as exc:
@@ -43,6 +50,7 @@ if bot_module.bot.tree.get_command("status") is None:
                 for guild in bot_module.bot.guilds
                 if guild.voice_client and guild.voice_client.is_connected()
             )
+
             firebase_state = (
                 "🟢 initialized"
                 if getattr(bot_module.firebase_admin, "_apps", {})
@@ -91,9 +99,12 @@ if bot_module.bot.tree.get_command("status") is None:
 
 
 # ------------------------------------------------------------
-# Protect startup from malformed legacy custom_bosses
+# Safe legacy custom_bosses loader
 # ------------------------------------------------------------
+# Older Firebase data may contain true/false/string values under
+# custom_bosses. The original loader assumes every child is a dict.
 _original_load_custom_bosses = getattr(bot_module, "load_custom_bosses", None)
+
 if _original_load_custom_bosses is not None:
 
     async def safe_load_custom_bosses():
@@ -112,10 +123,8 @@ if _original_load_custom_bosses is not None:
 
 
 # ------------------------------------------------------------
-# Replace bot.py setup_hook
+# Prevent the old global sync from racing with guild sync
 # ------------------------------------------------------------
-# bot.py previously performed a global sync in setup_hook. start.py
-# now owns command synchronization, so the old sync cannot race with it.
 async def patched_setup_hook():
     try:
         bot_module.bot.add_view(bot_module.QuickActionsView())
@@ -162,10 +171,13 @@ async def sync_commands_once():
             return
 
         successful = 0
+
         for guild in list(bot_module.bot.guilds):
             try:
-                # Delete the old guild command set, then copy the current
-                # command tree and sync it immediately to this guild.
+                # IMPORTANT:
+                # clear_commands(guild=...) only clears the local guild tree.
+                # copy_global_to() then copies the current local/global command
+                # definitions, including /status, /kill and /setvoice.
                 bot_module.bot.tree.clear_commands(guild=guild)
                 bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
@@ -199,6 +211,7 @@ async def sync_commands_once():
                     )
 
                 successful += 1
+
             except Exception as exc:
                 print(
                     f"❌ Guild Sync failed: {guild.name} ({guild.id}): {exc!r}"
