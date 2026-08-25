@@ -4,6 +4,7 @@ import sys
 import traceback
 import random
 import aiohttp
+import discord
 
 # Render normally runs Python with stdout connected to a log pipe.
 try:
@@ -182,9 +183,8 @@ async def startup_heartbeat():
 
 async def _reset_client_after_failed_start():
     """
-    discord.py 2.7 Client.close() closes the HTTP session and marks the
-    client closed. Client.clear() resets that state so the same Bot instance
-    can safely be started again.
+    discord.py 2.7 Client.clear() re-opens a closed client and clears its
+    internal state, allowing the same Bot instance to be started again.
     """
     try:
         if not bot_module.bot.is_closed():
