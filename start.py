@@ -7,22 +7,73 @@ import discord
 import bot as bot_module
 
 # ============================================================
-# SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
+# SKYNET STARTUP
 # ============================================================
 # Render MUST run: python start.py
-# bot.py remains the owner of Firebase, Dashboard, Boss Timer,
-# TTS, Voice and the existing slash-command callbacks.
+# bot.py remains the owner of Firebase, Boss Timer, /kill,
+# /setvoice, /status, TTS, Voice and Dashboard.
 #
-# This file deliberately performs GUILD command sync after Gateway
-# login. Guild sync is immediate and avoids Discord's global-command
-# propagation delay.
+# This file only adds a deterministic Discord guild-command sync and
+# diagnostics. It MUST NOT replace bot.py's setup_hook because doing so
+# can silently remove bot.py startup registration.
 
 COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
 
 # ------------------------------------------------------------
+# Preserve bot.py setup_hook
+# ------------------------------------------------------------
+# Previous versions replaced bot.setup_hook entirely. That can bypass
+# bot.py's own startup work. Keep the original hook and wrap it instead.
+_original_setup_hook = getattr(bot_module.bot, "setup_hook", None)
+
+
+async def patched_setup_hook():
+    if _original_setup_hook is not None:
+        try:
+            await _original_setup_hook()
+        except Exception as exc:
+            print(f"❌ bot.py setup_hook failed: {exc!r}")
+            traceback.print_exc()
+            # Continue so the bot can still reach on_ready and the
+            # deterministic guild sync can repair command registration.
+
+    try:
+        # Persistent Quick Action buttons.
+        bot_module.bot.add_view(bot_module.QuickActionsView())
+        print("✅ QuickActionsView registered by start.py")
+    except Exception as exc:
+        print(f"⚠️ QuickActionsView registration failed: {exc!r}")
+
+
+bot_module.bot.setup_hook = patched_setup_hook
+
+
+# ------------------------------------------------------------
+# Runtime protection for legacy custom_bosses data
+# ------------------------------------------------------------
+_original_load_custom_bosses = getattr(bot_module, "load_custom_bosses", None)
+if _original_load_custom_bosses is not None:
+
+    async def safe_load_custom_bosses():
+        try:
+            await _original_load_custom_bosses()
+        except (TypeError, AttributeError, KeyError, ValueError) as exc:
+            print(
+                "⚠️ custom_bosses มีข้อมูลเก่าหรือรูปแบบไม่ถูกต้อง "
+                f"({type(exc).__name__}: {exc}) — ข้ามข้อมูลที่ผิดรูปแบบ"
+            )
+        except Exception as exc:
+            print(f"⚠️ load_custom_bosses failed safely: {exc!r}")
+            traceback.print_exc()
+
+    bot_module.load_custom_bosses = safe_load_custom_bosses
+
+
+# ------------------------------------------------------------
 # /status diagnostic command
 # ------------------------------------------------------------
+# bot.py already owns /status. Only create a fallback if it is absent.
 if bot_module.bot.tree.get_command("status") is None:
 
     @bot_module.bot.tree.command(
@@ -30,7 +81,6 @@ if bot_module.bot.tree.get_command("status") is None:
         description="ตรวจสอบสถานะ SKYNET Bot, Discord Gateway และ Firebase",
     )
     async def status_command(interaction: discord.Interaction):
-        # ACK first. Never perform Firebase/Voice I/O before the ACK.
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception as exc:
@@ -73,14 +123,7 @@ if bot_module.bot.tree.get_command("status") is None:
                 inline=True,
             )
             embed.set_footer(text="SKYNET • /status diagnostic")
-
             await interaction.followup.send(embed=embed, ephemeral=True)
-            print(
-                "✅ /status handled | "
-                f"user={interaction.user} "
-                f"guild={getattr(interaction.guild, 'id', None)} "
-                f"latency={latency_ms}ms"
-            )
         except Exception as exc:
             print(f"❌ /status handler error: {exc!r}")
             traceback.print_exc()
@@ -91,44 +134,6 @@ if bot_module.bot.tree.get_command("status") is None:
                 )
             except Exception:
                 pass
-
-
-# ------------------------------------------------------------
-# Runtime protection for legacy Firebase custom_bosses data
-# ------------------------------------------------------------
-# Older databases may contain custom_bosses=true, false, "", or other
-# non-object values. bot.py's historical loader expected every child to
-# be a dict. Protect startup without touching any other Firebase data.
-_original_load_custom_bosses = getattr(bot_module, "load_custom_bosses", None)
-if _original_load_custom_bosses is not None:
-
-    async def safe_load_custom_bosses():
-        try:
-            await _original_load_custom_bosses()
-        except (TypeError, AttributeError, KeyError, ValueError) as exc:
-            print(
-                "⚠️ custom_bosses มีข้อมูลเก่าหรือรูปแบบไม่ถูกต้อง "
-                f"({type(exc).__name__}: {exc}) — ข้ามข้อมูลที่ผิดรูปแบบ"
-            )
-        except Exception as exc:
-            print(f"⚠️ load_custom_bosses failed safely: {exc!r}")
-            traceback.print_exc()
-
-    bot_module.load_custom_bosses = safe_load_custom_bosses
-
-
-# ------------------------------------------------------------
-# Preserve Quick Action persistent view
-# ------------------------------------------------------------
-async def patched_setup_hook():
-    try:
-        bot_module.bot.add_view(bot_module.QuickActionsView())
-        print("✅ QuickActionsView registered")
-    except Exception as exc:
-        print(f"⚠️ QuickActionsView registration failed: {exc!r}")
-
-
-bot_module.bot.setup_hook = patched_setup_hook
 
 
 # ------------------------------------------------------------
@@ -161,6 +166,11 @@ async def sync_commands_once():
         print(f"📋 Local commands: {len(command_names)}")
         print("📋 " + ", ".join(command_names))
 
+        required = {"status", "kill", "setvoice"}
+        missing_local = sorted(required - set(command_names))
+        if missing_local:
+            print("❌ Required commands missing locally: " + ", ".join(missing_local))
+
         if not bot_module.bot.guilds:
             print("⚠️ Bot ยังไม่เห็น Guild ใดใน Gateway session")
             return
@@ -168,8 +178,7 @@ async def sync_commands_once():
         successful = 0
         for guild in list(bot_module.bot.guilds):
             try:
-                # Make the guild command set exactly match the bot's current
-                # command tree. This fixes stale/old slash-command registrations.
+                # Make the guild command set exactly match the current command tree.
                 bot_module.bot.tree.clear_commands(guild=guild)
                 bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
@@ -179,26 +188,18 @@ async def sync_commands_once():
                     f"{len(synced)} commands"
                 )
 
-                try:
-                    remote = await bot_module.bot.tree.fetch_commands(guild=guild)
-                    remote_names = sorted(command.qualified_name for command in remote)
-                    print("🔎 Remote Guild Commands: " + ", ".join(remote_names))
-                    required = {"status", "kill", "setvoice"}
-                    missing = sorted(required - set(remote_names))
-                    if missing:
-                        print(
-                            f"⚠️ Required commands missing on {guild.name}: "
-                            + ", ".join(missing)
-                        )
-                    else:
-                        print(
-                            f"🟢 Required commands verified on {guild.name}: "
-                            "/status /kill /setvoice"
-                        )
-                except Exception as verify_exc:
+                remote_names = sorted(command.qualified_name for command in synced)
+                print("🔎 Remote Guild Commands: " + ", ".join(remote_names))
+                missing_remote = sorted(required - set(remote_names))
+                if missing_remote:
                     print(
-                        f"⚠️ Guild command verification failed for "
-                        f"{guild.name}: {verify_exc!r}"
+                        f"❌ Required commands missing on {guild.name}: "
+                        + ", ".join(missing_remote)
+                    )
+                else:
+                    print(
+                        f"🟢 Required commands verified on {guild.name}: "
+                        "/status /kill /setvoice"
                     )
 
                 successful += 1
