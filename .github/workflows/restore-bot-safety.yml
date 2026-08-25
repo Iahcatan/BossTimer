@@ -9,7 +9,6 @@ permissions:
 
 jobs:
   restore:
-    # Run only for the accidental replacement commit created by the patcher.
     if: ${{ github.event.head_commit.message == 'fix: harden custom boss loading against malformed Firebase values' }}
     runs-on: ubuntu-latest
     steps:
@@ -18,7 +17,6 @@ jobs:
         with:
           fetch-depth: 2
           token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Restore bot.py from previous commit
         shell: bash
         run: |
