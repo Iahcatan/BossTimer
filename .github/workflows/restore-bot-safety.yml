@@ -1,4 +1,4 @@
-name: Restore bot.py after accidental replacement
+name: Restore bot.py from known-good commit
 
 on:
   push:
@@ -9,21 +9,24 @@ permissions:
 
 jobs:
   restore:
-    if: ${{ github.event.head_commit.message == 'fix: harden custom boss loading against malformed Firebase values' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Restore bot.py from previous commit
+      - name: Restore bot.py from known-good commit
         shell: bash
         run: |
           set -euo pipefail
-          git checkout HEAD^ -- bot.py
+          if ! grep -q 'NOTE: The remainder of bot.py is unchanged' bot.py; then
+            echo 'bot.py is already non-truncated; nothing to restore.'
+            exit 0
+          fi
+          git checkout 92808a78b009c0f6d7f028a05268067b6abc11b6 -- bot.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add bot.py
-          git commit -m 'restore: bot.py after accidental replacement'
+          git commit -m 'restore: bot.py from known-good commit'
           git push
