@@ -1,0 +1,73 @@
+--- a/bot.py
++++ b/bot.py
+@@
+ async def load_custom_bosses():
+     custom_data = None
+     try: custom_data = await asyncio.to_thread(db.reference('custom_bosses').get)
+     except Exception: pass
+     if not custom_data: custom_data = get_db_value("custom_bosses", None)
+-    if custom_data:
+-        for boss_name, data in custom_data.items():
+-            BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
+-            BOSS_CD_TEXT[boss_name] = data["cd_text"]
+-            ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
+-            ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
+-            if boss_name not in BOSS_PRONUNCIATION:
+-                BOSS_PRONUNCIATION[boss_name] = boss_name
++    if not isinstance(custom_data, dict):
++        return
++
++    for boss_name, data in custom_data.items():
++        # Ignore legacy placeholder values such as true/false/"".
++        if not isinstance(data, dict):
++            print(f"⚠️ ข้าม custom_bosses[{boss_name!r}] เพราะไม่ใช่ object")
++            continue
++
++        total_seconds = data.get("total_seconds")
++        cd_text = data.get("cd_text")
++        notice_seconds = data.get("notice_seconds")
++        notice_text = data.get("notice_text")
++
++        if not isinstance(total_seconds, (int, float)):
++            print(f"⚠️ ข้าม custom boss {boss_name!r}: total_seconds ไม่ถูกต้อง")
++            continue
++        if not isinstance(notice_seconds, (int, float)):
++            notice_seconds = 300
++        if not isinstance(cd_text, str) or not cd_text.strip():
++            cd_text = f"{int(total_seconds // 60)} นาที"
++        if not isinstance(notice_text, str) or not notice_text.strip():
++            notice_text = f"{int(notice_seconds // 60)} นาที"
++
++        BOSS_RESPAWN_TIMES[str(boss_name)] = timedelta(seconds=float(total_seconds))
++        BOSS_CD_TEXT[str(boss_name)] = cd_text
++        ADVANCE_NOTICE_SECONDS[str(boss_name)] = int(notice_seconds)
++        ADVANCE_NOTICE_TEXT[str(boss_name)] = notice_text
++        if str(boss_name) not in BOSS_PRONUNCIATION:
++            BOSS_PRONUNCIATION[str(boss_name)] = str(boss_name)
+@@
+ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None):
+-    # Acknowledge immediately.
++    # Acknowledge immediately. Never wait for Firebase before the ACK.
+     try:
+         await interaction.response.defer()
+     except Exception as e:
+         print(f"❌ /kill defer failed: {e}")
+         return
+@@
+-        await interaction.followup.send(embed=embed)
++        # The user-facing response is deliberately sent before Firebase/local I/O.
++        await interaction.followup.send(embed=embed)
+@@
+ async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
+-    # Acknowledge immediately. Never wait for Firebase/Discord Voice before responding.
++    # Acknowledge immediately. Never wait for Firebase/Discord Voice before responding.
+     try:
+         await interaction.response.defer(ephemeral=True)
+     except Exception as e:
+         print(f"❌ /setvoice defer failed: {e}")
+         return
+@@
+-        # Respond first so Discord never reports "The application did not respond".
++        # Respond first so Discord never reports "The application did not respond".
+         await interaction.followup.send(
+*** End Patch
