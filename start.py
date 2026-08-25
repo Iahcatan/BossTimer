@@ -183,8 +183,10 @@ async def startup_heartbeat():
 
 async def _reset_client_after_failed_start():
     """
-    discord.py 2.7 Client.clear() re-opens a closed client and clears its
-    internal state, allowing the same Bot instance to be started again.
+    Reset a failed discord.py 2.7 client before another bot.start().
+
+    This function is ONLY called after bot.start() has failed. Normal
+    Gateway reconnect/resume remains owned by discord.py itself.
     """
     try:
         if not bot_module.bot.is_closed():
@@ -202,11 +204,11 @@ async def _reset_client_after_failed_start():
 
 async def patched_run_bot_with_backoff(token: str):
     """
-    Gateway lifecycle fix.
+    SINGLE Discord Gateway lifecycle owner.
 
-    - Let discord.py handle normal Gateway reconnect/resume itself.
-    - Retry here only when bot.start/login fails.
-    - Never close() and start() the same Client without clear().
+    bot.py must not start its own Gateway/retry loop. This function is the
+    only application-level retry loop. discord.py handles normal reconnect
+    and resume while bot.start(reconnect=True) is alive.
     """
     backoff = 30.0
     max_backoff = 300.0
@@ -268,9 +270,9 @@ async def patched_run_bot_with_backoff(token: str):
             backoff = min(backoff * 2.0, max_backoff)
 
 
-# Replace bot.py's old retry loop at runtime.
-# This keeps every command, Firebase function, Voice/TTS function and
-# Dashboard route already registered by bot.py.
+# start.py is the single Gateway lifecycle owner.
+# This runtime replacement preserves every Firebase, Dashboard, command,
+# Voice and TTS function already registered by bot.py.
 bot_module.run_bot_with_backoff = patched_run_bot_with_backoff
 
 
@@ -289,7 +291,6 @@ async def main():
 
     log("🔑 พบ DISCORD_TOKEN")
     log("🔌 กำลังเริ่ม Discord Bot...")
-    log("🔌 กำลังเชื่อมต่อ Discord Gateway...")
 
     heartbeat_task = asyncio.create_task(startup_heartbeat())
     try:
