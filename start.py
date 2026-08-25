@@ -3,6 +3,16 @@ import os
 import sys
 import traceback
 
+# Render normally runs Python with stdout connected to a log pipe.
+# Reconfigure BEFORE importing bot.py so even Firebase/import/on_ready logs
+# are visible immediately in Render instead of waiting for the buffer to fill.
+try:
+    sys.stdout.reconfigure(line_buffering=True, write_through=True)
+    sys.stderr.reconfigure(line_buffering=True, write_through=True)
+except Exception:
+    pass
+os.environ.setdefault("PYTHONUNBUFFERED", "1")
+
 import bot as bot_module
 
 # ============================================================
@@ -11,14 +21,6 @@ import bot as bot_module
 # start.py owns command synchronization only.
 # bot.py remains the owner of Firebase, Boss Timer, /kill,
 # /setvoice, /status, TTS, Voice, Dashboard and background tasks.
-
-# Render may buffer stdout. Force line-buffered output so startup/
-# Discord diagnostics are visible immediately in the Render log.
-try:
-    sys.stdout.reconfigure(line_buffering=True)
-    sys.stderr.reconfigure(line_buffering=True)
-except Exception:
-    pass
 
 COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
@@ -63,12 +65,9 @@ if _original_load_custom_bosses is not None:
     bot_module.load_custom_bosses = safe_load_custom_bosses
 
 # ------------------------------------------------------------
-# IMPORTANT /status note
+# /status is defined in bot.py. Never replace Command.callback.
+# discord.py 2.7 exposes Command.callback as read-only.
 # ------------------------------------------------------------
-# /status is defined in bot.py and must remain owned by bot.py.
-# Do NOT replace Command.callback here: discord.py 2.7 exposes
-# Command.callback as a read-only property.
-
 _sync_lock = asyncio.Lock()
 _sync_complete = False
 
@@ -82,8 +81,6 @@ async def sync_commands_once():
         if _sync_complete:
             return
 
-        # on_ready already means the Gateway is ready. This wait is kept
-        # as a defensive guard but should return immediately.
         await bot_module.bot.wait_until_ready()
         if COMMAND_SYNC_DELAY > 0:
             await asyncio.sleep(COMMAND_SYNC_DELAY)
@@ -110,10 +107,7 @@ async def sync_commands_once():
             wanted_id = int(configured_guild_id)
             guilds = [g for g in guilds if g.id == wanted_id]
             if not guilds:
-                log(
-                    f"⚠️ DISCORD_GUILD_ID={wanted_id} not found in "
-                    "Gateway guild cache"
-                )
+                log(f"⚠️ DISCORD_GUILD_ID={wanted_id} not found in Gateway guild cache")
 
         if not guilds:
             log("❌ ไม่มี Guild สำหรับ sync คำสั่ง")
@@ -126,41 +120,24 @@ async def sync_commands_once():
                 bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
                 remote_names = sorted(command.qualified_name for command in synced)
-                log(
-                    f"✅ Guild Sync: {guild.name} ({guild.id}) -> "
-                    f"{len(remote_names)} commands"
-                )
+                log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
                 log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
 
                 missing_remote = sorted(required - set(remote_names))
                 if missing_remote:
-                    log(
-                        "❌ Required commands missing on "
-                        + guild.name
-                        + ": "
-                        + ", ".join(missing_remote)
-                    )
+                    log("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
                 else:
                     log("🟢 Required commands verified: /status /kill /setvoice")
                 successful += 1
             except Exception as exc:
-                log(
-                    f"❌ Guild Sync failed: {guild.name} ({guild.id}): "
-                    f"{exc!r}"
-                )
+                log(f"❌ Guild Sync failed: {guild.name} ({guild.id}): {exc!r}")
                 traceback.print_exc()
 
         if successful == len(guilds):
             _sync_complete = True
-            log(
-                f"✅ DISCORD GUILD COMMAND SYNC COMPLETE "
-                f"({successful}/{len(guilds)} guilds)"
-            )
+            log(f"✅ DISCORD GUILD COMMAND SYNC COMPLETE ({successful}/{len(guilds)} guilds)")
         else:
-            log(
-                f"⚠️ DISCORD GUILD COMMAND SYNC PARTIAL "
-                f"({successful}/{len(guilds)} guilds)"
-            )
+            log(f"⚠️ DISCORD GUILD COMMAND SYNC PARTIAL ({successful}/{len(guilds)} guilds)")
         log("=" * 60)
 
 
@@ -169,24 +146,21 @@ bot_module.sync_commands_once = sync_commands_once
 
 @bot_module.bot.listen("on_interaction")
 async def interaction_diagnostic(interaction):
-    """Diagnostic-only listener. It never acknowledges an interaction."""
+    """Diagnostic only: NEVER acknowledge/defer the interaction here."""
     try:
         if interaction.type != interaction.InteractionType.application_command:
             return
-
         command_name = None
         try:
             if interaction.command is not None:
                 command_name = interaction.command.qualified_name
         except Exception:
             pass
-
         if not command_name:
             try:
                 command_name = interaction.data.get("name")
             except Exception:
                 command_name = "unknown"
-
         log(
             "📥 INTERACTION RECEIVED | "
             f"command={command_name!r} user={interaction.user} "
@@ -208,16 +182,14 @@ async def startup_command_sync():
 
 
 async def startup_heartbeat():
-    """Print a low-frequency status so Render logs prove the Bot is alive."""
     while True:
         await asyncio.sleep(30)
         try:
-            user = bot_module.bot.user
             log(
                 "💓 SKYNET HEARTBEAT | "
                 f"ready={bot_module.bot.is_ready()} "
                 f"closed={bot_module.bot.is_closed()} "
-                f"user={user} "
+                f"user={bot_module.bot.user} "
                 f"guilds={len(bot_module.bot.guilds)}"
             )
         except asyncio.CancelledError:
@@ -232,13 +204,8 @@ async def main():
     log("=" * 60)
     log("🌐 Starting web server...")
 
-    try:
-        bot_module.keep_alive()
-        log("🌐 Web server startup requested")
-    except Exception as exc:
-        log(f"❌ keep_alive() failed: {exc!r}")
-        traceback.print_exc()
-        raise
+    bot_module.keep_alive()
+    log("🌐 Web server startup requested")
 
     token = os.environ.get("DISCORD_TOKEN", "").strip()
     if not token:
