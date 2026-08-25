@@ -2,10 +2,10 @@ import asyncio
 import os
 import sys
 import traceback
+import random
+import aiohttp
 
 # Render normally runs Python with stdout connected to a log pipe.
-# Reconfigure BEFORE importing bot.py so even Firebase/import/on_ready logs
-# are visible immediately in Render instead of waiting for the buffer to fill.
 try:
     sys.stdout.reconfigure(line_buffering=True, write_through=True)
     sys.stderr.reconfigure(line_buffering=True, write_through=True)
@@ -15,13 +15,6 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-# ============================================================
-# SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
-# ============================================================
-# start.py owns command synchronization only.
-# bot.py remains the owner of Firebase, Boss Timer, /kill,
-# /setvoice, /status, TTS, Voice, Dashboard and background tasks.
-
 COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
 
@@ -29,11 +22,6 @@ def log(message: str):
     print(message, flush=True)
 
 
-# ------------------------------------------------------------
-# Preserve persistent bot setup without doing any Gateway work.
-# discord.py runs setup_hook BEFORE READY, so never wait_until_ready()
-# or sync guild commands from setup_hook.
-# ------------------------------------------------------------
 async def patched_setup_hook():
     try:
         if hasattr(bot_module, "QuickActionsView"):
@@ -45,9 +33,7 @@ async def patched_setup_hook():
 
 bot_module.bot.setup_hook = patched_setup_hook
 
-# ------------------------------------------------------------
-# Protect startup from malformed legacy custom_bosses data.
-# ------------------------------------------------------------
+
 _original_load_custom_bosses = getattr(bot_module, "load_custom_bosses", None)
 if _original_load_custom_bosses is not None:
     async def safe_load_custom_bosses():
@@ -64,10 +50,7 @@ if _original_load_custom_bosses is not None:
 
     bot_module.load_custom_bosses = safe_load_custom_bosses
 
-# ------------------------------------------------------------
-# /status is defined in bot.py. Never replace Command.callback.
-# discord.py 2.7 exposes Command.callback as read-only.
-# ------------------------------------------------------------
+
 _sync_lock = asyncio.Lock()
 _sync_complete = False
 
@@ -146,7 +129,6 @@ bot_module.sync_commands_once = sync_commands_once
 
 @bot_module.bot.listen("on_interaction")
 async def interaction_diagnostic(interaction):
-    """Diagnostic only: NEVER acknowledge/defer the interaction here."""
     try:
         if interaction.type != interaction.InteractionType.application_command:
             return
@@ -196,6 +178,100 @@ async def startup_heartbeat():
             raise
         except Exception as exc:
             log(f"⚠️ heartbeat failed: {exc!r}")
+
+
+async def _reset_client_after_failed_start():
+    """
+    discord.py 2.7 Client.close() closes the HTTP session and marks the
+    client closed. Client.clear() resets that state so the same Bot instance
+    can safely be started again.
+    """
+    try:
+        if not bot_module.bot.is_closed():
+            await bot_module.bot.close()
+    except Exception as exc:
+        log(f"⚠️ ปิด Discord client หลัง connection failure ไม่สำเร็จ: {exc!r}")
+
+    try:
+        bot_module.bot.clear()
+        log("♻️ Discord client state/session ถูก reset ด้วย bot.clear()")
+    except Exception as exc:
+        log(f"❌ reset Discord client ด้วย bot.clear() ไม่สำเร็จ: {exc!r}")
+        raise
+
+
+async def patched_run_bot_with_backoff(token: str):
+    """
+    Gateway lifecycle fix.
+
+    - Let discord.py handle normal Gateway reconnect/resume itself.
+    - Retry here only when bot.start/login fails.
+    - Never close() and start() the same Client without clear().
+    """
+    backoff = 30.0
+    max_backoff = 300.0
+
+    while True:
+        try:
+            log("🔌 กำลังเชื่อมต่อ Discord Gateway...")
+            await bot_module.bot.start(token, reconnect=True)
+            log("🛑 Discord bot stopped normally.")
+            return
+
+        except discord.HTTPException as exc:
+            status = getattr(exc, "status", None)
+            retry_after = getattr(exc, "retry_after", None)
+
+            if status == 429:
+                try:
+                    retry_after = float(retry_after or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+
+                delay = max(retry_after + random.uniform(2.0, 5.0), backoff)
+                log(
+                    "🛑 Discord HTTP 429 / rate limit | "
+                    f"retry_after={retry_after:.1f}s | "
+                    f"รอ {delay:.1f}s ก่อนเริ่ม session ใหม่"
+                )
+            else:
+                delay = backoff
+                log(f"❌ Discord HTTP error | status={status} | {exc}")
+
+            await _reset_client_after_failed_start()
+            await asyncio.sleep(delay)
+            backoff = min(backoff * 2.0, max_backoff)
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            log(
+                "⚠️ Discord network/timeout error: "
+                f"{type(exc).__name__}: {exc} | retry in {backoff:.1f}s"
+            )
+            await _reset_client_after_failed_start()
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, max_backoff)
+
+        except RuntimeError as exc:
+            if "Session is closed" in str(exc):
+                log("⚠️ Discord HTTP session ถูกปิดก่อนเริ่มใหม่ — reset client แล้ว retry")
+                await _reset_client_after_failed_start()
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, max_backoff)
+                continue
+            raise
+
+        except Exception as exc:
+            log(f"❌ Discord startup error: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
+            await _reset_client_after_failed_start()
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2.0, max_backoff)
+
+
+# Replace bot.py's old retry loop at runtime.
+# This keeps every command, Firebase function, Voice/TTS function and
+# Dashboard route already registered by bot.py.
+bot_module.run_bot_with_backoff = patched_run_bot_with_backoff
 
 
 async def main():
