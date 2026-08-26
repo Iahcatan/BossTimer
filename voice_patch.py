@@ -18,6 +18,7 @@ import edge_tts
 _voice_locks = {}
 _reconnect_locks = {}
 _watchdog_task = None
+_notification_watchdog_task = None
 
 
 def install(bot_module, log):
@@ -94,11 +95,58 @@ def install(bot_module, log):
             except Exception as exc:
                 log(f"⚠️ Voice watchdog loop error: {exc!r}")
 
+    async def notification_watchdog():
+        """Keep the existing bot.py notification loops alive.
+
+        bot.py remains the owner of Firebase, boss scheduling and notification
+        logic. This watchdog only restarts a discord.ext.tasks.Loop that has
+        stopped unexpectedly. It does not create a second scheduler.
+        """
+        task_names = (
+            "check_boss_notifications",
+            "check_bf_notifications",
+            "check_library_boss_notifications",
+        )
+        logged_missing = set()
+        while True:
+            try:
+                await asyncio.sleep(30)
+                if not bot_module.bot.is_ready():
+                    continue
+                for name in task_names:
+                    loop_obj = getattr(bot_module, name, None)
+                    if loop_obj is None:
+                        if name not in logged_missing:
+                            log(f"⚠️ Notification task not found: {name}")
+                            logged_missing.add(name)
+                        continue
+                    try:
+                        running = loop_obj.is_running() if hasattr(loop_obj, "is_running") else False
+                        if not running:
+                            log(f"🔄 Restarting notification task: {name}")
+                            loop_obj.start()
+                            log(f"🟢 Notification task restarted: {name}")
+                        else:
+                            logged_missing.discard(name)
+                    except RuntimeError as exc:
+                        log(f"⚠️ Notification task restart skipped ({name}): {exc!r}")
+                    except Exception as exc:
+                        log(f"❌ Notification task watchdog failed ({name}): {exc!r}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log(f"⚠️ Notification watchdog loop error: {exc!r}")
+
     async def start_voice_watchdog():
-        global _watchdog_task
+        global _watchdog_task, _notification_watchdog_task
         if _watchdog_task is None or _watchdog_task.done():
             _watchdog_task = asyncio.create_task(voice_watchdog(), name="skynet-voice-watchdog")
             log("🟢 Voice watchdog started")
+        if _notification_watchdog_task is None or _notification_watchdog_task.done():
+            _notification_watchdog_task = asyncio.create_task(
+                notification_watchdog(), name="skynet-notification-watchdog"
+            )
+            log("🟢 Notification watchdog started")
         return _watchdog_task
 
     async def patched_speak_in_guild(guild, text_th=None, text_en=None, text_ko=None, target_channel=None):
@@ -107,11 +155,19 @@ def install(bot_module, log):
             return
 
         actual = []
-        if getattr(bot_module, "tts_th_enabled", True) and text_th:
+
+        def language_enabled(attribute, default=True):
+            value = getattr(bot_module, attribute, default)
+            parser = getattr(bot_module, "parse_bool", None)
+            if callable(parser):
+                return parser(value, default)
+            return bool(value)
+
+        if language_enabled("tts_th_enabled", True) and text_th:
             actual.append(("th", text_th, getattr(bot_module, "VOICE_THAI", "th-TH-PremwadeeNeural"), "-20%", "+10Hz"))
-        if getattr(bot_module, "tts_en_enabled", True) and text_en:
+        if language_enabled("tts_en_enabled", True) and text_en:
             actual.append(("en", text_en, getattr(bot_module, "VOICE_ENG", "en-US-AriaNeural"), "-10%", "+0Hz"))
-        if getattr(bot_module, "tts_ko_enabled", True) and text_ko:
+        if language_enabled("tts_ko_enabled", True) and text_ko:
             actual.append(("ko", text_ko, getattr(bot_module, "VOICE_KOR", "ko-KR-SunHiNeural"), "-10%", "+0Hz"))
 
         if not actual:
@@ -150,10 +206,6 @@ def install(bot_module, log):
                     if not vc or not vc.is_connected():
                         log(f"❌ หยุดเล่น TTS: Voice หลุด ({guild.name})")
                         break
-
-                    if vc.is_playing():
-                        vc.stop()
-                        await asyncio.sleep(0.15)
 
                     finished = asyncio.Event()
                     loop = asyncio.get_running_loop()

@@ -1209,16 +1209,16 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
         if actual_text_ko: tts_files.append(("ko", actual_text_ko, VOICE_KOR, f"temp_tts_ko_{guild.id}_{unique_id}.mp3", "-10%", "+0Hz"))
 
         try:
-            # Give edge-tts an explicit session so aiohttp resources are always closed.
-            async with aiohttp.ClientSession() as tts_session:
-                for _, text, voice, filename, rate, pitch in tts_files:
-                    try:
-                        communicator = edge_tts.Communicate(
-                            text, voice, rate=rate, pitch=pitch, session=tts_session
-                        )
-                        await communicator.save(filename)
-                    except Exception as e:
-                        print(f"❌ สร้าง TTS ไม่สำเร็จ ({_}): {e}")
+            # edge-tts 7.x manages its own HTTP session.
+            # Do NOT pass session=... to Communicate().
+            for _, text, voice, filename, rate, pitch in tts_files:
+                try:
+                    communicator = edge_tts.Communicate(
+                        text, voice, rate=rate, pitch=pitch
+                    )
+                    await communicator.save(filename)
+                except Exception as e:
+                    print(f"❌ สร้าง TTS ไม่สำเร็จ ({_}): {e}")
 
             ffmpeg_executable = get_ffmpeg_path()
             loop = asyncio.get_running_loop()

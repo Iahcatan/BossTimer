@@ -135,6 +135,14 @@ async def startup_command_sync():
         await sync_commands_once()
         if hasattr(bot_module, "start_voice_watchdog"):
             await bot_module.start_voice_watchdog()
+        log("🔎 Notification tasks: " + ", ".join(
+            f"{name}={getattr(getattr(bot_module, name, None), 'is_running', lambda: False)()}"
+            for name in (
+                "check_boss_notifications",
+                "check_bf_notifications",
+                "check_library_boss_notifications",
+            )
+        ))
     except Exception as exc:
         log(f"❌ startup initialization failed: {exc!r}")
         traceback.print_exc()
