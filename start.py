@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import traceback
+import discord
 
 # Render normally runs Python with stdout connected to a log pipe.
 # Reconfigure BEFORE importing bot.py so even Firebase/import/on_ready logs
@@ -148,7 +149,7 @@ bot_module.sync_commands_once = sync_commands_once
 async def interaction_diagnostic(interaction):
     """Diagnostic only: NEVER acknowledge/defer the interaction here."""
     try:
-        if interaction.type != interaction.InteractionType.application_command:
+        if interaction.type != discord.InteractionType.application_command:
             return
         command_name = None
         try:

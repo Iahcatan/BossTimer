@@ -3,7 +3,7 @@ flask
 waitress
 requests
 pynacl
-edge-tts==7.2.8
+edge-tts
 ffmpeg-python
 imageio-ffmpeg
 python-dotenv
