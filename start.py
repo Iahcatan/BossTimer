@@ -2,8 +2,6 @@ import asyncio
 import os
 import sys
 import traceback
-import random
-import aiohttp
 import discord
 
 # Render normally runs Python with stdout connected to a log pipe.
@@ -24,6 +22,7 @@ def log(message: str):
 
 
 async def patched_setup_hook():
+    """Keep setup_hook lightweight; start.py owns Gateway lifecycle and command sync."""
     try:
         if hasattr(bot_module, "QuickActionsView"):
             bot_module.bot.add_view(bot_module.QuickActionsView())
@@ -57,6 +56,11 @@ _sync_complete = False
 
 
 async def sync_commands_once():
+    """Sync guild slash commands after Gateway is READY.
+
+    discord.py 2.7 AppCommand objects do not expose qualified_name.
+    Use command.name for the remote command list instead.
+    """
     global _sync_complete
     if _sync_complete:
         return
@@ -76,11 +80,14 @@ async def sync_commands_once():
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
 
         local_commands = bot_module.bot.tree.get_commands()
-        command_names = sorted(command.qualified_name for command in local_commands)
+        command_names = sorted(
+            getattr(command, "qualified_name", getattr(command, "name", "unknown"))
+            for command in local_commands
+        )
         log(f"📋 Local commands: {len(command_names)}")
         log("📋 " + ", ".join(command_names))
 
-        required = {"status", "kill", "setvoice"}
+        required = {"status", "kill", "setvoice", "notice"}
         missing_local = sorted(required - set(command_names))
         if missing_local:
             log("❌ Required commands missing locally: " + ", ".join(missing_local))
@@ -100,18 +107,28 @@ async def sync_commands_once():
         successful = 0
         for guild in guilds:
             try:
+                # Make this guild's command set deterministic.
                 bot_module.bot.tree.clear_commands(guild=guild)
                 bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
-                remote_names = sorted(command.qualified_name for command in synced)
+
+                # discord.py 2.7 returns AppCommand objects here.
+                # They have .name, not .qualified_name.
+                remote_names = sorted(
+                    getattr(command, "name", str(command))
+                    for command in synced
+                )
                 log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
                 log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
 
                 missing_remote = sorted(required - set(remote_names))
                 if missing_remote:
-                    log("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
+                    log(
+                        "❌ Required commands missing on "
+                        f"{guild.name}: {', '.join(missing_remote)}"
+                    )
                 else:
-                    log("🟢 Required commands verified: /status /kill /setvoice")
+                    log("🟢 Required commands verified: /status /kill /setvoice /notice")
                 successful += 1
             except Exception as exc:
                 log(f"❌ Guild Sync failed: {guild.name} ({guild.id}): {exc!r}")
@@ -130,13 +147,20 @@ bot_module.sync_commands_once = sync_commands_once
 
 @bot_module.bot.listen("on_interaction")
 async def interaction_diagnostic(interaction):
+    """Diagnostic only; never raise an exception into Discord's event dispatcher."""
     try:
-        if interaction.type != interaction.InteractionType.application_command:
+        # In discord.py, Interaction.type is an InteractionType enum value.
+        if interaction.type is not discord.InteractionType.application_command:
             return
+
         command_name = None
         try:
             if interaction.command is not None:
-                command_name = interaction.command.qualified_name
+                command_name = getattr(
+                    interaction.command,
+                    "qualified_name",
+                    getattr(interaction.command, "name", None),
+                )
         except Exception:
             pass
         if not command_name:
@@ -144,6 +168,7 @@ async def interaction_diagnostic(interaction):
                 command_name = interaction.data.get("name")
             except Exception:
                 command_name = "unknown"
+
         log(
             "📥 INTERACTION RECEIVED | "
             f"command={command_name!r} user={interaction.user} "
@@ -151,7 +176,7 @@ async def interaction_diagnostic(interaction):
             f"channel={getattr(interaction, 'channel_id', None)}"
         )
     except Exception as exc:
-        log(f"⚠️ interaction diagnostic failed: {exc!r}")
+        log(f"⚠️ interaction diagnostic failed safely: {exc!r}")
 
 
 @bot_module.bot.listen("on_ready")
@@ -181,34 +206,12 @@ async def startup_heartbeat():
             log(f"⚠️ heartbeat failed: {exc!r}")
 
 
-async def _reset_client_after_failed_start():
-    """
-    Reset a failed discord.py 2.7 client before another bot.start().
+async def run_bot_with_backoff(token: str):
+    """SINGLE Discord Gateway lifecycle owner.
 
-    This function is ONLY called after bot.start() has failed. Normal
-    Gateway reconnect/resume remains owned by discord.py itself.
-    """
-    try:
-        if not bot_module.bot.is_closed():
-            await bot_module.bot.close()
-    except Exception as exc:
-        log(f"⚠️ ปิด Discord client หลัง connection failure ไม่สำเร็จ: {exc!r}")
-
-    try:
-        bot_module.bot.clear()
-        log("♻️ Discord client state/session ถูก reset ด้วย bot.clear()")
-    except Exception as exc:
-        log(f"❌ reset Discord client ด้วย bot.clear() ไม่สำเร็จ: {exc!r}")
-        raise
-
-
-async def patched_run_bot_with_backoff(token: str):
-    """
-    SINGLE Discord Gateway lifecycle owner.
-
-    bot.py must not start its own Gateway/retry loop. This function is the
-    only application-level retry loop. discord.py handles normal reconnect
-    and resume while bot.start(reconnect=True) is alive.
+    bot.py must not run its own start/retry loop. discord.py handles normal
+    Gateway reconnect/resume while this function handles a failed initial
+    client lifecycle by closing/clearing before creating a new session.
     """
     backoff = 30.0
     max_backoff = 300.0
@@ -220,87 +223,111 @@ async def patched_run_bot_with_backoff(token: str):
             log("🛑 Discord bot stopped normally.")
             return
 
+        except discord.LoginFailure:
+            log("❌ Discord LoginFailure: ตรวจสอบ DISCORD_TOKEN")
+            raise
+
         except discord.HTTPException as exc:
-            status = getattr(exc, "status", None)
             retry_after = getattr(exc, "retry_after", None)
-
-            if status == 429:
-                try:
-                    retry_after = float(retry_after or 0)
-                except (TypeError, ValueError):
-                    retry_after = 0.0
-
-                delay = max(retry_after + random.uniform(2.0, 5.0), backoff)
-                log(
-                    "🛑 Discord HTTP 429 / rate limit | "
-                    f"retry_after={retry_after:.1f}s | "
-                    f"รอ {delay:.1f}s ก่อนเริ่ม session ใหม่"
-                )
+            if retry_after is not None:
+                delay = max(float(retry_after), backoff)
             else:
                 delay = backoff
-                log(f"❌ Discord HTTP error | status={status} | {exc}")
-
-            await _reset_client_after_failed_start()
+            delay = min(delay, max_backoff)
+            log(
+                "🛑 Discord HTTP error — "
+                f"รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}"
+            )
+            try:
+                await bot_module.bot.close()
+            except Exception:
+                pass
+            try:
+                bot_module.bot.clear()
+            except Exception:
+                pass
             await asyncio.sleep(delay)
-            backoff = min(backoff * 2.0, max_backoff)
+            backoff = min(backoff * 2, max_backoff)
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            delay = min(backoff, max_backoff)
             log(
-                "⚠️ Discord network/timeout error: "
-                f"{type(exc).__name__}: {exc} | retry in {backoff:.1f}s"
+                "🛑 Discord network error — "
+                f"รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}"
             )
-            await _reset_client_after_failed_start()
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2.0, max_backoff)
+            try:
+                await bot_module.bot.close()
+            except Exception:
+                pass
+            try:
+                bot_module.bot.clear()
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
+            backoff = min(backoff * 2, max_backoff)
 
         except RuntimeError as exc:
             if "Session is closed" in str(exc):
-                log("⚠️ Discord HTTP session ถูกปิดก่อนเริ่มใหม่ — reset client แล้ว retry")
-                await _reset_client_after_failed_start()
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, max_backoff)
+                delay = min(backoff, max_backoff)
+                log(
+                    "⚠️ Discord session ถูกปิดก่อนเริ่มใหม่ — "
+                    f"รอ {delay:.0f} วินาทีแล้ว reset client"
+                )
+                try:
+                    await bot_module.bot.close()
+                except Exception:
+                    pass
+                try:
+                    bot_module.bot.clear()
+                except Exception:
+                    pass
+                await asyncio.sleep(delay)
+                backoff = min(backoff * 2, max_backoff)
                 continue
             raise
 
         except Exception as exc:
-            log(f"❌ Discord startup error: {type(exc).__name__}: {exc}")
+            log(f"❌ Discord Gateway fatal error: {exc!r}")
             traceback.print_exc()
-            await _reset_client_after_failed_start()
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2.0, max_backoff)
-
-
-# start.py is the single Gateway lifecycle owner.
-# This runtime replacement preserves every Firebase, Dashboard, command,
-# Voice and TTS function already registered by bot.py.
-bot_module.run_bot_with_backoff = patched_run_bot_with_backoff
+            raise
 
 
 async def main():
-    log("=" * 60)
-    log("🚀 SKYNET STARTING")
-    log("=" * 60)
-    log("🌐 Starting web server...")
+    print("=" * 60)
+    print("🚀 SKYNET STARTING")
+    print("=" * 60)
 
-    bot_module.keep_alive()
-    log("🌐 Web server startup requested")
+    # Start Flask/Waitress in its own thread so Render sees port 5000.
+    print("🌐 Starting web server...")
+    try:
+        from threading import Thread
+        from waitress import serve
 
-    token = os.environ.get("DISCORD_TOKEN", "").strip()
+        def run_web():
+            port = int(os.environ.get("PORT", "5000"))
+            log(f"🌐 Starting Flask/Waitress on 0.0.0.0:{port}")
+            serve(bot_module.app, host="0.0.0.0", port=port, threads=4)
+
+        web_thread = Thread(target=run_web, daemon=True)
+        web_thread.start()
+        print("🌐 Web server startup requested")
+    except Exception as exc:
+        print(f"❌ Web server startup failed: {exc!r}")
+        traceback.print_exc()
+
+    token = (
+        os.environ.get("DISCORD_TOKEN", "").strip()
+        or os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    )
     if not token:
-        raise RuntimeError("ไม่พบ DISCORD_TOKEN ใน Environment Variables")
+        raise RuntimeError("ไม่พบ DISCORD_TOKEN หรือ DISCORD_BOT_TOKEN")
 
-    log("🔑 พบ DISCORD_TOKEN")
-    log("🔌 กำลังเริ่ม Discord Bot...")
+    print("🔑 พบ DISCORD_TOKEN")
+    print("🔌 กำลังเริ่ม Discord Bot...")
 
     heartbeat_task = asyncio.create_task(startup_heartbeat())
     try:
-        await bot_module.run_bot_with_backoff(token)
-    except KeyboardInterrupt:
-        log("🛑 Bot stopped")
-    except Exception as exc:
-        log(f"❌ Discord Bot หยุดทำงาน: {exc!r}")
-        traceback.print_exc()
-        raise
+        await run_bot_with_backoff(token)
     finally:
         heartbeat_task.cancel()
         try:
@@ -313,8 +340,8 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log("🛑 SKYNET stopped by KeyboardInterrupt")
+        print("🛑 SKYNET stopped by KeyboardInterrupt")
     except Exception as exc:
-        log(f"💥 FATAL STARTUP ERROR: {exc!r}")
+        print(f"❌ SKYNET stopped: {exc!r}")
         traceback.print_exc()
         raise
