@@ -5,7 +5,6 @@ import traceback
 import aiohttp
 import discord
 
-# Render normally runs Python with stdout connected to a log pipe.
 try:
     sys.stdout.reconfigure(line_buffering=True, write_through=True)
     sys.stderr.reconfigure(line_buffering=True, write_through=True)
@@ -14,12 +13,18 @@ except Exception:
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
+import voice_patch
 
 COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
 
 def log(message: str):
     print(message, flush=True)
+
+
+# Install only the Voice/TTS runtime layer. Firebase, Dashboard, commands,
+# boss scheduler and persistent voice_config remain owned by bot.py.
+voice_patch.install(bot_module, log)
 
 
 async def patched_setup_hook():
@@ -125,28 +130,6 @@ async def sync_commands_once():
 bot_module.sync_commands_once = sync_commands_once
 
 
-@bot_module.bot.listen("on_interaction")
-async def interaction_diagnostic(interaction):
-    """Diagnostic only; never raise an exception into Discord's event dispatcher."""
-    try:
-        if interaction.type is not discord.InteractionType.application_command:
-            return
-        command_name = None
-        try:
-            if interaction.command is not None:
-                command_name = getattr(interaction.command, "qualified_name", getattr(interaction.command, "name", None))
-        except Exception:
-            pass
-        if not command_name:
-            try:
-                command_name = interaction.data.get("name")
-            except Exception:
-                command_name = "unknown"
-        log("📥 INTERACTION RECEIVED | " f"command={command_name!r} user={interaction.user} " f"guild={getattr(interaction.guild, 'id', None)} " f"channel={getattr(interaction, 'channel_id', None)}")
-    except Exception as exc:
-        log(f"⚠️ interaction diagnostic failed safely: {exc!r}")
-
-
 @bot_module.bot.listen("on_ready")
 async def startup_command_sync():
     log("🟢 on_ready received by start.py")
@@ -185,29 +168,41 @@ async def run_bot_with_backoff(token: str):
             retry_after = getattr(exc, "retry_after", None)
             delay = min(max(float(retry_after), backoff) if retry_after is not None else backoff, max_backoff)
             log(f"🛑 Discord HTTP error — รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}")
-            try: await bot_module.bot.close()
-            except Exception: pass
-            try: bot_module.bot.clear()
-            except Exception: pass
+            try:
+                await bot_module.bot.close()
+            except Exception:
+                pass
+            try:
+                bot_module.bot.clear()
+            except Exception:
+                pass
             await asyncio.sleep(delay)
             backoff = min(backoff * 2, max_backoff)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             delay = min(backoff, max_backoff)
             log(f"🛑 Discord network error — รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}")
-            try: await bot_module.bot.close()
-            except Exception: pass
-            try: bot_module.bot.clear()
-            except Exception: pass
+            try:
+                await bot_module.bot.close()
+            except Exception:
+                pass
+            try:
+                bot_module.bot.clear()
+            except Exception:
+                pass
             await asyncio.sleep(delay)
             backoff = min(backoff * 2, max_backoff)
         except RuntimeError as exc:
             if "Session is closed" in str(exc):
                 delay = min(backoff, max_backoff)
                 log(f"⚠️ Discord session ถูกปิดก่อนเริ่มใหม่ — รอ {delay:.0f} วินาทีแล้ว reset client")
-                try: await bot_module.bot.close()
-                except Exception: pass
-                try: bot_module.bot.clear()
-                except Exception: pass
+                try:
+                    await bot_module.bot.close()
+                except Exception:
+                    pass
+                try:
+                    bot_module.bot.clear()
+                except Exception:
+                    pass
                 await asyncio.sleep(delay)
                 backoff = min(backoff * 2, max_backoff)
                 continue
@@ -246,8 +241,10 @@ async def main():
         await run_bot_with_backoff(token)
     finally:
         heartbeat_task.cancel()
-        try: await heartbeat_task
-        except asyncio.CancelledError: pass
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":
