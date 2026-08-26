@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 import traceback
+import aiohttp
 import discord
 
 # Render normally runs Python with stdout connected to a log pipe.
@@ -40,14 +41,10 @@ if _original_load_custom_bosses is not None:
         try:
             await _original_load_custom_bosses()
         except (TypeError, AttributeError, KeyError, ValueError) as exc:
-            log(
-                "⚠️ custom_bosses invalid/legacy data skipped: "
-                f"{type(exc).__name__}: {exc}"
-            )
+            log("⚠️ custom_bosses invalid/legacy data skipped: " f"{type(exc).__name__}: {exc}")
         except Exception as exc:
             log(f"⚠️ load_custom_bosses failed safely: {exc!r}")
             traceback.print_exc()
-
     bot_module.load_custom_bosses = safe_load_custom_bosses
 
 
@@ -56,19 +53,13 @@ _sync_complete = False
 
 
 async def sync_commands_once():
-    """Sync guild slash commands after Gateway is READY.
-
-    discord.py 2.7 AppCommand objects do not expose qualified_name.
-    Use command.name for the remote command list instead.
-    """
+    """Sync guild commands after Gateway READY; compatible with discord.py 2.7 AppCommand."""
     global _sync_complete
     if _sync_complete:
         return
-
     async with _sync_lock:
         if _sync_complete:
             return
-
         await bot_module.bot.wait_until_ready()
         if COMMAND_SYNC_DELAY > 0:
             await asyncio.sleep(COMMAND_SYNC_DELAY)
@@ -107,26 +98,15 @@ async def sync_commands_once():
         successful = 0
         for guild in guilds:
             try:
-                # Make this guild's command set deterministic.
                 bot_module.bot.tree.clear_commands(guild=guild)
                 bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
-
-                # discord.py 2.7 returns AppCommand objects here.
-                # They have .name, not .qualified_name.
-                remote_names = sorted(
-                    getattr(command, "name", str(command))
-                    for command in synced
-                )
+                remote_names = sorted(getattr(command, "name", str(command)) for command in synced)
                 log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
                 log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
-
                 missing_remote = sorted(required - set(remote_names))
                 if missing_remote:
-                    log(
-                        "❌ Required commands missing on "
-                        f"{guild.name}: {', '.join(missing_remote)}"
-                    )
+                    log(f"❌ Required commands missing on {guild.name}: {', '.join(missing_remote)}")
                 else:
                     log("🟢 Required commands verified: /status /kill /setvoice /notice")
                 successful += 1
@@ -149,18 +129,12 @@ bot_module.sync_commands_once = sync_commands_once
 async def interaction_diagnostic(interaction):
     """Diagnostic only; never raise an exception into Discord's event dispatcher."""
     try:
-        # In discord.py, Interaction.type is an InteractionType enum value.
         if interaction.type is not discord.InteractionType.application_command:
             return
-
         command_name = None
         try:
             if interaction.command is not None:
-                command_name = getattr(
-                    interaction.command,
-                    "qualified_name",
-                    getattr(interaction.command, "name", None),
-                )
+                command_name = getattr(interaction.command, "qualified_name", getattr(interaction.command, "name", None))
         except Exception:
             pass
         if not command_name:
@@ -168,13 +142,7 @@ async def interaction_diagnostic(interaction):
                 command_name = interaction.data.get("name")
             except Exception:
                 command_name = "unknown"
-
-        log(
-            "📥 INTERACTION RECEIVED | "
-            f"command={command_name!r} user={interaction.user} "
-            f"guild={getattr(interaction.guild, 'id', None)} "
-            f"channel={getattr(interaction, 'channel_id', None)}"
-        )
+        log("📥 INTERACTION RECEIVED | " f"command={command_name!r} user={interaction.user} " f"guild={getattr(interaction.guild, 'id', None)} " f"channel={getattr(interaction, 'channel_id', None)}")
     except Exception as exc:
         log(f"⚠️ interaction diagnostic failed safely: {exc!r}")
 
@@ -193,13 +161,7 @@ async def startup_heartbeat():
     while True:
         await asyncio.sleep(30)
         try:
-            log(
-                "💓 SKYNET HEARTBEAT | "
-                f"ready={bot_module.bot.is_ready()} "
-                f"closed={bot_module.bot.is_closed()} "
-                f"user={bot_module.bot.user} "
-                f"guilds={len(bot_module.bot.guilds)}"
-            )
+            log("💓 SKYNET HEARTBEAT | " f"ready={bot_module.bot.is_ready()} " f"closed={bot_module.bot.is_closed()} " f"user={bot_module.bot.user} " f"guilds={len(bot_module.bot.guilds)}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -207,85 +169,49 @@ async def startup_heartbeat():
 
 
 async def run_bot_with_backoff(token: str):
-    """SINGLE Discord Gateway lifecycle owner.
-
-    bot.py must not run its own start/retry loop. discord.py handles normal
-    Gateway reconnect/resume while this function handles a failed initial
-    client lifecycle by closing/clearing before creating a new session.
-    """
+    """SINGLE Discord Gateway lifecycle owner. bot.py never starts/retries Gateway."""
     backoff = 30.0
     max_backoff = 300.0
-
     while True:
         try:
             log("🔌 กำลังเชื่อมต่อ Discord Gateway...")
             await bot_module.bot.start(token, reconnect=True)
             log("🛑 Discord bot stopped normally.")
             return
-
         except discord.LoginFailure:
             log("❌ Discord LoginFailure: ตรวจสอบ DISCORD_TOKEN")
             raise
-
         except discord.HTTPException as exc:
             retry_after = getattr(exc, "retry_after", None)
-            if retry_after is not None:
-                delay = max(float(retry_after), backoff)
-            else:
-                delay = backoff
-            delay = min(delay, max_backoff)
-            log(
-                "🛑 Discord HTTP error — "
-                f"รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}"
-            )
-            try:
-                await bot_module.bot.close()
-            except Exception:
-                pass
-            try:
-                bot_module.bot.clear()
-            except Exception:
-                pass
+            delay = min(max(float(retry_after), backoff) if retry_after is not None else backoff, max_backoff)
+            log(f"🛑 Discord HTTP error — รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}")
+            try: await bot_module.bot.close()
+            except Exception: pass
+            try: bot_module.bot.clear()
+            except Exception: pass
             await asyncio.sleep(delay)
             backoff = min(backoff * 2, max_backoff)
-
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             delay = min(backoff, max_backoff)
-            log(
-                "🛑 Discord network error — "
-                f"รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}"
-            )
-            try:
-                await bot_module.bot.close()
-            except Exception:
-                pass
-            try:
-                bot_module.bot.clear()
-            except Exception:
-                pass
+            log(f"🛑 Discord network error — รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}")
+            try: await bot_module.bot.close()
+            except Exception: pass
+            try: bot_module.bot.clear()
+            except Exception: pass
             await asyncio.sleep(delay)
             backoff = min(backoff * 2, max_backoff)
-
         except RuntimeError as exc:
             if "Session is closed" in str(exc):
                 delay = min(backoff, max_backoff)
-                log(
-                    "⚠️ Discord session ถูกปิดก่อนเริ่มใหม่ — "
-                    f"รอ {delay:.0f} วินาทีแล้ว reset client"
-                )
-                try:
-                    await bot_module.bot.close()
-                except Exception:
-                    pass
-                try:
-                    bot_module.bot.clear()
-                except Exception:
-                    pass
+                log(f"⚠️ Discord session ถูกปิดก่อนเริ่มใหม่ — รอ {delay:.0f} วินาทีแล้ว reset client")
+                try: await bot_module.bot.close()
+                except Exception: pass
+                try: bot_module.bot.clear()
+                except Exception: pass
                 await asyncio.sleep(delay)
                 backoff = min(backoff * 2, max_backoff)
                 continue
             raise
-
         except Exception as exc:
             log(f"❌ Discord Gateway fatal error: {exc!r}")
             traceback.print_exc()
@@ -296,44 +222,32 @@ async def main():
     print("=" * 60)
     print("🚀 SKYNET STARTING")
     print("=" * 60)
-
-    # Start Flask/Waitress in its own thread so Render sees port 5000.
     print("🌐 Starting web server...")
     try:
         from threading import Thread
         from waitress import serve
-
         def run_web():
             port = int(os.environ.get("PORT", "5000"))
             log(f"🌐 Starting Flask/Waitress on 0.0.0.0:{port}")
             serve(bot_module.app, host="0.0.0.0", port=port, threads=4)
-
-        web_thread = Thread(target=run_web, daemon=True)
-        web_thread.start()
+        Thread(target=run_web, daemon=True).start()
         print("🌐 Web server startup requested")
     except Exception as exc:
         print(f"❌ Web server startup failed: {exc!r}")
         traceback.print_exc()
 
-    token = (
-        os.environ.get("DISCORD_TOKEN", "").strip()
-        or os.environ.get("DISCORD_BOT_TOKEN", "").strip()
-    )
+    token = os.environ.get("DISCORD_TOKEN", "").strip() or os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("ไม่พบ DISCORD_TOKEN หรือ DISCORD_BOT_TOKEN")
-
     print("🔑 พบ DISCORD_TOKEN")
     print("🔌 กำลังเริ่ม Discord Bot...")
-
     heartbeat_task = asyncio.create_task(startup_heartbeat())
     try:
         await run_bot_with_backoff(token)
     finally:
         heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
+        try: await heartbeat_task
+        except asyncio.CancelledError: pass
 
 
 if __name__ == "__main__":
