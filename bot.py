@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, Response
 from waitress import serve
 import edge_tts
 import imageio_ffmpeg
@@ -1063,7 +1063,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         function makeUserKey(username) {
-            return username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+            return username.toLowerCase().replace(/[.#$\\[\\]\\/]/g, '_');
         }
 
         function usernameToAuthEmail(username) {
@@ -1868,7 +1868,7 @@ def firebase_config_js():
     cfg.setdefault('projectId', 'skynet-3ad44')
     cfg.setdefault('authDomain', 'skynet-3ad44.firebaseapp.com')
     cfg.setdefault('databaseURL', 'https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app')
-    payload = json.dumps(cfg, ensure_ascii=False).replace('</', '<\/')
+    payload = json.dumps(cfg, ensure_ascii=False).replace('</', '<\\/')
     return Response(f'window.SKYNET_FIREBASE_CONFIG = {payload};', mimetype='application/javascript')
 
 @app.route('/api/toggle_tts', methods=['POST'])
@@ -2555,6 +2555,20 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
                         print(f"🔌 Voice disconnected: {guild.name} (TTS finished: {channel.name})")
                     except Exception as disconnect_error:
                         print(f"⚠️ Voice disconnect failed ({guild.name}): {disconnect_error}")
+
+# ==========================================
+# 🤖 6. Discord Bot Setup
+# ==========================================
+# IMPORTANT: this object must exist before any @bot.event / @bot.tree.command
+# decorator is evaluated. The previous patch archive accidentally omitted it,
+# causing: NameError: name 'bot' is not defined during import.
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 # ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
