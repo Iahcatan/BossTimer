@@ -133,8 +133,14 @@ async def startup_command_sync():
     log("🟢 on_ready received by start.py")
     try:
         await sync_commands_once()
-        if hasattr(bot_module, "start_voice_watchdog"):
-            await bot_module.start_voice_watchdog()
+        if _sync_complete:
+            if hasattr(bot_module, "ensure_notification_tasks_started"):
+                await bot_module.ensure_notification_tasks_started()
+            if hasattr(bot_module, "start_voice_watchdog"):
+                await bot_module.start_voice_watchdog()
+        else:
+            log("⚠️ Notification/Voice startup deferred because command sync is incomplete")
+
         log("🔎 Notification tasks: " + ", ".join(
             f"{name}={getattr(getattr(bot_module, name, None), 'is_running', lambda: False)()}"
             for name in (
