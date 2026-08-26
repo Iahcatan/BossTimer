@@ -22,8 +22,6 @@ def log(message: str):
     print(message, flush=True)
 
 
-# Install only the Voice/TTS runtime layer. Firebase, Dashboard, commands,
-# boss scheduler and persistent voice_config remain owned by bot.py.
 voice_patch.install(bot_module, log)
 
 
@@ -135,8 +133,10 @@ async def startup_command_sync():
     log("🟢 on_ready received by start.py")
     try:
         await sync_commands_once()
+        if hasattr(bot_module, "start_voice_watchdog"):
+            await bot_module.start_voice_watchdog()
     except Exception as exc:
-        log(f"❌ startup command sync failed: {exc!r}")
+        log(f"❌ startup initialization failed: {exc!r}")
         traceback.print_exc()
 
 
