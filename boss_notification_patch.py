@@ -1,11 +1,4 @@
-"""Boss notification reliability patch for SKYNET.
-
-Keeps bot.py's existing notification pipeline, but adds:
-- an immediate post-/kill evaluation (no waiting for the next 10s tick)
-- effective noticeMinutes diagnostics
-- protection against Firebase race restoring stale notification flags
-- a lightweight health probe
-"""
+"""Boss notification reliability patch for SKYNET."""
 import asyncio
 from discord.ext import tasks
 
@@ -21,10 +14,10 @@ def install(bot_module, log):
     _trigger_lock = asyncio.Lock()
 
     async def trigger_check(reason="manual"):
-        if not getattr(bot_module.bot, "is_ready", lambda: False)():
+        if not bot_module.bot.is_ready():
             return
         async with _trigger_lock:
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0)
             try:
                 with bot_module.schedule_lock:
                     snapshot = bot_module.boss_schedule.copy()
@@ -42,14 +35,9 @@ def install(bot_module, log):
                         configured = data.get("noticeMinutes")
                         fallback = bot_module.get_boss_advance_notice_seconds(boss) / 60
                         notice_min = max(1, int(configured)) if configured is not None else max(1, int(fallback))
-                        log(
-                            f"🔎 Boss notification check ({reason}): {boss} | "
-                            f"spawn={spawn.isoformat()} | left={left:.1f}s | notice={notice_min}m | "
-                            f"advance={data.get('notified_advance', False)} | spawn_sent={data.get('notified_spawn', False)}"
-                        )
+                        log(f"🔎 Boss notification check ({reason}): {boss} | spawn={spawn.isoformat()} | left={left:.1f}s | notice={notice_min}m | advance={data.get('notified_advance', False)} | spawn_sent={data.get('notified_spawn', False)}")
                     except Exception as exc:
                         log(f"⚠️ Boss notification diagnostic failed ({boss}): {exc!r}")
-
                 checker = getattr(bot_module, "check_boss_notifications", None)
                 if checker is not None:
                     await checker()
@@ -63,7 +51,8 @@ def install(bot_module, log):
     async def boss_notification_after_kill(interaction):
         try:
             data = getattr(interaction, "data", None) or {}
-            if data.get("type") != 1 or data.get("name") != "kill":
+            # Slash/application commands use Discord Interaction type 2.
+            if data.get("type") != 2 or data.get("name") != "kill":
                 return
             asyncio.create_task(trigger_check("post-/kill"))
         except Exception as exc:
