@@ -1,30 +1,27 @@
 """Runtime Voice/TTS patch for SKYNET.
 
-This module is intentionally kept outside bot.py so the existing Firebase,
-Dashboard, slash commands and boss scheduler remain unchanged. start.py
-installs the patch after importing bot.py.
+Keeps Firebase, Dashboard, slash commands and boss scheduling in bot.py.
+start.py installs this module after importing bot.py.
 
-Important compatibility point:
-edge-tts 7.2.x Communicate does NOT accept a ``session=`` keyword. The
-original bot passed an aiohttp ClientSession, which caused every TTS request
-to fail before an MP3 file was created.
+edge-tts 7.2.x Communicate does not accept session=; it creates/manages its
+own HTTP session. The old bot.py passed session= and therefore every TTS
+render failed before an audio file could be produced.
 """
 
 import asyncio
 import os
-import time
 import uuid
 
 import discord
 import edge_tts
 
-
 _voice_locks = {}
 _reconnect_locks = {}
+_watchdog_task = None
 
 
 def install(bot_module, log):
-    """Install the voice/TTS runtime patch into the existing bot module."""
+    """Install Voice/TTS runtime functions without changing bot data ownership."""
 
     async def ensure_voice(guild, target_channel=None):
         if guild is None:
@@ -34,7 +31,7 @@ def install(bot_module, log):
         try:
             configured = bot_module.get_configured_voice_channel(guild)
         except Exception:
-            configured = None
+            pass
 
         target = configured or target_channel
         if target is None:
@@ -54,8 +51,8 @@ def install(bot_module, log):
                 except Exception as exc:
                     log(f"⚠️ Voice move failed ({guild.name}): {exc!r}")
 
-            # A stale voice client can remain attached after a 1006 close.
-            # Remove only the stale voice connection; do not touch Gateway.
+            # Remove only a stale VoiceClient. This never calls bot.start/close
+            # and therefore cannot interfere with the Discord Gateway lifecycle.
             stale = guild.voice_client
             if stale:
                 try:
@@ -68,7 +65,6 @@ def install(bot_module, log):
                 log(f"🔊 Voice reconnect สำเร็จ: {guild.name} -> {target.name}")
                 return vc
             except discord.ClientException as exc:
-                # discord.py may already be reconnecting internally.
                 vc = guild.voice_client
                 if vc and vc.is_connected():
                     return vc
@@ -77,13 +73,35 @@ def install(bot_module, log):
                 log(f"❌ Voice connect failed ({guild.name}): {exc!r}")
             return None
 
-    async def patched_speak_in_guild(
-        guild,
-        text_th=None,
-        text_en=None,
-        text_ko=None,
-        target_channel=None,
-    ):
+    async def voice_watchdog():
+        """Keep /setvoice channels connected without touching Discord Gateway."""
+        while True:
+            try:
+                await asyncio.sleep(20)
+                if not bot_module.bot.is_ready():
+                    continue
+                for guild in list(bot_module.bot.guilds):
+                    try:
+                        configured = bot_module.get_configured_voice_channel(guild)
+                        if configured and (not guild.voice_client or not guild.voice_client.is_connected()):
+                            await ensure_voice(guild, configured)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        log(f"⚠️ Voice watchdog failed ({guild.name}): {exc!r}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log(f"⚠️ Voice watchdog loop error: {exc!r}")
+
+    async def start_voice_watchdog():
+        global _watchdog_task
+        if _watchdog_task is None or _watchdog_task.done():
+            _watchdog_task = asyncio.create_task(voice_watchdog(), name="skynet-voice-watchdog")
+            log("🟢 Voice watchdog started")
+        return _watchdog_task
+
+    async def patched_speak_in_guild(guild, text_th=None, text_en=None, text_ko=None, target_channel=None):
         """Generate and play enabled TTS languages in the configured Voice channel."""
         if guild is None:
             return
@@ -110,17 +128,11 @@ def install(bot_module, log):
             unique_id = uuid.uuid4().hex
             files = []
             try:
-                # edge-tts 7.2.x manages its own aiohttp session.
-                # Do NOT pass session=... to Communicate.
                 for lang, text, voice, rate, pitch in actual:
                     filename = f"temp_tts_{lang}_{guild.id}_{unique_id}.mp3"
                     try:
-                        communicator = edge_tts.Communicate(
-                            text,
-                            voice,
-                            rate=rate,
-                            pitch=pitch,
-                        )
+                        # edge-tts 7.2.x: DO NOT pass session=.
+                        communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
                         await communicator.save(filename)
                         if os.path.exists(filename) and os.path.getsize(filename) > 0:
                             files.append((lang, filename))
@@ -134,7 +146,6 @@ def install(bot_module, log):
                     return
 
                 for index, (lang, filename) in enumerate(files):
-                    # Re-check the Voice connection before every language.
                     vc = await ensure_voice(guild, target_channel=target_channel)
                     if not vc or not vc.is_connected():
                         log(f"❌ หยุดเล่น TTS: Voice หลุด ({guild.name})")
@@ -181,6 +192,6 @@ def install(bot_module, log):
                         pass
 
     bot_module.ensure_voice_runtime = ensure_voice
+    bot_module.start_voice_watchdog = start_voice_watchdog
     bot_module.speak_in_guild = patched_speak_in_guild
-
     return ensure_voice
