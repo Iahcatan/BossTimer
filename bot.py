@@ -786,8 +786,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 adminThAction: "จัดการ",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
-                adminDisable: "ปิดใช้งาน",
-                adminActivate: "เปิดใช้งาน",
+                adminDisable: "⛔ Ban",
+                adminActivate: "♻️ Unban",
                 adminBan: "แบน",
                 adminUnban: "ปลดแบน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
@@ -886,8 +886,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 adminThAction: "Action",
                 adminApprove: "Approve",
                 adminReject: "Reject",
-                adminDisable: "Disable",
-                adminActivate: "Activate",
+                adminDisable: "⛔ Ban",
+                adminActivate: "♻️ Unban",
                 adminBan: "Ban",
                 adminUnban: "Unban",
                 adminNoUsers: "No users found.",
@@ -986,8 +986,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 adminThAction: "관리",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
-                adminDisable: "ปิดใช้งาน",
-                adminActivate: "เปิดใช้งาน",
+                adminDisable: "⛔ Ban",
+                adminActivate: "♻️ Unban",
                 adminBan: "แบน",
                 adminUnban: "ปลดแบน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
@@ -1852,6 +1852,25 @@ def dashboard():
         firebase_web_config_json=json.dumps(parsed_web_config, ensure_ascii=False)
     )
 
+@app.route('/api/firebase-config.js')
+def firebase_config_js():
+    """Expose only the Firebase Web SDK config to the browser.
+    The config is read from FIREBASE_WEB_CONFIG_JSON; this is public client config,
+    not the Firebase Admin service-account secret.
+    """
+    raw = os.environ.get('FIREBASE_WEB_CONFIG_JSON', '').strip()
+    try:
+        cfg = json.loads(raw) if raw else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:
+        cfg = {}
+    cfg.setdefault('projectId', 'skynet-3ad44')
+    cfg.setdefault('authDomain', 'skynet-3ad44.firebaseapp.com')
+    cfg.setdefault('databaseURL', 'https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app')
+    payload = json.dumps(cfg, ensure_ascii=False).replace('</', '<\/')
+    return Response(f'window.SKYNET_FIREBASE_CONFIG = {payload};', mimetype='application/javascript')
+
 @app.route('/api/toggle_tts', methods=['POST'])
 def toggle_tts_api():
     global tts_th_enabled, tts_en_enabled, tts_ko_enabled
@@ -2350,193 +2369,20 @@ def get_configured_voice_channel(guild: discord.Guild):
         return channel
     return None
 
-async def ensure_configured_voice(guild: discord.Guild):
-    """เชื่อมต่อ/ย้ายไปห้องที่ตั้งไว้ โดยใช้ lock + cooldown ป้องกัน connect/disconnect loop"""
+def get_occupied_voice_channels(guild: discord.Guild):
+    """Return VoiceChannels that currently contain at least one human member."""
     if not guild:
-        return None
-    target = get_configured_voice_channel(guild)
-    if not target:
-        return guild.voice_client if guild.voice_client and guild.voice_client.is_connected() else None
+        return []
+    return [
+        channel for channel in guild.voice_channels
+        if any(not member.bot for member in channel.members)
+    ]
 
-    if guild.id not in voice_connect_locks:
-        voice_connect_locks[guild.id] = asyncio.Lock()
 
-    async with voice_connect_locks[guild.id]:
-        vc = guild.voice_client
-        if vc and vc.is_connected():
-            if vc.channel and vc.channel.id == target.id:
-                return vc
-            # ย้ายครั้งเดียว ไม่ disconnect/connect ใหม่
-            try:
-                await vc.move_to(target)
-                return vc
-            except Exception as e:
-                print(f"⚠️ ย้าย Voice ไป {target.name} ไม่สำเร็จ: {e}")
-                return None
+async def ensure_configured_voice(guild: discord.Guild):
+    """Legacy compatibility: configured Voice is ON-DEMAND, never persistent."""
+    return None
 
-        now = time.monotonic()
-        last_attempt = last_voice_connect_attempt.get(guild.id, 0.0)
-        if now - last_attempt < 30:
-            return None
-        last_voice_connect_attempt[guild.id] = now
-        try:
-            vc = await target.connect(reconnect=True, timeout=20)
-            print(f"🔊 เชื่อมต่อ Voice ถาวร: {guild.name} -> {target.name}")
-            return vc
-        except discord.ClientException as e:
-            # ถ้ามี client เก่าค้างอยู่ ให้รอ reconnect event แทนการยิง connect ซ้ำ
-            print(f"⚠️ Discord Voice Client ยังไม่พร้อมใน {guild.name}: {e}")
-        except Exception as e:
-            print(f"❌ เชื่อมต่อ Voice {guild.name}/{target.name} ไม่สำเร็จ: {e}")
-        return None
-
-async def save_bot_settings():
-    settings_data = {
-        "bf_notify_enabled": bf_notify_enabled,
-        "lib_notify_enabled": lib_notify_enabled,
-        "ppl_notify_enabled": ppl_notify_enabled,
-        "tts_th_enabled": tts_th_enabled,
-        "tts_en_enabled": tts_en_enabled,
-        "tts_ko_enabled": tts_ko_enabled
-    }
-    try: await asyncio.to_thread(db.reference('bot_settings').set, settings_data)
-    except Exception: pass
-    await asyncio.to_thread(set_db_value, "bf_notify_enabled", bf_notify_enabled)
-    await asyncio.to_thread(set_db_value, "lib_notify_enabled", lib_notify_enabled)
-    await asyncio.to_thread(set_db_value, "ppl_notify_enabled", ppl_notify_enabled)
-    await asyncio.to_thread(set_db_value, "tts_th_enabled", tts_th_enabled)
-    await asyncio.to_thread(set_db_value, "tts_en_enabled", tts_en_enabled)
-    await asyncio.to_thread(set_db_value, "tts_ko_enabled", tts_ko_enabled)
-    await asyncio.to_thread(save_json_local, SETTINGS_FILE, settings_data)
-
-async def load_bot_settings():
-    global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
-    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
-    data = None
-    try: data = await asyncio.to_thread(db.reference('bot_settings').get)
-    except Exception: pass
-
-    if not data:
-        db_bf = get_db_value("bf_notify_enabled", None)
-        db_lib = get_db_value("lib_notify_enabled", None)
-        db_ppl = get_db_value("ppl_notify_enabled", None)
-        db_th = get_db_value("tts_th_enabled", None)
-        db_en = get_db_value("tts_en_enabled", None)
-        db_ko = get_db_value("tts_ko_enabled", None)
-        if db_bf is not None: bf_notify_enabled = parse_bool(db_bf, True)
-        if db_lib is not None: lib_notify_enabled = parse_bool(db_lib, True)
-        if db_ppl is not None: ppl_notify_enabled = parse_bool(db_ppl, True)
-        if db_th is not None: tts_th_enabled = parse_bool(db_th, True)
-        if db_en is not None: tts_en_enabled = parse_bool(db_en, True)
-        if db_ko is not None: tts_ko_enabled = parse_bool(db_ko, True)
-        return
-
-    if data:
-        bf_notify_enabled = parse_bool(data.get("bf_notify_enabled", True), True)
-        lib_notify_enabled = parse_bool(data.get("lib_notify_enabled", True), True)
-        ppl_notify_enabled = parse_bool(data.get("ppl_notify_enabled", True), True)
-        tts_th_enabled = parse_bool(data.get("tts_th_enabled", True), True)
-        tts_en_enabled = parse_bool(data.get("tts_en_enabled", True), True)
-        tts_ko_enabled = parse_bool(data.get("tts_ko_enabled", True), True)
-
-async def save_vip_config():
-    try: await asyncio.to_thread(db.reference('vip_config').set, vip_config)
-    except Exception: pass
-    await asyncio.to_thread(set_db_value, "vip_config", vip_config)
-    await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, vip_config)
-
-async def load_vip_config():
-    global vip_config
-    data = None
-    try: data = await asyncio.to_thread(db.reference('vip_config').get)
-    except Exception: pass
-    if not data: data = get_db_value("vip_config", None)
-    if data: vip_config = data
-
-async def save_live_config():
-    try: await asyncio.to_thread(db.reference('live_message_config').set, live_message_config)
-    except Exception: pass
-    await asyncio.to_thread(set_db_value, "live_message_config", live_message_config)
-    await asyncio.to_thread(save_json_local, LIVE_CONFIG_FILE, live_message_config)
-
-async def load_live_config():
-    global live_message_config
-    data = None
-    try: data = await asyncio.to_thread(db.reference('live_message_config').get)
-    except Exception: pass
-    if not data: data = get_db_value("live_message_config", None)
-    if data: live_message_config = data
-
-async def save_custom_bosses_to_github():
-    custom_data = {}
-    for name in list(BOSS_RESPAWN_TIMES.keys()):
-        if name not in DEFAULT_BOSS_NAMES:
-            custom_data[name] = {
-                "total_seconds": int(BOSS_RESPAWN_TIMES[name].total_seconds()),
-                "cd_text": BOSS_CD_TEXT[name],
-                "notice_seconds": ADVANCE_NOTICE_SECONDS[name],
-                "notice_text": ADVANCE_NOTICE_TEXT[name]
-            }
-    try: await asyncio.to_thread(db.reference('custom_bosses').set, custom_data)
-    except Exception: pass
-    await asyncio.to_thread(set_db_value, "custom_bosses", custom_data)
-    await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, custom_data)
-
-async def load_custom_bosses():
-    custom_data = None
-    try: custom_data = await asyncio.to_thread(db.reference('custom_bosses').get)
-    except Exception: pass
-    if not custom_data: custom_data = get_db_value("custom_bosses", None)
-    if custom_data:
-        for boss_name, data in custom_data.items():
-            BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
-            BOSS_CD_TEXT[boss_name] = data["cd_text"]
-            ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
-            ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
-            if boss_name not in BOSS_PRONUNCIATION:
-                BOSS_PRONUNCIATION[boss_name] = boss_name
-
-# ==========================================
-# 🤖 6. Discord Bot Setup & Voice Helper
-# ==========================================
-intents = discord.Intents.default()
-intents.message_content = True
-intents.voice_states = True
-intents.members = True 
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-async def setup_hook():
-    bot.add_view(QuickActionsView())
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ ซิงค์ Slash Commands สำเร็จทั้งหมด {len(synced)} คำสั่ง (จาก setup_hook)")
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการซิงค์คำสั่ง: {e}")
-
-bot.setup_hook = setup_hook
-
-@bot.tree.error
-async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
-    if isinstance(error, app_commands.MissingPermissions):
-        embed = discord.Embed(title="🚫 ปฏิเสธการเข้าถึง", description="คำสั่งนี้อนุญาตเฉพาะ **Administrator (ผู้ดูแลระบบ)**เท่านั้นครับ!", color=discord.Color.red())
-        if interaction.response.is_done(): await interaction.followup.send(embed=embed, ephemeral=True)
-        else: await interaction.response.send_message(embed=embed, ephemeral=True)
-    elif isinstance(error, app_commands.CheckFailure):
-        embed = discord.Embed(title="🚫 ปฏิเสธการเข้าถึง", description="คุณไม่มีสิทธิ์ใช้งานคำสั่งนี้!\nอนุญาตเฉพาะผู้ได้รับสิทธิ์หรือมีบทบาทที่กำหนดเท่านั้นครับ", color=discord.Color.red())
-        if interaction.response.is_done(): await interaction.followup.send(embed=embed, ephemeral=True)
-        else: await interaction.response.send_message(embed=embed, ephemeral=True)
-    else:
-        print(f"❌ เกิดข้อผิดพลาดของระบบ: {error}")
-        traceback.print_exc()
-        try:
-            message = "❌ คำสั่งเกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง"
-            if interaction.response.is_done():
-                await interaction.followup.send(message, ephemeral=True)
-            else:
-                await interaction.response.send_message(message, ephemeral=True)
-        except Exception as handler_error:
-            print(f"❌ ไม่สามารถส่ง error response ให้ Discord ได้: {handler_error}")
 
 def get_ffmpeg_path():
     try: return imageio_ffmpeg.get_ffmpeg_exe()
@@ -2748,7 +2594,7 @@ async def on_ready():
     await load_voice_config()
 
     # Voice is ON-DEMAND: do not connect on startup. /setvoice only stores the target channel.
-    print("🟢 Voice mode: ON-DEMAND (connect only when speaking, disconnect after TTS)")
+    print("🟢 Voice mode: ON-DEMAND GLOBAL (occupied-room announcements; connect only when speaking, disconnect after TTS)")
 
     await asyncio.sleep(3)
     
@@ -2984,23 +2830,35 @@ async def check_boss_notifications():
 
             if 0 < time_left <= notice_seconds and not voice_advance:
                 spoken_name = get_boss_pronunciation(boss_name)
+                all_ok = True
+                spoken_rooms = 0
                 for guild in target_guilds:
-                    try:
-                        result = await asyncio.wait_for(
-                            speak_in_guild(
-                                guild,
-                                text_th=f"บอส {spoken_name} จะเกิดในอีก {notice_minutes} นาทีค่ะ",
-                                text_en=f"Boss {boss_name} will spawn in {notice_minutes} minutes.",
-                                text_ko=f"보스 {boss_name}가 {notice_minutes}분 후에 나타납니다."
-                            ),
-                            timeout=180
-                        )
-                        if result is not False:
-                            await save_boss_notification_flags(boss_name, voice_notice_sent=True)
-                            voice_advance = True
-                            print(f"🔊 Advance TTS sent: {boss_name}")
-                    except Exception as e:
-                        print(f"⚠️ Advance TTS failed ({boss_name}/{guild.name}): {e}")
+                    rooms = get_occupied_voice_channels(guild)
+                    if not rooms:
+                        configured = get_configured_voice_channel(guild)
+                        rooms = [configured] if configured else []
+                    for room in rooms:
+                        try:
+                            result = await asyncio.wait_for(
+                                speak_in_guild(
+                                    guild,
+                                    text_th=f"บอส {spoken_name} จะเกิดในอีก {notice_minutes} นาทีค่ะ",
+                                    text_en=f"Boss {boss_name} will spawn in {notice_minutes} minutes.",
+                                    text_ko=f"보스 {boss_name}가 {notice_minutes}분 후에 나타납니다.",
+                                    target_channel=room
+                                ),
+                                timeout=180
+                            )
+                            spoken_rooms += 1
+                            if result is False:
+                                all_ok = False
+                        except Exception as e:
+                            all_ok = False
+                            print(f"⚠️ Advance TTS failed ({boss_name}/{guild.name}/{room.name}): {e}")
+                if spoken_rooms > 0 and all_ok:
+                    await save_boss_notification_flags(boss_name, voice_notice_sent=True)
+                    voice_advance = True
+                    print(f"🔊 Advance TTS sent: {boss_name} -> {spoken_rooms} occupied room(s)")
 
             # Spawn: only notify at the actual crossing. Old schedules >60s late
             # are marked complete instead of replaying after every deploy/reload.
@@ -3025,23 +2883,35 @@ async def check_boss_notifications():
 
             if -60 <= time_left <= 0 and not voice_spawn:
                 spoken_name = get_boss_pronunciation(boss_name)
+                all_ok = True
+                spoken_rooms = 0
                 for guild in target_guilds:
-                    try:
-                        result = await asyncio.wait_for(
-                            speak_in_guild(
-                                guild,
-                                text_th=f"บอส {spoken_name} เกิดแล้วค่ะ",
-                                text_en=f"Boss {boss_name} has spawned.",
-                                text_ko=f"보스 {boss_name}가 나타났습니다."
-                            ),
-                            timeout=180
-                        )
-                        if result is not False:
-                            await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
-                            voice_spawn = True
-                            print(f"🔊 Spawn TTS sent: {boss_name}")
-                    except Exception as e:
-                        print(f"⚠️ Spawn TTS failed ({boss_name}/{guild.name}): {e}")
+                    rooms = get_occupied_voice_channels(guild)
+                    if not rooms:
+                        configured = get_configured_voice_channel(guild)
+                        rooms = [configured] if configured else []
+                    for room in rooms:
+                        try:
+                            result = await asyncio.wait_for(
+                                speak_in_guild(
+                                    guild,
+                                    text_th=f"บอส {spoken_name} เกิดแล้วค่ะ",
+                                    text_en=f"Boss {boss_name} has spawned.",
+                                    text_ko=f"보스 {boss_name}가 나타났습니다.",
+                                    target_channel=room
+                                ),
+                                timeout=180
+                            )
+                            spoken_rooms += 1
+                            if result is False:
+                                all_ok = False
+                        except Exception as e:
+                            all_ok = False
+                            print(f"⚠️ Spawn TTS failed ({boss_name}/{guild.name}/{room.name}): {e}")
+                if spoken_rooms > 0 and all_ok:
+                    await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
+                    voice_spawn = True
+                    print(f"🔊 Spawn TTS sent: {boss_name} -> {spoken_rooms} occupied room(s)")
             elif time_left < -60 and not voice_spawn:
                 await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
                 print(f"⏭️ Legacy expired boss marked complete: {boss_name} (left={time_left:.1f}s)")
@@ -3118,13 +2988,6 @@ async def check_auto_disconnect():
             vc = guild.voice_client
             if vc and vc.is_connected() and vc.channel:
                 human_members = [m for m in vc.channel.members if not m.bot]
-                # ห้องที่ตั้งด้วย /setvoice ต้องคง connection ไว้ ไม่ให้ task นี้ตัดสาย
-                configured = get_configured_voice_channel(guild)
-                if configured and vc.channel and vc.channel.id == configured.id:
-                    if guild.id in voice_empty_start:
-                        del voice_empty_start[guild.id]
-                    continue
-
                 if len(human_members) == 0:
                     if guild.id not in voice_empty_start:
                         voice_empty_start[guild.id] = now
@@ -3522,16 +3385,41 @@ async def notice_command(interaction: discord.Interaction, message: str):
     if not message.strip():
         await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
         return
-    embed = discord.Embed(title="📢 ประกาศข้อความเสียง (Global Notice)", description=f"**ข้อความ:** {message}\n\nกำลังไล่ประกาศในทุกห้องเสียงที่มีสมาชิกอยู่...", color=discord.Color.blue())
-    embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
-    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # Global notice: visit every occupied voice channel in this guild.
+    occupied = []
+    for vc in interaction.guild.voice_channels:
+        humans = [m for m in vc.members if not m.bot]
+        if humans:
+            occupied.append(vc)
+
+    if not occupied:
+        await interaction.followup.send("⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย", ephemeral=True)
+        return
+
+    names = ", ".join(f"**{vc.name}**" for vc in occupied)
+    await interaction.followup.send(
+        f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\n"
+        "บอทจะเข้า → พูด → ออกทีละห้อง",
+        ephemeral=True
+    )
+
     async def _run_notice_tts():
-        try:
-            ok = await speak_in_guild(interaction.guild, text_th=message, text_en=message, text_ko=message)
-            print(f"📢 /notice TTS {'success' if ok else 'failed'}: {interaction.guild.name}")
-        except Exception as e:
-            print(f"❌ /notice TTS failed: {e}")
-            traceback.print_exc()
+        results = []
+        for vc in occupied:
+            try:
+                ok = await speak_in_guild(
+                    interaction.guild,
+                    text_th=message, text_en=message, text_ko=message,
+                    target_channel=vc
+                )
+                results.append((vc.name, ok))
+            except Exception as e:
+                print(f"❌ /notice TTS failed in {vc.name}: {e}")
+                results.append((vc.name, False))
+        ok_count = sum(1 for _, ok in results if ok)
+        print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
+
     asyncio.create_task(_run_notice_tts())
 
 # ==========================================
