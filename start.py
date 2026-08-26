@@ -14,6 +14,7 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 import voice_patch
+import boss_notification_patch
 
 COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
@@ -23,6 +24,7 @@ def log(message: str):
 
 
 voice_patch.install(bot_module, log)
+boss_notification_patch.install(bot_module, log)
 
 
 async def patched_setup_hook():
@@ -74,10 +76,7 @@ async def sync_commands_once():
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
 
         local_commands = bot_module.bot.tree.get_commands()
-        command_names = sorted(
-            getattr(command, "qualified_name", getattr(command, "name", "unknown"))
-            for command in local_commands
-        )
+        command_names = sorted(getattr(command, "qualified_name", getattr(command, "name", "unknown")) for command in local_commands)
         log(f"📋 Local commands: {len(command_names)}")
         log("📋 " + ", ".join(command_names))
 
@@ -138,6 +137,8 @@ async def startup_command_sync():
                 await bot_module.ensure_notification_tasks_started()
             if hasattr(bot_module, "start_voice_watchdog"):
                 await bot_module.start_voice_watchdog()
+            if hasattr(bot_module, "start_notification_health_probe"):
+                await bot_module.start_notification_health_probe()
         else:
             log("⚠️ Notification/Voice startup deferred because command sync is incomplete")
 
@@ -182,41 +183,29 @@ async def run_bot_with_backoff(token: str):
             retry_after = getattr(exc, "retry_after", None)
             delay = min(max(float(retry_after), backoff) if retry_after is not None else backoff, max_backoff)
             log(f"🛑 Discord HTTP error — รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}")
-            try:
-                await bot_module.bot.close()
-            except Exception:
-                pass
-            try:
-                bot_module.bot.clear()
-            except Exception:
-                pass
+            try: await bot_module.bot.close()
+            except Exception: pass
+            try: bot_module.bot.clear()
+            except Exception: pass
             await asyncio.sleep(delay)
             backoff = min(backoff * 2, max_backoff)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             delay = min(backoff, max_backoff)
             log(f"🛑 Discord network error — รอ {delay:.0f} วินาทีก่อนสร้าง Gateway session ใหม่: {exc!r}")
-            try:
-                await bot_module.bot.close()
-            except Exception:
-                pass
-            try:
-                bot_module.bot.clear()
-            except Exception:
-                pass
+            try: await bot_module.bot.close()
+            except Exception: pass
+            try: bot_module.bot.clear()
+            except Exception: pass
             await asyncio.sleep(delay)
             backoff = min(backoff * 2, max_backoff)
         except RuntimeError as exc:
             if "Session is closed" in str(exc):
                 delay = min(backoff, max_backoff)
                 log(f"⚠️ Discord session ถูกปิดก่อนเริ่มใหม่ — รอ {delay:.0f} วินาทีแล้ว reset client")
-                try:
-                    await bot_module.bot.close()
-                except Exception:
-                    pass
-                try:
-                    bot_module.bot.clear()
-                except Exception:
-                    pass
+                try: await bot_module.bot.close()
+                except Exception: pass
+                try: bot_module.bot.clear()
+                except Exception: pass
                 await asyncio.sleep(delay)
                 backoff = min(backoff * 2, max_backoff)
                 continue
@@ -255,10 +244,8 @@ async def main():
         await run_bot_with_backoff(token)
     finally:
         heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
+        try: await heartbeat_task
+        except asyncio.CancelledError: pass
 
 
 if __name__ == "__main__":
