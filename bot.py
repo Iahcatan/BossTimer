@@ -492,29 +492,9 @@ SETTINGS_FILE = "bot_settings.json"
 DEFAULT_TARGET_ROLE_IDS = []
 env_target_roles = os.environ.get("TARGET_ROLE_IDS", "")
 TARGET_ROLE_IDS = [int(r.strip()) for r in env_target_roles.split(",") if r.strip().isdigit()] if env_target_roles else DEFAULT_TARGET_ROLE_IDS
-
-TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
-
-def get_notification_role_mentions(guild: discord.Guild) -> list[str]:
-    """Resolve notification roles by configured IDs first, then by exact role names.
-    This prevents silent loss of @Eternal/@Meaw/@Anti when Render env role IDs are missing.
-    """
-    if not guild:
-        return []
-    mentions = []
-    seen = set()
-    for role_id in TARGET_ROLE_IDS:
-        role = guild.get_role(role_id)
-        if role and role.id not in seen:
-            mentions.append(role.mention)
-            seen.add(role.id)
-    for wanted in TARGET_ROLE_NAMES:
-        for role in guild.roles:
-            if role.name.casefold() == wanted.casefold() and role.id not in seen:
-                mentions.append(role.mention)
-                seen.add(role.id)
-                break
-    return mentions
+DEFAULT_TARGET_ROLE_NAMES = ["Eternal", "Meaw", "Anti"]
+env_target_role_names = os.environ.get("TARGET_ROLE_NAMES", "")
+TARGET_ROLE_NAMES = [x.strip() for x in env_target_role_names.split(",") if x.strip()] if env_target_role_names else DEFAULT_TARGET_ROLE_NAMES
 
 DEFAULT_BF_ROLE_IDS = []
 env_bf_roles = os.environ.get("BF_ROLE_IDS", "")
@@ -525,8 +505,6 @@ LIVE_CHANNEL_NAME = "boss-schedule"
 
 voice_empty_start = {}
 voice_locks = {}
-notification_cycle_lock = asyncio.Lock()
-notification_inflight = set()
 voice_connect_locks = {}
 disconnect_tasks = {}
 voice_config = {}
@@ -778,7 +756,7 @@ def _schedule_record_to_firebase(boss_name: str, data: dict) -> dict:
         "recordedBy": data.get("recordedBy") or data.get("recorded_by") or "-",
         "notifiedNotice": parse_bool(data.get("notifiedNotice", data.get("notified_advance", False))),
         "notifiedSpawn": parse_bool(data.get("notifiedSpawn", data.get("notified_spawn", False))),
-        "voiceAdvanceSent": parse_bool(data.get("voiceAdvanceSent", data.get("voice_advance_sent", False))),
+        "voiceNoticeSent": parse_bool(data.get("voiceNoticeSent", data.get("voice_notice_sent", False))),
         "voiceSpawnSent": parse_bool(data.get("voiceSpawnSent", data.get("voice_spawn_sent", False))),
     }
     if kill_ms is not None:
@@ -806,7 +784,7 @@ def _firebase_to_internal(boss_name: str, data: dict) -> dict | None:
         "voice_channel_id": record.get("voiceChannelId"),
         "notified_advance": record.get("notifiedNotice", False),
         "notified_spawn": record.get("notifiedSpawn", False),
-        "voice_advance_sent": record.get("voiceAdvanceSent", False),
+        "voice_notice_sent": record.get("voiceNoticeSent", False),
         "voice_spawn_sent": record.get("voiceSpawnSent", False),
         "noticeMinutes": record.get("noticeMinutes", 5),
         "recorded_by": record.get("recordedBy", "-"),
@@ -875,14 +853,6 @@ def start_firebase_listener(loop):
                 if internal:
                     new_schedule[canonical] = internal
             with schedule_lock:
-                previous = dict(boss_schedule)
-                for name, incoming in new_schedule.items():
-                    old = previous.get(name)
-                    if old and old.get("spawn_time") == incoming.get("spawn_time"):
-                        incoming["notified_advance"] = parse_bool(old.get("notified_advance", incoming.get("notified_advance", False)))
-                        incoming["notified_spawn"] = parse_bool(old.get("notified_spawn", incoming.get("notified_spawn", False)))
-                        incoming["voice_advance_sent"] = parse_bool(old.get("voice_advance_sent", incoming.get("voice_advance_sent", False)))
-                        incoming["voice_spawn_sent"] = parse_bool(old.get("voice_spawn_sent", incoming.get("voice_spawn_sent", False)))
                 boss_schedule.clear()
                 boss_schedule.update(new_schedule)
             print(f"🔄 Firebase boss_schedule sync: {len(new_schedule)} รายการ")
@@ -1089,48 +1059,17 @@ async def save_custom_bosses_to_github():
 
 async def load_custom_bosses():
     custom_data = None
-    try:
-        custom_data = await asyncio.to_thread(db.reference("custom_bosses").get)
-    except Exception as e:
-        print(f"⚠️ อ่าน custom_bosses จาก Firebase ไม่สำเร็จ: {e}")
-
-    if not custom_data:
-        custom_data = get_db_value("custom_bosses", None)
-
-    if not isinstance(custom_data, dict):
-        if custom_data is not None:
-            print("⚠️ custom_bosses ไม่ใช่ object — ข้ามข้อมูลเก่า/placeholder")
-        return
-
-    for boss_name, data in custom_data.items():
-        if not isinstance(data, dict):
-            print(f"⚠️ ข้าม custom_bosses[{boss_name!r}] เพราะไม่ใช่ object")
-            continue
-
-        total_seconds = data.get("total_seconds")
-        if not isinstance(total_seconds, (int, float)) or total_seconds <= 0:
-            print(f"⚠️ ข้าม custom boss {boss_name!r}: total_seconds ไม่ถูกต้อง")
-            continue
-
-        notice_seconds = data.get("notice_seconds", 300)
-        if not isinstance(notice_seconds, (int, float)) or notice_seconds < 0:
-            notice_seconds = 300
-
-        cd_text = data.get("cd_text")
-        if not isinstance(cd_text, str) or not cd_text.strip():
-            cd_text = f"{int(total_seconds // 60)} นาที"
-
-        notice_text = data.get("notice_text")
-        if not isinstance(notice_text, str) or not notice_text.strip():
-            notice_text = f"{int(notice_seconds // 60)} นาที"
-
-        boss_name = str(boss_name)
-        BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=float(total_seconds))
-        BOSS_CD_TEXT[boss_name] = cd_text
-        ADVANCE_NOTICE_SECONDS[boss_name] = int(notice_seconds)
-        ADVANCE_NOTICE_TEXT[boss_name] = notice_text
-        if boss_name not in BOSS_PRONUNCIATION:
-            BOSS_PRONUNCIATION[boss_name] = boss_name
+    try: custom_data = await asyncio.to_thread(db.reference('custom_bosses').get)
+    except Exception: pass
+    if not custom_data: custom_data = get_db_value("custom_bosses", None)
+    if custom_data:
+        for boss_name, data in custom_data.items():
+            BOSS_RESPAWN_TIMES[boss_name] = timedelta(seconds=data["total_seconds"])
+            BOSS_CD_TEXT[boss_name] = data["cd_text"]
+            ADVANCE_NOTICE_SECONDS[boss_name] = data["notice_seconds"]
+            ADVANCE_NOTICE_TEXT[boss_name] = data["notice_text"]
+            if boss_name not in BOSS_PRONUNCIATION:
+                BOSS_PRONUNCIATION[boss_name] = boss_name
 
 # ==========================================
 # 🤖 6. Discord Bot Setup & Voice Helper
@@ -1198,13 +1137,13 @@ def clean_display_name(name: str) -> str:
 async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str = None, text_ko: str = None, target_channel: discord.VoiceChannel = None):
     """พูด TTS ในห้องที่ตั้งค่าไว้ โดยคง Voice connection ไว้และไม่ disconnect หลังพูด"""
     if not guild:
-        return
+        return False
 
     actual_text_th = text_th if (tts_th_enabled and text_th) else None
     actual_text_en = text_en if (tts_en_enabled and text_en) else None
     actual_text_ko = text_ko if (tts_ko_enabled and text_ko) else None
     if not (actual_text_th or actual_text_en or actual_text_ko):
-        return
+        return False
 
     if guild.id not in voice_locks:
         voice_locks[guild.id] = asyncio.Lock()
@@ -1218,7 +1157,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
                 channel = vc_existing.channel
         if channel is None:
             print(f"⚠️ ยังไม่ได้ตั้ง /setvoice สำหรับเซิร์ฟเวอร์ {guild.name}; ข้าม TTS เพื่อป้องกันการเข้า/ออก Voice รัว ๆ")
-            return
+            return False
 
         # ถ้าเป็นห้องที่ตั้งค่าไว้ ให้ ensure connection; ถ้า target_channel เป็นห้องชั่วคราวก็ใช้ connection เดิม/ย้ายได้
         if configured is not None:
@@ -1230,14 +1169,14 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
                     await vc.move_to(channel)
                 except Exception as e:
                     print(f"⚠️ ย้าย Voice ไป {channel.name} ไม่สำเร็จ: {e}")
-                    return
+                    return False
             elif vc is None:
                 # ไม่สร้าง connection ชั่วคราวถ้ายังไม่มี /setvoice
                 print(f"⚠️ ห้อง {channel.name} ยังไม่มี connection และยังไม่ได้ตั้ง /setvoice")
-                return
+                return False
 
         if not vc or not vc.is_connected():
-            return
+            return False
 
         unique_id = uuid.uuid4().hex
         tts_files = []
@@ -1245,6 +1184,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
         if actual_text_en: tts_files.append(("en", actual_text_en, VOICE_ENG, f"temp_tts_en_{guild.id}_{unique_id}.mp3", "-10%", "+0Hz"))
         if actual_text_ko: tts_files.append(("ko", actual_text_ko, VOICE_KOR, f"temp_tts_ko_{guild.id}_{unique_id}.mp3", "-10%", "+0Hz"))
 
+        playback_succeeded = False
         try:
             # Give edge-tts an explicit session so aiohttp resources are always closed.
             async with aiohttp.ClientSession() as tts_session:
@@ -1278,6 +1218,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
                 try:
                     vc.play(source, after=after_playing)
                     await asyncio.wait_for(finished.wait(), timeout=45)
+                    playback_succeeded = True
                 except asyncio.TimeoutError:
                     print(f"⚠️ TTS timeout ใน {guild.name}")
                     if vc.is_playing():
@@ -1293,6 +1234,7 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
                         os.remove(filename)
                 except Exception:
                     pass
+        return playback_succeeded
 
 # ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
@@ -1324,115 +1266,30 @@ async def on_ready():
     print(f"🔊 ใช้ FFmpeg จากตำแหน่ง: {get_ffmpeg_path()}")
 
     init_db()
+    await load_bot_settings()
+    await load_custom_bosses()
+    await load_boss_data()
+    await load_live_config()
+    await load_vip_config()
+    await load_voice_config()
 
-    # ==========================================
-    # 🔥 โหลด Firebase แต่ละส่วนแยกกัน
-    # เพื่อไม่ให้ Firebase จุดหนึ่งผิดพลาด
-    # แล้วทำให้ Discord Bot ทั้งหมดหยุด
-    # ==========================================
-
-    try:
-        await load_bot_settings()
-        print("✅ load_bot_settings สำเร็จ")
-    except Exception as e:
-        print(f"❌ load_bot_settings ERROR: {e}")
-        traceback.print_exc()
-
-    try:
-        await load_custom_bosses()
-        print("✅ load_custom_bosses สำเร็จ")
-    except Exception as e:
-        print(f"❌ load_custom_bosses ERROR: {e}")
-        traceback.print_exc()
-
-    try:
-        await load_boss_data()
-        print("✅ load_boss_data สำเร็จ")
-    except Exception as e:
-        print(f"❌ load_boss_data ERROR: {e}")
-        traceback.print_exc()
-
-    try:
-        await load_live_config()
-        print("✅ load_live_config สำเร็จ")
-    except Exception as e:
-        print(f"❌ load_live_config ERROR: {e}")
-        traceback.print_exc()
-
-    try:
-        await load_vip_config()
-        print("✅ load_vip_config สำเร็จ")
-    except Exception as e:
-        print(f"❌ load_vip_config ERROR: {e}")
-        traceback.print_exc()
-
-    try:
-        await load_voice_config()
-        print("✅ load_voice_config สำเร็จ")
-    except Exception as e:
-        print(f"❌ load_voice_config ERROR: {e}")
-        traceback.print_exc()
-
-    # ==========================================
-    # 🔊 เชื่อมต่อ Voice Channel ที่บันทึกไว้
-    # ==========================================
-
+    # เชื่อมต่อห้อง Voice ที่บันทึกไว้ครั้งเดียวต่อเซิร์ฟเวอร์
     for guild in bot.guilds:
-        try:
-            if get_configured_voice_channel(guild):
-                asyncio.create_task(
-                    ensure_configured_voice(guild)
-                )
-        except Exception as e:
-            print(
-                f"❌ เชื่อมต่อ Voice ของ "
-                f"{guild.name} ไม่สำเร็จ: {e}"
-            )
-
-    # ==========================================
-    # ⏳ รอให้ข้อมูล Firebase โหลดเสร็จ
-    # ==========================================
+        if get_configured_voice_channel(guild):
+            asyncio.create_task(ensure_configured_voice(guild))
 
     await asyncio.sleep(3)
-
-    # ==========================================
-    # ⏰ เริ่ม Background Tasks
-    # ==========================================
-
-    if not check_boss_notifications.is_running():
-        check_boss_notifications.start()
-
-    if not check_bf_notifications.is_running():
-        check_bf_notifications.start()
-
-    if not check_library_boss_notifications.is_running():
-        check_library_boss_notifications.start()
-
-    if not update_live_embed.is_running():
-        update_live_embed.start()
-
-    if not check_auto_disconnect.is_running():
-        check_auto_disconnect.start()
-
-    # ==========================================
-    # 🟢 Bot พร้อมใช้งาน
-    # ==========================================
+    
+    if not check_boss_notifications.is_running(): check_boss_notifications.start()
+    if not check_bf_notifications.is_running(): check_bf_notifications.start()
+    if not check_library_boss_notifications.is_running(): check_library_boss_notifications.start()
+    if not update_live_embed.is_running(): update_live_embed.start()
+    if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
 
     is_bot_ready = True
-
     loop = asyncio.get_running_loop()
+    threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
 
-    threading.Thread(
-        target=start_firebase_listener,
-        args=(loop,),
-        daemon=True
-    ).start()
-
-    print("=" * 60)
-    print("🟢 DISCORD BOT READY")
-    print(f"🤖 Bot: {bot.user}")
-    print(f"🏠 Guilds: {len(bot.guilds)}")
-    print("=" * 60)
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
 # ==========================================
@@ -1520,188 +1377,190 @@ async def check_library_boss_notifications():
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_library_boss_notifications': {e}")
 
-@tasks.loop(seconds=10)
-async def check_boss_notifications():
-    """Single-owner boss notifier.
-
-    Rules:
-      - noticeMinutes stored with each schedule is authoritative.
-      - Firebase/browser writes cannot reset an already-sent in-memory flag for the same spawn.
-      - @Eternal/@Meaw/@Anti are resolved by ID and then by role name.
-      - Voice notification is awaited and logged, so a TTS failure is visible and can retry.
-      - One cycle is locked to prevent duplicate sends.
-    """
-    if notification_cycle_lock.locked():
-        return
-    async with notification_cycle_lock:
+def get_notification_mentions(guild: discord.Guild) -> str:
+    if not guild:
+        return ""
+    roles = []
+    seen = set()
+    for role_id in TARGET_ROLE_IDS:
         try:
-            now = datetime.now(TZ_THAI)
-            with schedule_lock:
-                schedule_copy = {k: dict(v) for k, v in boss_schedule.items()}
+            role = guild.get_role(int(role_id))
+        except (TypeError, ValueError):
+            role = None
+        if role and role.id not in seen:
+            roles.append(role)
+            seen.add(role.id)
+    for role_name in TARGET_ROLE_NAMES:
+        role = discord.utils.find(lambda r: r.name.casefold() == role_name.casefold(), guild.roles)
+        if role and role.id not in seen:
+            roles.append(role)
+            seen.add(role.id)
+    return " ".join(role.mention for role in roles)
 
-            for boss_name, data in schedule_copy.items():
-                spawn_time = parse_to_thai_datetime(data.get("spawn_time"))
-                if not spawn_time:
-                    continue
 
-                time_left = (spawn_time - now).total_seconds()
-                try:
-                    notice_limit = max(1, int(data.get("noticeMinutes") or get_boss_advance_notice_seconds(boss_name) / 60)) * 60
-                except (TypeError, ValueError):
-                    notice_limit = max(60, int(get_boss_advance_notice_seconds(boss_name)))
-                notice_minutes = max(1, int(round(notice_limit / 60)))
+async def save_boss_notification_flags(boss_name: str, **flags):
+    clean = {k: bool(v) for k, v in flags.items()}
+    if not clean:
+        return
+    with schedule_lock:
+        if boss_name in boss_schedule:
+            boss_schedule[boss_name].update(clean)
+    mapping = {
+        "notified_advance": "notifiedNotice",
+        "notified_spawn": "notifiedSpawn",
+        "voice_notice_sent": "voiceNoticeSent",
+        "voice_spawn_sent": "voiceSpawnSent",
+    }
+    try:
+        await asyncio.to_thread(
+            db.reference(f"boss_schedule/{boss_name}").update,
+            {mapping.get(k, k): v for k, v in clean.items()}
+        )
+    except Exception as e:
+        print(f"⚠️ Firebase notification flag update failed: {boss_name}: {e}")
 
-                notified_advance = parse_bool(data.get("notified_advance", False))
-                notified_spawn = parse_bool(data.get("notified_spawn", False))
-                voice_advance_sent = parse_bool(data.get("voice_advance_sent", False))
-                voice_spawn_sent = parse_bool(data.get("voice_spawn_sent", False))
-                channel_id = data.get("channel_id")
-                try:
-                    channel_id = int(channel_id) if channel_id is not None else None
-                except (TypeError, ValueError):
-                    channel_id = None
 
-                channel = bot.get_channel(channel_id) if channel_id else None
-                if channel is None and channel_id:
-                    now_mono = time.monotonic()
-                    last_fetch = last_channel_fetch_attempt.get(channel_id, 0.0)
-                    if now_mono - last_fetch >= 300:
-                        last_channel_fetch_attempt[channel_id] = now_mono
-                        try:
-                            channel = await bot.fetch_channel(channel_id)
-                        except Exception as exc:
-                            print(f"⚠️ fetch notification channel {channel_id} failed: {exc}")
+@tasks.loop(seconds=5)
+async def check_boss_notifications():
+    try:
+        now = datetime.now(TZ_THAI)
+        with schedule_lock:
+            schedule_copy = {boss: dict(data) for boss, data in boss_schedule.items() if isinstance(data, dict)}
 
-                channels_to_notify = [channel] if channel else []
-                if not channels_to_notify:
-                    for guild in bot.guilds:
-                        fb_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
-                        if not fb_channel:
-                            fb_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
-                        if fb_channel and fb_channel not in channels_to_notify:
-                            channels_to_notify.append(fb_channel)
+        for boss_name, data in schedule_copy.items():
+            spawn_time = parse_to_thai_datetime(data.get("spawn_time") or data.get("spawnTimeMs"))
+            if not spawn_time:
+                print(f"⚠️ Boss notification skip: {boss_name} has invalid spawn time")
+                continue
 
+            time_left = (spawn_time - now).total_seconds()
+            try:
+                notice_minutes = max(1, int(data.get("noticeMinutes") or get_boss_advance_notice_seconds(boss_name) / 60))
+            except (TypeError, ValueError):
+                notice_minutes = max(1, int(get_boss_advance_notice_seconds(boss_name) / 60))
+            notice_seconds = notice_minutes * 60
+            notified_advance = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
+            notified_spawn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
+            voice_advance = parse_bool(data.get("voice_notice_sent", data.get("voiceNoticeSent", False)))
+            voice_spawn = parse_bool(data.get("voice_spawn_sent", data.get("voiceSpawnSent", False)))
+
+            if 0 < time_left <= notice_seconds + 5 or -60 <= time_left <= 0:
                 print(
-                    f"🔎 Boss notification check (loop): {boss_name} | "
-                    f"spawn={spawn_time.isoformat()} | left={time_left:.1f}s | "
-                    f"notice={notice_minutes}m | advance={time_left > 0 and time_left <= notice_limit} | "
-                    f"spawn_sent={notified_spawn} | voice_advance={data.get('voice_advance_sent', False)} | "
-                    f"voice_spawn={data.get('voice_spawn_sent', False)}"
+                    f"🔎 Boss notification check (loop): {boss_name} | spawn={spawn_time.isoformat()} | "
+                    f"left={time_left:.1f}s | notice={notice_minutes}m | advance={notified_advance} | "
+                    f"spawn_sent={notified_spawn} | voice_advance={voice_advance} | voice_spawn={voice_spawn}"
                 )
 
-                # ---- Advance notice ----
-                if 0 < time_left <= notice_limit and (not notified_advance or not voice_advance_sent):
-                    claim_key = (boss_name, int(spawn_time.timestamp()), "advance")
-                    if claim_key in notification_inflight:
-                        continue
-                    notification_inflight.add(claim_key)
+            channel = None
+            channel_id = data.get("channel_id") or data.get("channelId")
+            if channel_id:
+                try:
+                    channel = bot.get_channel(int(channel_id))
+                    if channel is None:
+                        channel = await bot.fetch_channel(int(channel_id))
+                except Exception:
+                    channel = None
+
+            channels_to_notify = [channel] if channel else []
+            if not channels_to_notify:
+                for guild in bot.guilds:
+                    fb_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+                    if not fb_channel:
+                        fb_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+                    if fb_channel:
+                        channels_to_notify.append(fb_channel)
+
+            target_guilds = {getattr(ch, "guild", None) for ch in channels_to_notify}
+            target_guilds.discard(None)
+            if not target_guilds:
+                target_guilds = set(bot.guilds)
+
+            # Advance: text and voice are independent one-shot states.
+            if 0 < time_left <= notice_seconds and not notified_advance:
+                embed = discord.Embed(
+                    title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
+                    description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_minutes} นาที**!\nเวลาเกิด: **{spawn_time.strftime('%H:%M:%S น.')}**",
+                    color=discord.Color.gold()
+                )
+                text_sent = False
+                for ch in channels_to_notify:
                     try:
-                        notice_text = f"{notice_minutes} นาที"
-                        spoken_name = get_boss_pronunciation(boss_name)
-                        notice_text_en = get_boss_advance_notice_text_en(boss_name)
-                        notice_text_ko = get_boss_advance_notice_text_ko(boss_name)
-                        embed = discord.Embed(
-                            title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
-                            description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_text}**!\nเวลาเกิด: **{spawn_time.strftime('%H:%M:%S น.')}**",
-                            color=discord.Color.gold()
-                        )
-                        send_ok = notified_advance
-                        for ch in channels_to_notify:
-                            if notified_advance:
-                                break
-                            guild = getattr(ch, "guild", None)
-                            mentions = get_notification_role_mentions(guild)
-                            content = " ".join(mentions) if mentions else None
-                            try:
-                                await ch.send(content=content, embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
-                            except Exception as exc:
-                                send_ok = False
-                                print(f"❌ ส่งข้อความเตือนล่วงหน้าไม่สำเร็จ: {exc}")
+                        mentions = get_notification_mentions(getattr(ch, "guild", None))
+                        await ch.send(content=mentions or None, embed=embed)
+                        text_sent = True
+                    except Exception as e:
+                        print(f"❌ ส่งข้อความ advance ไม่สำเร็จ ({boss_name}): {e}")
+                if text_sent:
+                    await save_boss_notification_flags(boss_name, notified_advance=True)
+                    notified_advance = True
+                    print(f"🟢 Advance notification sent: {boss_name}")
 
-                        voice_ok = True
-                        target_guilds = {getattr(ch, "guild", None) for ch in channels_to_notify if getattr(ch, "guild", None)}
-                        if not target_guilds:
-                            target_guilds = set(bot.guilds)
-                        for guild in target_guilds:
-                            spoken_th = f"บอส {spoken_name} จะเกิดในอีก {notice_text} ค่ะ"
-                            spoken_en = f"Boss {boss_name} will spawn in {notice_text_en}."
-                            spoken_ko = f"보스 {boss_name}가 {notice_text_ko} 후에 나타납니다."
-                            try:
-                                await speak_in_guild(guild, text_th=spoken_th, text_en=spoken_en, text_ko=spoken_ko)
-                                print(f"🔊 Advance TTS sent: {boss_name} -> {guild.name}")
-                            except Exception as exc:
-                                voice_ok = False
-                                print(f"❌ Advance TTS failed: {boss_name} -> {guild.name}: {exc}")
-
-                        # The bot owns these flags. Browser UI must never write them.
-                        if send_ok or voice_ok:
-                            with schedule_lock:
-                                if boss_name in boss_schedule and boss_schedule[boss_name].get("spawn_time") == spawn_time:
-                                    boss_schedule[boss_name]["notified_advance"] = bool(notified_advance or send_ok)
-                                    boss_schedule[boss_name]["voice_advance_sent"] = bool(voice_advance_sent or voice_ok)
-                            await save_boss_data()
-                            print(f"🟢 Advance notification completed: {boss_name} | text={send_ok} voice={voice_ok}")
-                    finally:
-                        notification_inflight.discard(claim_key)
-
-                # ---- Spawn notification ----
-                if time_left <= 0 and (not notified_spawn or not voice_spawn_sent):
-                    claim_key = (boss_name, int(spawn_time.timestamp()), "spawn")
-                    if claim_key in notification_inflight:
-                        continue
-                    notification_inflight.add(claim_key)
+            if 0 < time_left <= notice_seconds and not voice_advance:
+                spoken_name = get_boss_pronunciation(boss_name)
+                for guild in target_guilds:
                     try:
-                        embed = discord.Embed(
-                            title="⚔️ บอสเกิดแล้ว!",
-                            description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
-                            color=discord.Color.green()
+                        result = await asyncio.wait_for(
+                            speak_in_guild(
+                                guild,
+                                text_th=f"บอส {spoken_name} จะเกิดในอีก {notice_minutes} นาทีค่ะ",
+                                text_en=f"Boss {boss_name} will spawn in {notice_minutes} minutes.",
+                                text_ko=f"보스 {boss_name}가 {notice_minutes}분 후에 나타납니다."
+                            ),
+                            timeout=180
                         )
-                        send_ok = notified_spawn
-                        for ch in channels_to_notify:
-                            if notified_spawn:
-                                break
-                            guild = getattr(ch, "guild", None)
-                            mentions = get_notification_role_mentions(guild)
-                            content = " ".join(mentions) if mentions else None
-                            try:
-                                await ch.send(content=content, embed=embed, allowed_mentions=discord.AllowedMentions(roles=True))
-                            except Exception as exc:
-                                send_ok = False
-                                print(f"❌ ส่งข้อความบอสเกิดไม่สำเร็จ: {exc}")
+                        if result is not False:
+                            await save_boss_notification_flags(boss_name, voice_notice_sent=True)
+                            voice_advance = True
+                            print(f"🔊 Advance TTS sent: {boss_name}")
+                    except Exception as e:
+                        print(f"⚠️ Advance TTS failed ({boss_name}/{guild.name}): {e}")
 
-                        voice_ok = True
-                        target_guilds = {getattr(ch, "guild", None) for ch in channels_to_notify if getattr(ch, "guild", None)}
-                        if not target_guilds:
-                            target_guilds = set(bot.guilds)
-                        spoken_name = get_boss_pronunciation(boss_name)
-                        for guild in target_guilds:
-                            try:
-                                await speak_in_guild(
-                                    guild,
-                                    text_th=f"บอส {spoken_name} เกิดแล้วค่ะ",
-                                    text_en=f"Boss {boss_name} has spawned.",
-                                    text_ko=f"보스 {boss_name}가 나타났습니다."
-                                )
-                                print(f"🔊 Spawn TTS sent: {boss_name} -> {guild.name}")
-                            except Exception as exc:
-                                voice_ok = False
-                                print(f"❌ Spawn TTS failed: {boss_name} -> {guild.name}: {exc}")
+            # Spawn: only notify at the actual crossing. Old schedules >60s late
+            # are marked complete instead of replaying after every deploy/reload.
+            if time_left <= 0 and not notified_spawn:
+                embed = discord.Embed(
+                    title="⚔️ บอสเกิดแล้ว!",
+                    description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
+                    color=discord.Color.green()
+                )
+                text_sent = False
+                for ch in channels_to_notify:
+                    try:
+                        mentions = get_notification_mentions(getattr(ch, "guild", None))
+                        await ch.send(content=mentions or None, embed=embed)
+                        text_sent = True
+                    except Exception as e:
+                        print(f"❌ ส่งข้อความ spawn ไม่สำเร็จ ({boss_name}): {e}")
+                if text_sent:
+                    await save_boss_notification_flags(boss_name, notified_spawn=True)
+                    notified_spawn = True
+                    print(f"🟢 Spawn notification sent: {boss_name}")
 
-                        if send_ok or voice_ok:
-                            with schedule_lock:
-                                if boss_name in boss_schedule and boss_schedule[boss_name].get("spawn_time") == spawn_time:
-                                    boss_schedule[boss_name]["notified_spawn"] = bool(notified_spawn or send_ok)
-                                    boss_schedule[boss_name]["voice_spawn_sent"] = bool(voice_spawn_sent or voice_ok)
-                            await save_boss_data()
-                            print(f"🟢 Spawn notification completed: {boss_name} | text={send_ok} voice={voice_ok}")
-                    finally:
-                        notification_inflight.discard(claim_key)
+            if -60 <= time_left <= 0 and not voice_spawn:
+                spoken_name = get_boss_pronunciation(boss_name)
+                for guild in target_guilds:
+                    try:
+                        result = await asyncio.wait_for(
+                            speak_in_guild(
+                                guild,
+                                text_th=f"บอส {spoken_name} เกิดแล้วค่ะ",
+                                text_en=f"Boss {boss_name} has spawned.",
+                                text_ko=f"보스 {boss_name}가 나타났습니다."
+                            ),
+                            timeout=180
+                        )
+                        if result is not False:
+                            await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
+                            voice_spawn = True
+                            print(f"🔊 Spawn TTS sent: {boss_name}")
+                    except Exception as e:
+                        print(f"⚠️ Spawn TTS failed ({boss_name}/{guild.name}): {e}")
+            elif time_left < -60 and not voice_spawn:
+                await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
+                print(f"⏭️ Legacy expired boss marked complete: {boss_name} (left={time_left:.1f}s)")
 
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            print(f"❌ เกิดข้อผิดพลาดใน Task 'check_boss_notifications': {e}")
-            traceback.print_exc()
+    except Exception as e:
+        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_boss_notifications': {e}")
 
 @tasks.loop(seconds=60)
 async def update_live_embed():
@@ -2307,6 +2166,8 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
             "channelId": interaction.channel_id,
             "notifiedNotice": is_already_past,
             "notifiedSpawn": is_already_past,
+            "voiceNoticeSent": is_already_past,
+            "voiceSpawnSent": is_already_past,
             "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
             "recordedBy": user_name,
             "spawnTimeMs": int(next_spawn.timestamp() * 1000)
@@ -2319,16 +2180,11 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
                 "channel_id": interaction.channel_id,
                 "notified_advance": is_already_past,
                 "notified_spawn": is_already_past,
+                "voice_notice_sent": is_already_past,
+                "voice_spawn_sent": is_already_past,
                 "noticeMinutes": record["noticeMinutes"],
-                "recorded_by": user_name,
-                "voice_advance_sent": False,
-                "voice_spawn_sent": False
+                "recorded_by": user_name
             }
-        print(
-            f"🧪 /kill notification state: {canonical_name} | "
-            f"spawn={next_spawn.isoformat()} | left={(next_spawn-now).total_seconds():.1f}s | "
-            f"notice={record['noticeMinutes']}m | advance_due={0 < (next_spawn-now).total_seconds() <= record['noticeMinutes']*60}"
-        )
 
         cd_text = get_boss_cd_text(canonical_name)
 
@@ -2345,7 +2201,13 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
         async def persist_kill():
             try:
-                await asyncio.wait_for(save_boss_data(), timeout=10)
+                with schedule_lock:
+                    current = dict(boss_schedule.get(canonical_name, {}))
+                firebase_record = _schedule_record_to_firebase(canonical_name, current)
+                await asyncio.wait_for(
+                    asyncio.to_thread(db.reference(f"boss_schedule/{canonical_name}").set, firebase_record),
+                    timeout=10
+                )
                 print(f"💾 /kill saved: {canonical_name} -> {next_spawn.isoformat()}")
             except Exception as e:
                 print(f"❌ /kill Firebase save failed: {e}")
@@ -2365,6 +2227,18 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
                 print(f"⚠️ /kill audit log failed: {e}")
 
         asyncio.create_task(persist_kill())
+        async def post_kill_check():
+            await asyncio.sleep(0.25)
+            try:
+                await check_boss_notifications()
+                print(
+                    f"🔎 Boss notification check (post-/kill): {canonical_name} | "
+                    f"spawn={next_spawn.isoformat()} | left={(next_spawn - datetime.now(TZ_THAI)).total_seconds():.1f}s | "
+                    f"notice={int(get_boss_advance_notice_seconds(canonical_name)/60)}m"
+                )
+            except Exception as e:
+                print(f"⚠️ post-/kill notification check failed: {e}")
+        asyncio.create_task(post_kill_check())
 
     except Exception as e:
         print(f"❌ /kill unexpected error: {e}")
