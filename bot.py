@@ -269,116 +269,1531 @@ def get_db_value(key: str, default=None):
 # ==========================================
 app = Flask(__name__)
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="th">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Boss Timer Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <meta http-equiv="refresh" content="10">
+    <link href="https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;600&display=swap" rel="stylesheet">
+    
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
     <style>
-        body { background-color: #0f172a; color: #f8fafc; font-family: 'Kanit', sans-serif; }
-        .card { background-color: #1e293b; border: 1px solid #334155; border-radius: 12px; }
-        .status-badge { font-size: 0.9rem; padding: 6px 12px; border-radius: 20px; }
-        .table { color: #f8fafc; }
-        .table-dark { --bs-table-bg: #1e293b; }
-        .form-check-input:checked { background-color: #0d6efd; border-color: #0d6efd; }
+        body {
+            background-color: #0f172a;
+            color: #f8fafc;
+            font-family: 'Kanit', sans-serif;
+        }
+        .card {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+        }
+        .form-label {
+            color: #ffffff !important;
+            font-weight: 500;
+        }
+        .form-control, .form-select {
+            background-color: #0f172a !important;
+            border: 1px solid #334155;
+            color: #ffffff !important;
+        }
+        .form-control::placeholder {
+            color: #64748b;
+        }
+        .form-control:focus, .form-select:focus {
+            background-color: #0f172a !important;
+            color: #ffffff !important;
+            border-color: #3b82f6;
+            box-shadow: none;
+        }
+        .table {
+            color: #f8fafc;
+        }
+        .table-dark {
+            --bs-table-bg: #1e293b;
+            --bs-table-hover-bg: #334155;
+        }
+        .status-badge {
+            font-size: 0.85rem;
+            padding: 5px 10px;
+            border-radius: 15px;
+        }
+        .settings-bar {
+            background-color: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 12px;
+            padding: 12px 20px;
+        }
+        footer, footer small {
+            color: #ffffff !important;
+        }
+        .modal-content {
+            background-color: #1e293b;
+            color: #f8fafc;
+            border: 1px solid #334155;
+        }
+        .nav-tabs .nav-link {
+            color: #94a3b8;
+            border: none;
+        }
+        .nav-tabs .nav-link.active {
+            background-color: transparent;
+            color: #38bdf8;
+            border-bottom: 3px solid #38bdf8;
+            font-weight: 600;
+        }
     </style>
+<style>
+.skynet-logo{width:52px;height:52px;object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,.25);box-shadow:0 4px 16px rgba(0,0,0,.35)}
+@media(max-width:576px){.skynet-logo{width:42px;height:42px}}
+</style>
 </head>
 <body>
-    <div class="container py-5">
-        <div class="d-flex justify-content-between align-items-center mb-4">
-            <h2>⚔️ Boss Timer Dashboard</h2>
-            <span class="badge bg-success status-badge">🟢 Bot Online</span>
-        </div>
+    <div id="authContainer" class="container py-5" style="max-width: 450px;">
+        <div class="card p-4 shadow-lg">
+            
+            <div class="d-flex justify-content-end mb-2">
+                <select id="authLangSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">
+                    <option value="th">🇹🇭 ไทย (TH)</option>
+                    <option value="en">🇺🇸 English (EN)</option>
+                    <option value="ko">🇰🇷 한국어 (KO)</option>
+                </select>
+            </div>
 
-        <!-- 🔊 สวิตช์ตั้งค่าเปิด-ปิดการแจ้งเตือนเสียง TTS แยกภาษา -->
-        <div class="card p-4 shadow-sm mb-4">
-            <h4 class="card-title text-info mb-3">🔊 ตั้งค่าการแจ้งเตือนด้วยเสียง (TTS แยกตามภาษา)</h4>
-            <div class="row g-3">
-                <div class="col-md-4">
-                    <div class="form-check form-switch fs-5">
-                        <input class="form-check-input" type="checkbox" id="tts_th" {% if tts_th %}checked{% endif %} onchange="updateTTS('th', this.checked)">
-                        <label class="form-check-label" for="tts_th">🇹🇭 เสียงภาษาไทย (TH)</label>
-                    </div>
+            <h3 class="text-center text-warning mb-4" data-i18n="authTitle">⚔️ Boss Timer Access</h3>
+            
+            <ul class="nav nav-tabs nav-justified mb-3" id="authTabs" role="tablist">
+                <li class="nav-item">
+                    <button class="nav-link active" id="login-tab" data-bs-toggle="tab" data-bs-target="#loginPane" type="button" data-i18n="tabLogin">เข้าสู่ระบบ</button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" id="register-tab" data-bs-toggle="tab" data-bs-target="#registerPane" type="button" data-i18n="tabRegister">ลงทะเบียน</button>
+                </li>
+            </ul>
+
+            <div class="tab-content">
+                <div class="tab-pane fade show active" id="loginPane" role="tabpanel">
+                    <form id="loginForm" autocomplete="off">
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
+                            <input type="text" id="loginUser" class="form-control" placeholder="กรอกชื่อผู้ใช้" data-i18n-ph="phLoginUser" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
+                            <input type="password" id="loginPass" class="form-control" placeholder="กรอกรหัสผ่าน" data-i18n-ph="phLoginPass" required>
+                        </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="rememberMe">
+                            <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
+                        <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
+                            🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
+                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
+                        </div>
+                    </form>
                 </div>
-                <div class="col-md-4">
-                    <div class="form-check form-switch fs-5">
-                        <input class="form-check-input" type="checkbox" id="tts_en" {% if tts_en %}checked{% endif %} onchange="updateTTS('en', this.checked)">
-                        <label class="form-check-label" for="tts_en">🇺🇸 เสียงภาษาอังกฤษ (EN)</label>
-                    </div>
-                </div>
-                <div class="col-md-4">
-                    <div class="form-check form-switch fs-5">
-                        <input class="form-check-input" type="checkbox" id="tts_ko" {% if tts_ko %}checked{% endif %} onchange="updateTTS('ko', this.checked)">
-                        <label class="form-check-label" for="tts_ko">🇰🇷 เสียงภาษาเกาหลี (KO)</label>
-                    </div>
+
+                <div class="tab-pane fade" id="registerPane" role="tabpanel">
+                    <form id="registerForm" autocomplete="off">
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelUsername">ชื่อผู้ใช้</label>
+                            <input type="text" id="regUser" class="form-control" placeholder="ตั้งชื่อผู้ใช้" data-i18n-ph="phRegUser" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelPassword">รหัสผ่าน</label>
+                            <input type="password" id="regPass" class="form-control" placeholder="ตั้งรหัสผ่าน" data-i18n-ph="phRegPass" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelRegCode">โค้ดสำหรับสมัคร</label>
+                            <input type="password" id="regCode" class="form-control" placeholder="กรอกโค้ดสำหรับสมัคร" data-i18n-ph="phRegCode" required>
+                        </div>
+                        <button type="submit" class="btn btn-success w-100 fw-bold" data-i18n="btnRegister">📝 ลงทะเบียน</button>
+                    </form>
                 </div>
             </div>
         </div>
+    </div>
 
-        <div class="card p-4 shadow-sm mb-4">
-            <h4 class="card-title text-warning mb-3">📜 ตารางเวลาบอสล่าสุด</h4>
-            {% if bosses %}
+    <div id="mainDashboard" class="container py-4" style="display: none;">
+        <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
+            <h2 data-i18n="title" class="d-flex align-items-center gap-2">
+                <img src="https://img2.pic.in.th/85cf3cd7-b2ad-4a9d-a2a2-d94ec53dd4c3.jpeg" alt="SKYNET Logo" class="skynet-logo" onerror="this.style.display='none'">
+                <span>Boss Timer Dashboard</span>
+            </h2>
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
+                <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
+                <button id="adminPanelMenuBtn" onclick="scrollToAdminPanel()" data-admin-only class="btn btn-outline-danger btn-sm" style="display:none;">🛡️ Admin Panel</button>
+                <button onclick="openChangeCodeModal()" data-admin-only class="btn btn-outline-warning btn-sm" data-i18n="btnConfigCode">🔑 เปลี่ยนโค้ดสมัคร</button>
+                <button onclick="logout()" class="btn btn-outline-danger btn-sm" data-i18n="btnLogout">🚪 ออกจากระบบ</button>
+            </div>
+        </div>
+
+        <div class="settings-bar mb-4 d-flex flex-wrap align-items-center justify-content-between gap-3">
+            <div class="d-flex flex-wrap align-items-center gap-3">
+                <div class="d-flex align-items-center gap-2">
+                    <label class="form-label mb-0 text-nowrap" data-i18n="labelLanguage">🌐 ภาษา:</label>
+                    <select id="langSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeLanguage(this.value)">
+                        <option value="th">🇹🇭 ไทย (TH)</option>
+                        <option value="en">🇺🇸 English (EN)</option>
+                        <option value="ko">🇰🇷 한국어 (KO)</option>
+                    </select>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <label class="form-label mb-0 text-nowrap" data-i18n="labelTimezone">🌍 เขตเวลา:</label>
+                    <select id="tzSelect" class="form-select form-select-sm" style="width: auto;" onchange="changeTimezone(this.value)">
+                        <option value="auto" data-i18n="tzAuto">💻 อัตโนมัติ (ตามเครื่อง)</option>
+                        <option value="UTC">🌐 UTC (Universal Time)</option>
+                        <option value="Asia/Bangkok">🇹🇭 Bangkok, Jakarta, Hanoi (UTC+7)</option>
+                        <option value="Asia/Singapore">🇸🇬 Singapore, KL, Manila (UTC+8)</option>
+                        <option value="Asia/Hong_Kong">🇭🇰 Hong Kong, Beijing, Taipei (UTC+8)</option>
+                        <option value="Asia/Tokyo">🇯🇵 Tokyo, Seoul (UTC+9)</option>
+                        <option value="Europe/London">🇬🇧 London, Dublin (UTC+0/+1)</option>
+                        <option value="America/New_York">🇺🇸 New York, Toronto (EST)</option>
+                    </select>
+                </div>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-dark border border-secondary text-info px-3 py-2 fs-6" id="liveClockDisplay" style="letter-spacing: 1px;">00:00:00</span>
+                </div>
+            </div>
+            <div class="d-flex gap-2">
+                <button onclick="openBotSettingsModal()" class="btn btn-outline-info btn-sm fw-bold" data-i18n="btnBotSettings">⚙️ ตั้งค่าบอท</button>
+                <button id="notifyToggleBtn" onclick="toggleNotifications()" class="btn btn-warning btn-sm fw-bold" data-i18n="enableNotify">🔔 เปิดระบบเสียง & แจ้งเตือน</button>
+            </div>
+        </div>
+
+        <!-- 🔐 Admin User Management -->
+        <div id="adminPanel" class="card p-4 mb-4 shadow-sm" style="display:none;">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <div>
+                    <h4 class="card-title text-danger mb-1" data-i18n="adminPanelTitle">🛡️ Admin • จัดการผู้ใช้งาน</h4>
+                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติ / Ban / Unban อยู่ในตารางด้านล่าง</small>
+                </div>
+                <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
+            </div>
+
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <div class="card p-3 h-100">
+                        <div class="text-warning small" data-i18n="adminPending">รออนุมัติ</div>
+                        <div class="fs-3 fw-bold" id="adminPendingCount">0</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 h-100">
+                        <div class="text-success small" data-i18n="adminActive">กำลังใช้งาน</div>
+                        <div class="fs-3 fw-bold" id="adminActiveCount">0</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 h-100">
+                        <div class="text-info small" data-i18n="adminTotal">ผู้ใช้ทั้งหมด</div>
+                        <div class="fs-3 fw-bold" id="adminTotalCount">0</div>
+                    </div>
+                </div>
+            </div>
+
             <div class="table-responsive">
-                <table class="table table-dark table-hover align-middle">
+                <table class="table table-dark table-hover align-middle mb-0">
                     <thead>
                         <tr>
-                            <th>ชื่อบอส</th>
-                            <th>เวลาเกิด (เวลาไทย)</th>
-                            <th>สถานะ/นับถอยหลัง</th>
-                            <th>แจ้งเตือนล่วงหน้า</th>
-                            <th>ผู้บันทึก (Recorded by)</th>
+                            <th data-i18n="adminThUser">ผู้ใช้</th>
+                            <th data-i18n="adminThStatus">สถานะ</th>
+                            <th data-i18n="adminThCreated">สมัครเมื่อ</th>
+                            <th data-i18n="adminThLastLogin">เข้าสู่ระบบล่าสุด</th>
+                            <th data-i18n="adminThLastSeen">ใช้งานล่าสุด</th>
+                            <th data-i18n="adminThLogins">จำนวนครั้ง</th>
+                            <th data-i18n="adminThAction">จัดการ</th>
                         </tr>
                     </thead>
-                    <tbody>
-                        {% for boss in bosses %}
-                        <tr>
-                            <td class="fw-bold text-info">{{ boss.name }}</td>
-                            <td>{{ boss.spawn_time }} น.</td>
-                            <td>
-                                {% if boss.is_spawned %}
-                                    <span class="badge bg-danger">⚔️ เกิดแล้ว!</span>
-                                {% else %}
-                                    <span class="badge bg-primary">⏳ เหลือ {{ boss.time_left }}</span>
-                                {% endif %}
-                            </td>
-                            <td><small class="text-muted">{{ boss.notice_text }}</small></td>
-                            <td><small class="text-warning">{{ boss.recorded_by }}</small></td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
+                    <tbody id="adminUsersBody"></tbody>
                 </table>
             </div>
-            {% else %}
-            <p class="text-muted mb-0">📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในขณะนี้</p>
-            {% endif %}
         </div>
-        <footer class="text-center text-muted">
-            <small>อัปเดตข้อมูลอัตโนมัติทุกๆ 10 วินาที • Boss Timer Bot 24/7</small>
+
+        <div class="card p-4 mb-4 shadow-sm">
+            <h4 class="card-title text-warning mb-3" data-i18n="formTitle">⏱️ บันทึกเวลาบอสตาย</h4>
+            <form id="bossForm" class="row g-3" autocomplete="off">
+                <div class="col-md-3">
+                    <label class="form-label" data-i18n="labelBoss">เลือก หรือ พิมพ์ชื่อบอส</label>
+                    <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." data-i18n-ph="phBoss" required autocomplete="off">
+                    <datalist id="bossOptions"></datalist>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>
+                    <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">
+                    <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label" data-i18n="labelSpTime">เพิ่มเวลาพิเศษ (นาที)</label>
+                    <input type="number" id="spTime" class="form-control" min="0" placeholder="0">
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label" data-i18n="labelNotice">แจ้งเตือนล่วงหน้า (นาที)</label>
+                    <input type="number" id="noticeMinutes" class="form-control" min="1" value="5">
+                </div>
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnSave">⚔️ บันทึกเวลา</button>
+                </div>
+            </form>
+        </div>
+
+        <div class="card p-4 shadow-sm">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4 class="card-title text-info mb-0" data-i18n="tableTitle">📜 ตารางเวลาบอสล่าสุด</h4>
+                <button id="clearAllBtn" class="btn btn-outline-danger btn-sm" data-i18n="btnClear">ล้างตารางทั้งหมด</button>
+            </div>
+            
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th data-i18n="thBoss">ชื่อบอส</th>
+                            <th data-i18n="thKillTime">เวลาตาย (24 ชม.)</th>
+                            <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>
+                            <th data-i18n="thCountdown">นับถอยหลัง</th>
+                            <th data-i18n="thNotice">เตือนล่วงหน้า</th>
+                            <th data-i18n="thRecordedBy">ผู้บันทึก</th>
+                            <th data-i18n="thAction">จัดการ</th>
+                        </tr>
+                    </thead>
+                    <tbody id="bossTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <footer class="text-center text-white mt-4">
+            <small data-i18n="footer">ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ</small>
         </footer>
     </div>
 
+    <!-- Modal เปลี่ยนรหัสผ่าน -->
+    <div class="modal fade" id="changeCodeModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content p-3">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title text-warning" data-i18n="modalChangeCodeTitle">🔑 เปลี่ยนโค้ดสำหรับสมัคร</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="changeCodeForm">
+                        <div class="mb-3">
+                            <label class="form-label" data-i18n="labelNewRegCode">โค้ดสมัครใหม่</label>
+                            <input type="text" id="newRegCodeInput" class="form-control" placeholder="กรอกโค้ดสำหรับสมัครใหม่" data-i18n-ph="phNewRegCode" required>
+                        </div>
+                        <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnSaveCode">💾 บันทึกโค้ดใหม่</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal ตั้งค่า Bot Notification -->
+    <div class="modal fade" id="botSettingsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content p-3">
+                <div class="modal-header border-secondary">
+                    <h5 class="modal-title text-info" data-i18n="modalBotSettingsTitle">⚙️ ตั้งค่าแจ้งเตือนบอท</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <h6 class="text-warning mb-3" data-i18n="labelVoiceLang">🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)</h6>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="ttsThToggle">
+                        <label class="form-check-label" for="ttsThToggle">🇹🇭 ภาษาไทย (TH)</label>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="ttsEnToggle">
+                        <label class="form-check-label" for="ttsEnToggle">🇺🇸 ภาษาอังกฤษ (EN)</label>
+                    </div>
+                    <div class="form-check form-switch mb-2">
+                        <input class="form-check-input" type="checkbox" id="ttsKoToggle">
+                        <label class="form-check-label" for="ttsKoToggle">🇰🇷 ภาษาเกาหลี (KO)</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
-        function updateTTS(lang, enabled) {
-            fetch('/api/toggle_tts', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lang: lang, enabled: enabled })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (!data.success) {
-                    alert('เกิดข้อผิดพลาดในการบันทึกการตั้งค่า TTS');
+        // --- 1. ตั้งค่า FIREBASE CONFIG ---
+        const firebaseConfig = Object.assign({
+            projectId: "skynet-3ad44",
+            authDomain: "skynet-3ad44.firebaseapp.com",
+            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
+        }, {{ firebase_web_config_json|safe }});
+
+        // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
+        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
+            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
+        }
+
+        // Initialize Firebase
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.database();
+        const auth = firebase.auth();
+        const bossRef = db.ref('boss_schedule');
+        const usersRef = db.ref('users');
+        const settingsRef = db.ref('app_settings');
+        const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
+        const sessionsRef = db.ref('dashboard_sessions');
+
+        // 🔐 Admin account
+        // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด
+        // users/<ADMIN_UID> เป็น role=admin และ status=approved ใน Realtime Database
+        // ไม่มีการสร้าง Admin อัตโนมัติจากหน้าเว็บ เพื่อป้องกันผู้ใช้ทั่วไปยกระดับสิทธิ์
+        const ADMIN_DEFAULT_USERNAME = "admin";
+        const ACTIVE_SESSION_TIMEOUT_MS = 90000;
+
+        // โค้ดสมัครเริ่มต้น
+        let currentRegCode = "1234";
+        settingsRef.child('register_code').on('value', (snap) => {
+            if (snap.exists() && snap.val()) {
+                currentRegCode = snap.val();
+            } else {
+                settingsRef.child('register_code').set("1234");
+            }
+        });
+
+        // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน
+        botSettingsRef.on('value', (snap) => {
+            const data = snap.val() || {};
+            // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
+            document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
+            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
+            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
+        });
+
+        // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
+        ['ttsThToggle', 'ttsEnToggle', 'ttsKoToggle'].forEach(id => {
+            document.getElementById(id).addEventListener('change', async (e) => {
+                if (!await requireApprovedUser()) {
+                    e.target.checked = !e.target.checked;
+                    return;
                 }
-            })
-            .catch(err => {
-                console.error('Error:', err);
-                alert('ไม่สามารถเชื่อมต่อกับเซิร์ฟเวอร์ได้');
+                const key = id === 'ttsThToggle' ? 'tts_th_enabled' : 
+                            id === 'ttsEnToggle' ? 'tts_en_enabled' : 'tts_ko_enabled';
+                await botSettingsRef.child(key).set(e.target.checked);
+            });
+        });
+
+        // ฟังก์ชันเปิด Modal ตั้งค่า Bot
+        async function openBotSettingsModal() {
+            if (!await requireApprovedUser()) return;
+            const modalEl = document.getElementById('botSettingsModal');
+            const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+            modal.show();
+        }
+
+        // --- 2. ฐานข้อมูลภาษา (i18n) ---
+        const TRANSLATIONS = {
+            th: {
+                authTitle: "⚔️ Boss Timer Access",
+                tabLogin: "เข้าสู่ระบบ",
+                tabRegister: "ลงทะเบียน",
+                labelUsername: "ชื่อผู้ใช้",
+                labelPassword: "รหัสผ่าน",
+                labelRegCode: "โค้ดสำหรับสมัคร",
+                rememberMe: "จำชื่อผู้ใช้",
+                btnLogin: "🔑 เข้าสู่ระบบ",
+                btnRegister: "📝 ลงทะเบียน",
+                btnLogout: "🚪 ออกจากระบบ",
+                btnConfigCode: "🔑 เปลี่ยนโค้ดสมัคร",
+                modalChangeCodeTitle: "🔑 เปลี่ยนโค้ดสำหรับสมัคร",
+                labelNewRegCode: "โค้ดสมัครใหม่",
+                btnSaveCode: "💾 บันทึกโค้ดใหม่",
+                btnBotSettings: "⚙️ ตั้งค่าบอท",
+                modalBotSettingsTitle: "⚙️ ตั้งค่าแจ้งเตือนบอท",
+                labelVoiceLang: "🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)",
+                phLoginUser: "กรอกชื่อผู้ใช้",
+                phLoginPass: "กรอกรหัสผ่าน",
+                phRegUser: "ตั้งชื่อผู้ใช้",
+                phRegPass: "ตั้งรหัสผ่าน",
+                phRegCode: "กรอกโค้ดสำหรับสมัคร",
+                phNewRegCode: "กรอกโค้ดสำหรับสมัครใหม่",
+                title: "⚔️ Boss Timer Dashboard",
+                online: "🟢 Realtime Sync Active",
+                labelLanguage: "🌐 ภาษา:",
+                labelTimezone: "🌍 เขตเวลา:",
+                tzAuto: "💻 อัตโนมัติ (ตามเครื่อง)",
+                enableNotify: "🔔 เปิดระบบเสียง & แจ้งเตือน",
+                disableNotify: "🔕 ปิดระบบเสียง & แจ้งเตือน",
+                formTitle: "⏱️ บันทึกเวลาบอสตาย",
+                labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",
+                phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
+                labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
+                labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
+                phKillTime: "เช่น 17:30 หรือ 1730",
+                hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",
+                labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",
+                btnSave: "⚔️ บันทึกเวลา",
+                tableTitle: "📜 ตารางเวลาบอสล่าสุด",
+                btnClear: "ล้างตารางทั้งหมด",
+                thBoss: "ชื่อบอส",
+                thKillTime: "เวลาตาย (24 ชม.)",
+                thSpawnTime: "เวลาเกิด (24 ชม.)",
+                thCountdown: "นับถอยหลัง",
+                thNotice: "เตือนล่วงหน้า",
+                thRecordedBy: "ผู้บันทึก",
+                thAction: "จัดการ",
+                emptyMsg: "📌 ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ",
+                spawned: "⚔️ เกิดแล้ว!",
+                btnDelete: "ลบ",
+                hourUnit: "ชม.",
+                minUnit: "นาที",
+                secUnit: "วินาที",
+                footer: "ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ",
+                invalidTimeAlert: "กรุณากรอกเวลาให้ถูกต้องตามระบบ 24 ชั่วโมง (เช่น 08:30 หรือ 17:45)",
+                confirmClear: "คุณต้องการล้างตารางบอสทั้งหมดใช่หรือไม่?",
+                notifyReadyTitle: "⚔️ ระบบแจ้งเตือนพร้อมทำงาน",
+                notifyReadyBody: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว",
+                noNotifySupport: "เบราว์เซอร์นี้ไม่รองรับการแจ้งเตือนแบบ Pop-up",
+                grantNotifyPrompt: "กรุณากดอนุญาต (Allow) การแจ้งเตือนในเบราว์เซอร์ของคุณ",
+                errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",
+                errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
+                regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
+                errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
+                codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",
+                spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
+                spawnNotifyBody: "บอส {boss} ได้เกิดแล้วในขณะนี้",
+                noticeNotifyTitle: "⏳ {boss} ใกล้เกิด!",
+                noticeNotifyBody: "บอส {boss} จะเกิดในอีก {min} นาที",
+                regPending: "ลงทะเบียนสำเร็จ แต่บัญชียังรอ Admin อนุมัติ จึงยังเข้าใช้งานไม่ได้",
+                errPendingApproval: "บัญชีนี้กำลังรอ Admin อนุมัติ",
+                errAccountRejected: "บัญชีนี้ถูกปฏิเสธหรือปิดการใช้งานโดย Admin",
+                errAccountNotApproved: "บัญชีนี้ยังไม่ได้รับอนุมัติจาก Admin",
+                errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",
+                errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",
+                adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",
+                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติ / Ban / Unban อยู่ในตารางด้านล่าง",
+                adminRefresh: "🔄 รีเฟรช",
+                adminPending: "รออนุมัติ",
+                adminActive: "กำลังใช้งาน",
+                adminTotal: "ผู้ใช้ทั้งหมด",
+                adminThUser: "ผู้ใช้",
+                adminThStatus: "สถานะ",
+                adminThCreated: "สมัครเมื่อ",
+                adminThLastLogin: "เข้าสู่ระบบล่าสุด",
+                adminThLastSeen: "ใช้งานล่าสุด",
+                adminThLogins: "จำนวนครั้ง",
+                adminThAction: "จัดการ",
+                adminApprove: "อนุมัติ",
+                adminReject: "ปฏิเสธ",
+                adminDisable: "ปิดใช้งาน",
+                adminActivate: "เปิดใช้งาน",
+                adminBan: "แบน",
+                adminUnban: "ปลดแบน",
+                adminNoUsers: "ยังไม่มีผู้ใช้งาน",
+                adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
+                adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
+            },
+            en: {
+                authTitle: "⚔️ Boss Timer Access",
+                tabLogin: "Login",
+                tabRegister: "Register",
+                labelUsername: "Username",
+                labelPassword: "Password",
+                labelRegCode: "Registration Code",
+                rememberMe: "Remember Username",
+                btnLogin: "🔑 Login",
+                btnRegister: "📝 Register",
+                btnLogout: "🚪 Logout",
+                btnConfigCode: "🔑 Change Reg Code",
+                modalChangeCodeTitle: "🔑 Change Registration Code",
+                labelNewRegCode: "New Registration Code",
+                btnSaveCode: "💾 Save New Code",
+                btnBotSettings: "⚙️ Bot Settings",
+                modalBotSettingsTitle: "⚙️ Bot Notification Settings",
+                labelVoiceLang: "🔊 Voice Notification Languages",
+                phLoginUser: "Enter username",
+                phLoginPass: "Enter password",
+                phRegUser: "Set username",
+                phRegPass: "Set password",
+                phRegCode: "Enter registration code",
+                phNewRegCode: "Enter new registration code",
+                title: "⚔️ Boss Timer Dashboard",
+                online: "🟢 Realtime Sync Active",
+                labelLanguage: "🌐 Language:",
+                labelTimezone: "🌍 Timezone:",
+                tzAuto: "💻 Auto (Device Local)",
+                enableNotify: "🔔 Enable Sound & Alerts",
+                disableNotify: "🔕 Disable Sound & Alerts",
+                formTitle: "⏱️ Record Boss Kill Time",
+                labelBoss: "Select or Type Boss Name",
+                phBoss: "Type to search or select...",
+                labelKillTime: "Kill Time (24h Format)",
+                labelSpTime: "Special Time (mins)",
+                phKillTime: "e.g. 17:30 or 1730",
+                hintKillTime: "*Leave blank to use current time",
+                labelNotice: "Advance Notice (Mins)",
+                btnSave: "⚔️ Save Time",
+                tableTitle: "📜 Boss Schedule Table",
+                btnClear: "Clear All Data",
+                thBoss: "Boss Name",
+                thKillTime: "Kill Time (24h)",
+                thSpawnTime: "Spawn Time (24h)",
+                thCountdown: "Countdown",
+                thNotice: "Notice",
+                thRecordedBy: "Recorded By",
+                thAction: "Action",
+                emptyMsg: "📌 No boss times recorded in the system",
+                spawned: "⚔️ Spawned!",
+                btnDelete: "Delete",
+                hourUnit: "h",
+                minUnit: "m",
+                secUnit: "s",
+                footer: "Real-time Boss Countdown System • Synced with Cloud Database",
+                invalidTimeAlert: "Please enter time in valid 24-hour format (e.g. 08:30 or 17:45)",
+                confirmClear: "Are you sure you want to clear all boss timers?",
+                notifyReadyTitle: "⚔️ Notifications Active",
+                notifyReadyBody: "You will be alerted before boss spawns and when spawned.",
+                noNotifySupport: "This browser does not support Pop-up notifications.",
+                grantNotifyPrompt: "Please grant notification permissions in your browser.",
+                errRegCodeInvalid: "Invalid Registration Code!",
+                errUserExists: "Username already exists!",
+                regSuccess: "Registration successful! Please login.",
+                errLoginFailed: "Invalid username or password!",
+                codeChangedSuccess: "Registration code updated successfully!",
+                spawnNotifyTitle: "⚔️ {boss} Spawned!",
+                spawnNotifyBody: "Boss {boss} has spawned!",
+                noticeNotifyTitle: "⏳ {boss} Spawning Soon!",
+                noticeNotifyBody: "Boss {boss} will spawn in {min} minutes",
+                regPending: "Registration submitted. Your account is pending Admin approval.",
+                errPendingApproval: "This account is waiting for Admin approval.",
+                errAccountRejected: "This account was rejected or disabled by Admin.",
+                errAccountNotApproved: "This account has not been approved by Admin.",
+                errWeakAccount: "Username must be at least 3 characters and password at least 6 characters.",
+                errAdminUsername: "The admin username is reserved.",
+                adminPanelTitle: "🛡️ Admin • User Management",
+                adminPanelSubtitle: "Approve registrations, review history, and see active users. Approve / Ban / Unban buttons are in the table below.",
+                adminRefresh: "🔄 Refresh",
+                adminPending: "Pending",
+                adminActive: "Active Now",
+                adminTotal: "Total Users",
+                adminThUser: "User",
+                adminThStatus: "Status",
+                adminThCreated: "Registered",
+                adminThLastLogin: "Last Login",
+                adminThLastSeen: "Last Seen",
+                adminThLogins: "Logins",
+                adminThAction: "Action",
+                adminApprove: "Approve",
+                adminReject: "Reject",
+                adminDisable: "Disable",
+                adminActivate: "Activate",
+                adminBan: "Ban",
+                adminUnban: "Unban",
+                adminNoUsers: "No users found.",
+                adminOnly: "Admin only.",
+                adminCannotChangeAdmin: "The Admin account cannot be changed."
+            },
+            ko: {
+                authTitle: "⚔️ Boss Timer Access",
+                tabLogin: "로그인",
+                tabRegister: "회원가입",
+                labelUsername: "사용자 이름",
+                labelPassword: "비밀번호",
+                labelRegCode: "가입 코드",
+                rememberMe: "사용자 이름 저장",
+                btnLogin: "🔑 로그인",
+                btnRegister: "📝 회원가입",
+                btnLogout: "🚪 로그아웃",
+                btnConfigCode: "🔑 가입 코드 변경",
+                modalChangeCodeTitle: "🔑 가입 코드 변경",
+                labelNewRegCode: "새 가입 코드",
+                btnSaveCode: "💾 새 코드 저장",
+                btnBotSettings: "⚙️ 봇 설정",
+                modalBotSettingsTitle: "⚙️ 봇 알림 설정",
+                labelVoiceLang: "🔊 음성 알림 언어",
+                phLoginUser: "사용자 이름을 입력하세요",
+                phLoginPass: "비밀번호를 입력하세요",
+                phRegUser: "사용자 이름 설정",
+                phRegPass: "비밀번호 설정",
+                phRegCode: "가입 코드를 입력하세요",
+                phNewRegCode: "새 가입 코드를 입력하세요",
+                title: "⚔️ Boss Timer Dashboard",
+                online: "🟢 실시간 동기화 활성화",
+                labelLanguage: "🌐 언어:",
+                labelTimezone: "🌍 시간대:",
+                tzAuto: "💻 자동 (기기 설정)",
+                enableNotify: "🔔 소리 및 알림 켜기",
+                disableNotify: "🔕 소리 및 알림 끄기",
+                formTitle: "⏱️ 보스 처치 시간 기록",
+                labelBoss: "보스 선택 또는 입력",
+                phBoss: "검색 또는 선택...",
+                labelKillTime: "처치 시간 (24시간 형식)",
+                labelSpTime: "추가 시간 (분)",
+                phKillTime: "예: 17:30 또는 1730",
+                hintKillTime: "*현재 시간을 사용하려면 비워두세요",
+                labelNotice: "사전 알림 (분)",
+                btnSave: "⚔️ 시간 저장",
+                tableTitle: "📜 최근 보스 시간표",
+                btnClear: "전체 목록 삭제",
+                thBoss: "보스 이름",
+                thKillTime: "처치 시간 (24h)",
+                thSpawnTime: "젠 시간 (24h)",
+                thCountdown: "카운트다운",
+                thNotice: "사전 알림",
+                thRecordedBy: "기록자",
+                thAction: "관리",
+                emptyMsg: "📌 시스템에 기록된 보스 시간이 없습니다",
+                spawned: "⚔️ 젠 완료!",
+                btnDelete: "삭제",
+                hourUnit: "시간",
+                minUnit: "분",
+                secUnit: "초",
+                footer: "실시간 보스 카운트다운 시스템 • 클라우드 자동 동기화",
+                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 หรือ 17:45)",
+                confirmClear: "모든 보스 타이머를 삭제하시겠습니까?",
+                notifyReadyTitle: "⚔️ 알림 시스템 준비 완료",
+                notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",
+                noNotifySupport: "이 브라우저는 팝업 알림을 지원하지 않습니다.",
+                grantNotifyPrompt: "브라우저에서 알림 권한을 허용해주세요.",
+                errRegCodeInvalid: "가입 코드가 올바르지 않습니다!",
+                errUserExists: "이미 존재하는 사용자 이름입니다!",
+                regSuccess: "회원가입 성공! 로그인해주세요.",
+                errLoginFailed: "사용자 이름 หรือ 비밀번호가 올바르지 않습니다!",
+                codeChangedSuccess: "가입 코드가 성공적으로 변경되었습니다!",
+                spawnNotifyTitle: "⚔️ {boss} 젠 완료!",
+                spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",
+                noticeNotifyTitle: "⏳ {boss} 젠 임박!",
+                noticeNotifyBody: "보스 {boss}(이)가 {min}분 후에 젠됩니다.",
+                regPending: "회원가입이 완료되었습니다. Admin 승인을 기다려 주세요.",
+                errPendingApproval: "이 계정은 Admin 승인을 기다리고 있습니다.",
+                errAccountRejected: "이 계정은 Admin에 의해 거부되었거나 비활성화되었습니다.",
+                errAccountNotApproved: "이 계정은 아직 Admin의 승인을 받지 못했습니다.",
+                errWeakAccount: "사용자 이름은 3자 이상, 비밀번호는 6자 이상이어야 합니다.",
+                errAdminUsername: "admin 사용자 이름은 일반 가입에 사용할 수 없습니다.",
+                adminPanelTitle: "🛡️ Admin • 사용자 관리",
+                adminPanelSubtitle: "가입 승인, 이용 기록 및 현재 접속 사용자를 확인합니다.",
+                adminRefresh: "🔄 새로고침",
+                adminPending: "승인 대기",
+                adminActive: "현재 접속",
+                adminTotal: "전체 사용자",
+                adminThUser: "사용자",
+                adminThStatus: "상태",
+                adminThCreated: "가입일",
+                adminThLastLogin: "최근 로그인",
+                adminThLastSeen: "최근 활동",
+                adminThLogins: "로그인 횟수",
+                adminThAction: "관리",
+                adminApprove: "อนุมัติ",
+                adminReject: "ปฏิเสธ",
+                adminDisable: "ปิดใช้งาน",
+                adminActivate: "เปิดใช้งาน",
+                adminBan: "แบน",
+                adminUnban: "ปลดแบน",
+                adminNoUsers: "ยังไม่มีผู้ใช้งาน",
+                adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
+                adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
+            }
+        };
+
+        let currentLang = localStorage.getItem('app_lang') || 'th';
+        let currentTz = localStorage.getItem('app_tz') || 'auto';
+        const browserNotified = new Set();
+        let isNotifyEnabled = localStorage.getItem('notify_enabled') === 'true';
+        let activeBosses = {};
+
+        const BOSS_DATABASE = {
+            "Wadangka": { cd: 9000, notice: 30 },
+            "Elemental Queen": { cd: 9000, notice: 5 },
+            "Tank": { cd: 3500, notice: 5 },
+            "Swirl Flame": { cd: 3500, notice: 5 },
+            "Maelstrom": { cd: 3500, notice: 5 },
+            "Twister": { cd: 3500, notice: 5 },
+            "Bigmama": { cd: 172800, notice: 30 },
+            "Chief Magief": { cd: 1800, notice: 5 },
+            "Faith": { cd: 21180, notice: 30 },
+            "Apapa": { cd: 900, notice: 5 },
+            "Corrupt Forest Keeper": { cd: 3480, notice: 5 },
+            "Recluse": { cd: 40980, notice: 30 },
+            "Blackskull": { cd: 3410, notice: 5 },
+            "Sleepy Kooii": { cd: 1200, notice: 5 },
+            "Awaken Kooii": { cd: 3780, notice: 5 },
+            "Eeheehee": { cd: 4008, notice: 5 },
+            "Ooheeheek": { cd: 4083, notice: 5 },
+            "Oohehe": { cd: 3908, notice: 5 },
+            "Guardian Imp": { cd: 3780, notice: 5 },
+            "Devilang": { cd: 19980, notice: 30 },
+            "Blackjuno": { cd: 2100, notice: 5 },
+            "Blacksky": { cd: 2100, notice: 5 },
+            "Red Fox": { cd: 1200, notice: 5 },
+            "7tailfox": { cd: 1200, notice: 5 },
+            "777Tailfox": { cd: 1800, notice: 5 },
+            "Sunrise Flower": { cd: 1200, notice: 5 },
+            "Magma Senior Thief": { cd: 1200, notice: 5 },
+            "Bbinikjoe": { cd: 1200, notice: 5 },
+            "Bigmouse": { cd: 1200, notice: 5 },
+            "Caligo": { cd: 604800, notice: 60 },
+            "Poison Root Flower": { cd: 1690, notice: 5 },
+            "Contaminated Queen Bee": { cd: 1680, notice: 5 },
+            "Rotten Pudding": { cd: 1800, notice: 5 },
+            "Swamp Flower Monster": { cd: 1800, notice: 5 },
+            "Ukpana": { cd: 172800, notice: 30 },
+            "Darlene the Witch": { cd: 259200, notice: 30 },
+            "Illust": { cd: 259200, notice: 30 },
+            "Actaemon": { cd: 21600, notice: 30 },
+            "Aiyo's Protector": { cd: 259200, notice: 30 },
+            "Glucose": { cd: 1800, notice: 5 },
+            "Overload": { cd: 1792, notice: 5 },
+            "Soul Lich": { cd: 87300, notice: 30 },
+            "Platanista": { cd: 604800, notice: 60 },
+            "Barslaf": { cd: 172800, notice: 30 },
+            "Billiard": { cd: 28503, notice: 5 },
+            "Shaaack": { cd: 1800, notice: 5 },
+            "Suuuk": { cd: 1200, notice: 5 },
+            "Sususuk": { cd: 1200, notice: 5 },
+            "sandgrave": { cd: 1200, notice: 5 },
+            "Elder Beholder": { cd: 1200, notice: 5 }
+        };
+
+        // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---
+        const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";
+        settingsRef.child('register_code').on('value', (snap) => {
+            if (snap.exists() && snap.val()) currentRegCode = snap.val();
+            else settingsRef.child('register_code').set("1234");
+        });
+
+        function makeUserKey(username) {
+            return username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+        }
+
+        function usernameToAuthEmail(username) {
+            return `${makeUserKey(username)}${AUTH_EMAIL_DOMAIN}`;
+        }
+
+        function formatAdminDate(value) {
+            if (!value) return '-';
+            const d = new Date(value);
+            if (isNaN(d.getTime())) return '-';
+            return d.toLocaleString('th-TH', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+        }
+
+        let currentSessionId = null;
+        let currentUserKey = null;
+        let currentUserData = null;
+        let heartbeatTimer = null;
+
+        async function createUserSession(userKey, userData) {
+            currentSessionId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`);
+            currentUserKey = userKey;
+            currentUserData = userData;
+            const now = new Date().toISOString();
+
+            await sessionsRef.child(currentSessionId).set({
+                userKey, username:userData.username, loginAt:now, lastSeenAt:now, active:true
+            });
+            await usersRef.child(userKey).update({
+                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null,
+                loginCount:(Number(userData.loginCount)||0)+1
+            });
+            localStorage.setItem('logged_user', userData.username);
+            localStorage.setItem('logged_user_key', userKey);
+            localStorage.setItem('logged_session_id', currentSessionId);
+            localStorage.setItem('logged_role', userData.role || 'user');
+            startSessionHeartbeat();
+        }
+
+        function startSessionHeartbeat() {
+            if (heartbeatTimer) clearInterval(heartbeatTimer);
+            heartbeatTimer = setInterval(async () => {
+                const sessionId=localStorage.getItem('logged_session_id');
+                const userKey=localStorage.getItem('logged_user_key');
+                if (!sessionId || !userKey || !auth.currentUser) return;
+                const now=new Date().toISOString();
+                try {
+                    await sessionsRef.child(sessionId).update({lastSeenAt:now,active:true});
+                    await usersRef.child(userKey).update({lastSeenAt:now});
+                } catch(err) { console.warn('Session heartbeat error:',err); }
+            },30000);
+        }
+
+        async function endUserSession(signOutAuth=true) {
+            const sessionId=localStorage.getItem('logged_session_id');
+            const userKey=localStorage.getItem('logged_user_key');
+            const now=new Date().toISOString();
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer=null; }
+            try {
+                if (sessionId) await sessionsRef.child(sessionId).update({lastSeenAt:now,logoutAt:now,active:false});
+                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now});
+            } catch(err) { console.warn('Session logout update error:',err); }
+            if (signOutAuth) { try { await auth.signOut(); } catch(err) {} }
+            ['logged_user','logged_user_key','logged_session_id','logged_role'].forEach(k=>localStorage.removeItem(k));
+            currentSessionId=null; currentUserKey=null; currentUserData=null;
+        }
+
+        async function checkAuthSession(firebaseUserOverride=null) {
+            const savedUser=localStorage.getItem('saved_username');
+            if(savedUser){document.getElementById('loginUser').value=savedUser;document.getElementById('rememberMe').checked=true;}
+
+            const firebaseUser=firebaseUserOverride || auth.currentUser;
+            if(firebaseUser){
+                try{
+                    const snap=await usersRef.child(firebaseUser.uid).once('value');
+                    if(!snap.exists()) throw new Error('USER_NOT_FOUND');
+                    const userData=snap.val();
+                    if(userData.status!=='approved'){
+                        await endUserSession(true);
+                        throw new Error(userData.status==='pending'?'ACCOUNT_PENDING':'ACCOUNT_NOT_APPROVED');
+                    }
+
+                    currentUserData=userData;
+                    currentUserKey=firebaseUser.uid;
+                    document.getElementById('authContainer').style.display='none';
+                    document.getElementById('mainDashboard').style.display='block';
+                    document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
+                    const adminPanel=document.getElementById('adminPanel');
+                    const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
+                    const adminMenu=document.getElementById('adminPanelMenuBtn');
+                    if(userData.role==='admin'){
+                        adminPanel.style.display='block';
+                        adminOnlyButtons.forEach(el=>el.style.display='');
+                        if(adminMenu) adminMenu.style.display='inline-block';
+                        await loadAdminUsers();
+                    }else{
+                        adminPanel.style.display='none';
+                        adminOnlyButtons.forEach(el=>el.style.display='none');
+                        if(adminMenu) adminMenu.style.display='none';
+                    }
+                    if(!currentSessionId) await createUserSession(firebaseUser.uid,userData);
+                    else startSessionHeartbeat();
+                    return true;
+                }catch(err){
+                    if(err.message==='ACCOUNT_PENDING') alert(TRANSLATIONS[currentLang].errPendingApproval);
+                    else if(err.message==='ACCOUNT_NOT_APPROVED') alert(TRANSLATIONS[currentLang].errAccountNotApproved);
+                }
+            }
+            document.getElementById('authContainer').style.display='block';
+            document.getElementById('mainDashboard').style.display='none';
+            const adminPanel=document.getElementById('adminPanel'); if(adminPanel) adminPanel.style.display='none';
+            const adminMenu=document.getElementById('adminPanelMenuBtn'); if(adminMenu) adminMenu.style.display='none';
+            document.querySelectorAll('[data-admin-only]').forEach(el=>el.style.display='none');
+            return false;
+        }
+
+        function scrollToAdminPanel(){
+            const panel=document.getElementById('adminPanel');
+            if(panel) panel.scrollIntoView({behavior:'smooth',block:'start'});
+        }
+
+        document.getElementById('registerForm').addEventListener('submit',async(e)=>{
+            e.preventDefault();
+            const username=document.getElementById('regUser').value.trim();
+            const password=document.getElementById('regPass').value;
+            const regCode=document.getElementById('regCode').value.trim();
+            if(username.length<3 || password.length<6){alert(TRANSLATIONS[currentLang].errWeakAccount);return;}
+            if(makeUserKey(username)===makeUserKey(ADMIN_DEFAULT_USERNAME)){alert(TRANSLATIONS[currentLang].errAdminUsername);return;}
+            if(regCode!==currentRegCode){alert(TRANSLATIONS[currentLang].errRegCodeInvalid);return;}
+            try{
+                const cred=await auth.createUserWithEmailAndPassword(usernameToAuthEmail(username),password);
+                const now=new Date().toISOString();
+                await usersRef.child(cred.user.uid).set({
+                    username, usernameKey:makeUserKey(username), role:'user', status:'pending', createdAt:now,
+                    approvedAt:null,approvedBy:null,rejectedAt:null,rejectedBy:null,lastLoginAt:null,lastLogoutAt:null,lastSeenAt:null,loginCount:0
+                });
+                await auth.signOut();
+                alert(TRANSLATIONS[currentLang].regPending);
+                document.getElementById('registerForm').reset();
+                new bootstrap.Tab(document.getElementById('login-tab')).show();
+            }catch(err){
+                console.error(err);
+                if(err.code==='auth/email-already-in-use') alert(TRANSLATIONS[currentLang].errUserExists);
+                else showAuthError(err);
+            }
+        });
+
+        document.getElementById('loginForm').addEventListener('submit',async(e)=>{
+            e.preventDefault();
+            const username=document.getElementById('loginUser').value.trim();
+            const password=document.getElementById('loginPass').value;
+            const rememberMe=document.getElementById('rememberMe').checked;
+            if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
+            try{
+                const cred=await auth.signInWithEmailAndPassword(usernameToAuthEmail(username),password);
+                const snap=await usersRef.child(cred.user.uid).once('value');
+                if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
+                const userData=snap.val();
+                if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
+                if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
+                if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
+                if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
+                await createUserSession(cred.user.uid,userData);
+                await checkAuthSession(cred.user);
+            }catch(err){
+                console.error('Firebase Authentication login error:',err);
+                const code = err && err.code ? err.code : 'unknown';
+                const detail = err && err.message ? err.message : '';
+                alert(`${TRANSLATIONS[currentLang].errLoginFailed}\n\nFirebase: ${code}${detail ? '\n' + detail : ''}`);
+            }
+        });
+
+        async function logout(){await endUserSession(true);checkAuthSession();}
+
+        function openChangeCodeModal(){
+            const modalEl=document.getElementById('changeCodeModal');
+            const modal=bootstrap.Modal.getOrCreateInstance(modalEl);
+            document.getElementById('newRegCodeInput').value=currentRegCode; modal.show();
+        }
+
+        document.getElementById('changeCodeForm').addEventListener('submit',async(e)=>{
+            e.preventDefault();
+            if(!await requireAdmin())return;
+            const newCode=document.getElementById('newRegCodeInput').value.trim();
+            if(newCode){await settingsRef.child('register_code').set(newCode);alert(TRANSLATIONS[currentLang].codeChangedSuccess);const modal=bootstrap.Modal.getInstance(document.getElementById('changeCodeModal'));if(modal)modal.hide();}
+        });
+
+        // --- Admin User Management ---
+        async function requireAdmin(){
+            const uid=auth.currentUser && auth.currentUser.uid;
+            if(!uid)return false;
+            const snap=await usersRef.child(uid).once('value'); const user=snap.val();
+            if(!user||user.role!=='admin'||user.status!=='approved'){alert(TRANSLATIONS[currentLang].adminOnly);return false;}
+            currentUserKey=uid; currentUserData=user; return true;
+        }
+
+        async function loadAdminUsers() {
+            if (!currentUserKey) currentUserKey = localStorage.getItem('logged_user_key');
+            if (!currentUserKey) return;
+
+            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminData = adminSnap.val();
+
+            if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
+                document.getElementById('adminPanel').style.display = 'none';
+                return;
+            }
+
+            currentUserData = adminData;
+
+            const usersSnap = await usersRef.once('value');
+            const users = usersSnap.val() || {};
+            const sessionsSnap = await sessionsRef.once('value');
+            const sessions = sessionsSnap.val() || {};
+            const nowMs = Date.now();
+
+            const userRows = Object.entries(users).map(([key, user]) => {
+                const userSessions = Object.values(sessions).filter(s => s && s.userKey === key);
+                const latestSession = userSessions.sort((a, b) =>
+                    new Date(b.lastSeenAt || b.loginAt || 0) - new Date(a.lastSeenAt || a.loginAt || 0)
+                )[0];
+
+                const lastSeen = user.lastSeenAt || (latestSession && latestSession.lastSeenAt);
+                const active = userSessions.some(session => {
+                    if (!session || session.active === false || !session.lastSeenAt) return false;
+                    const age = nowMs - new Date(session.lastSeenAt).getTime();
+                    return age >= 0 && age <= ACTIVE_SESSION_TIMEOUT_MS;
+                });
+
+                return { key, user, active };
+            });
+
+            const pendingCount = userRows.filter(x => x.user.status === 'pending').length;
+            const activeCount = userRows.filter(x => x.active && x.user.status === 'approved').length;
+
+            document.getElementById('adminPendingCount').innerText = pendingCount;
+            document.getElementById('adminActiveCount').innerText = activeCount;
+            document.getElementById('adminTotalCount').innerText = userRows.length;
+
+            const tbody = document.getElementById('adminUsersBody');
+            tbody.innerHTML = '';
+
+            userRows.sort((a, b) => {
+                const order = { pending: 0, approved: 1, rejected: 2, disabled: 3 };
+                return (order[a.user.status] ?? 9) - (order[b.user.status] ?? 9) ||
+                       (new Date(b.user.createdAt || 0) - new Date(a.user.createdAt || 0));
+            });
+
+            userRows.forEach(({ key, user, active }) => {
+                const statusBadge = user.role === 'admin'
+                    ? '<span class="badge bg-danger">🛡️ ADMIN</span>'
+                    : user.status === 'pending'
+                        ? '<span class="badge bg-warning text-dark">⏳ Pending</span>'
+                        : user.status === 'approved'
+                            ? `<span class="badge ${active ? 'bg-success' : 'bg-primary'}">${active ? '🟢 Active' : '✅ Approved'}</span>`
+                            : user.status === 'rejected'
+                                ? '<span class="badge bg-danger">❌ Rejected</span>'
+                                : '<span class="badge bg-secondary">⛔ Banned</span>';
+
+                let actionHtml = '-';
+                if (user.role !== 'admin') {
+                    if (user.status === 'pending') {
+                        actionHtml = `
+                            <div class="d-flex gap-1 flex-wrap">
+                                <button class="btn btn-sm btn-success" onclick="setUserStatus('${key}', 'approved')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button>
+                                <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'disabled')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
+                            </div>`;
+                    } else if (user.status === 'approved') {
+                        actionHtml = `<button class="btn btn-sm btn-outline-danger" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminBan || 'Ban'}</button>`;
+                    } else if (user.status === 'disabled' || user.status === 'rejected') {
+                        actionHtml = `<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}', 'approved')">♻️ ${TRANSLATIONS[currentLang].adminUnban || 'Unban'}</button>`;
+                    }
+                }
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>
+                        <div class="fw-bold text-info">${escapeHtml(user.username || key)}</div>
+                        <small class="text-white-50">${user.role === 'admin' ? 'Admin' : 'User'}</small>
+                    </td>
+                    <td>${statusBadge}</td>
+                    <td><small>${formatAdminDate(user.createdAt)}</small></td>
+                    <td><small>${formatAdminDate(user.lastLoginAt)}</small></td>
+                    <td><small>${formatAdminDate(user.lastSeenAt)}</small></td>
+                    <td>${Number(user.loginCount) || 0}</td>
+                    <td>${actionHtml}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            if (!userRows.length) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
+            }
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, ch => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
+            }[ch]));
+        }
+
+        async function setUserStatus(userKey, newStatus) {
+            if (!currentUserKey) return;
+
+            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminData = adminSnap.val();
+            if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
+                alert(TRANSLATIONS[currentLang].adminOnly);
+                return;
+            }
+
+            const targetSnap = await usersRef.child(userKey).once('value');
+            if (!targetSnap.exists()) return;
+            const target = targetSnap.val();
+
+            if (target.role === 'admin') {
+                alert(TRANSLATIONS[currentLang].adminCannotChangeAdmin);
+                return;
+            }
+
+            const now = new Date().toISOString();
+            const updates = { status: newStatus };
+
+            if (newStatus === 'approved') {
+                updates.approvedAt = now;
+                updates.approvedBy = adminData.username;
+                updates.rejectedAt = null;
+                updates.rejectedBy = null;
+            } else if (newStatus === 'rejected') {
+                updates.rejectedAt = now;
+                updates.rejectedBy = adminData.username;
+            }
+
+            await usersRef.child(userKey).update(updates);
+
+            // หากถูกปิดการใช้งาน ให้ปิด session ที่กำลัง active ของ user นั้นด้วย
+            if (newStatus === 'disabled' || newStatus === 'rejected') {
+                const sessionsSnap = await sessionsRef.once('value');
+                const sessions = sessionsSnap.val() || {};
+                const sessionUpdates = {};
+                Object.entries(sessions).forEach(([sessionId, session]) => {
+                    if (session && session.userKey === userKey && session.active !== false) {
+                        sessionUpdates[`${sessionId}/active`] = false;
+                        sessionUpdates[`${sessionId}/logoutAt`] = now;
+                    }
+                });
+                if (Object.keys(sessionUpdates).length) {
+                    await sessionsRef.update(sessionUpdates);
+                }
+            }
+
+            await loadAdminUsers();
+        }
+
+        async function requireApprovedUser(){
+            const uid=auth.currentUser && auth.currentUser.uid;
+            if(!uid){await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}
+            const snap=await usersRef.child(uid).once('value'); const user=snap.val();
+            if(!user||user.status!=='approved'){await endUserSession(true);await checkAuthSession();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return false;}
+            currentUserKey=uid;currentUserData=user;return true;
+        }
+
+        // Firebase Authentication session listener
+        auth.onAuthStateChanged(async (firebaseUser) => {
+            if (firebaseUser) {
+                await checkAuthSession(firebaseUser);
+            } else {
+                const dashboard=document.getElementById('mainDashboard');
+                if(dashboard && dashboard.style.display==='block') await checkAuthSession(null);
+            }
+        });
+
+        // --- 4. ระบบ Real-time Sync จาก Firebase ---
+
+        bossRef.on('value', (snapshot) => {
+            const rawData = snapshot.val() || {};
+            activeBosses = {};
+            
+            Object.keys(rawData).forEach(bossName => {
+                const item = rawData[bossName];
+                let spawnMs = item.spawnTimeMs;
+                if (!spawnMs && item.spawn_time) {
+                    spawnMs = new Date(item.spawn_time).getTime();
+                }
+                const cdSec = BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].cd : 0;
+                let killMs = item.killTimeMs || (spawnMs - (cdSec * 1000));
+                
+                activeBosses[bossName] = {
+                    spawnTimeMs: spawnMs,
+                    killTimeMs: killMs,
+                    noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
+                    notifiedNotice: item.notified_advance || item.notifiedNotice || false,
+                    notifiedSpawn: item.notifiedSpawn || false,
+                    recordedBy: item.recordedBy || 'ไม่ระบุ'
+                };
+            });
+            renderTable();
+        });
+
+        // --- UI & Control Functions ---
+        function applyLanguage() {
+            const langData = TRANSLATIONS[currentLang];
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (langData[key]) el.innerText = langData[key];
+            });
+            document.querySelectorAll('[data-i18n-ph]').forEach(el => {
+                const key = el.getAttribute('data-i18n-ph');
+                if (langData[key]) el.placeholder = langData[key];
+            });
+            
+            updateNotifyButtonUI();
+            renderTable();
+        }
+
+        function changeLanguage(lang) {
+            currentLang = lang;
+            localStorage.setItem('app_lang', lang);
+
+            const authLangSelect = document.getElementById('authLangSelect');
+            const langSelect = document.getElementById('langSelect');
+            if (authLangSelect) authLangSelect.value = lang;
+            if (langSelect) langSelect.value = lang;
+
+            applyLanguage();
+        }
+
+        function changeTimezone(tz) {
+            currentTz = tz;
+            localStorage.setItem('app_tz', tz);
+            renderTable();
+        }
+
+        function updateNotifyButtonUI() {
+            const notifyBtn = document.getElementById('notifyToggleBtn');
+            const langData = TRANSLATIONS[currentLang];
+            
+            if (isNotifyEnabled) {
+                notifyBtn.className = "btn btn-outline-success btn-sm fw-bold";
+                notifyBtn.setAttribute('data-i18n', 'disableNotify');
+                notifyBtn.innerText = langData.disableNotify;
+            } else {
+                notifyBtn.className = "btn btn-warning btn-sm fw-bold";
+                notifyBtn.setAttribute('data-i18n', 'enableNotify');
+                notifyBtn.innerText = langData.enableNotify;
+            }
+        }
+
+        // --- Audio System ---
+        let audioCtx = null;
+        function playAlertSound(type) {
+            if (!isNotifyEnabled) return;
+            
+            try {
+                if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                if (type === 'notice') {
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(587.33, audioCtx.currentTime);
+                    gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.15);
+                    setTimeout(() => {
+                        const osc2 = audioCtx.createOscillator();
+                        const gain2 = audioCtx.createGain();
+                        osc2.connect(gain2);
+                        gain2.connect(audioCtx.destination);
+                        osc2.type = 'sine';
+                        osc2.frequency.setValueAtTime(880, audioCtx.currentTime);
+                        gain2.gain.setValueAtTime(0.2, audioCtx.currentTime);
+                        osc2.start();
+                        osc2.stop(audioCtx.currentTime + 0.2);
+                    }, 200);
+                } else if (type === 'spawn') {
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+                    osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.4);
+                    gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                    osc.start();
+                    osc.stop(audioCtx.currentTime + 0.4);
+                }
+            } catch (e) {
+                console.log("Audio play error:", e);
+            }
+        }
+
+        function toggleNotifications() {
+            const langData = TRANSLATIONS[currentLang];
+            
+            if (isNotifyEnabled) {
+                isNotifyEnabled = false;
+                localStorage.setItem('notify_enabled', 'false');
+                updateNotifyButtonUI();
+                return;
+            }
+
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+
+            if ("Notification" in window) {
+                Notification.requestPermission().then(permission => {
+                    if (permission === "granted") {
+                        isNotifyEnabled = true;
+                        localStorage.setItem('notify_enabled', 'true');
+                        updateNotifyButtonUI();
+                        playAlertSound('notice');
+                        new Notification(langData.notifyReadyTitle, { body: langData.notifyReadyBody });
+                    } else {
+                        alert(langData.grantNotifyPrompt);
+                    }
+                });
+            } else {
+                alert(langData.noNotifySupport);
+            }
+        }
+
+        function sendBrowserNotification(title, body) {
+            if (!isNotifyEnabled) return;
+            if ("Notification" in window && Notification.permission === "granted") {
+                new Notification(title, { body: body, requireInteraction: true });
+            }
+        }
+
+        function format24h(dateObj) {
+            if (!dateObj || isNaN(dateObj.getTime())) return "00:00:00";
+            const options = { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, hourCycle: 'h23' };
+            if (currentTz && currentTz !== 'auto') options.timeZone = currentTz;
+
+            const formatter = new Intl.DateTimeFormat('en-GB', options);
+            const parts = formatter.formatToParts(dateObj);
+            let h = '00', m = '00', s = '00';
+            for (const part of parts) {
+                if (part.type === 'hour') h = part.value;
+                if (part.type === 'minute') m = part.value;
+                if (part.type === 'second') s = part.value;
+            }
+            return `${h}:${m}:${s}`;
+        }
+
+        function parseInputTime(timeStr) {
+            if (!timeStr) return new Date();
+            let h, m;
+            if (timeStr.includes(':')) {
+                const parts = timeStr.split(':');
+                h = parseInt(parts[0], 10);
+                m = parseInt(parts[1], 10);
+            } else if (timeStr.length === 3) {
+                h = parseInt(timeStr.substring(0, 1), 10);
+                m = parseInt(timeStr.substring(1, 3), 10);
+            } else if (timeStr.length === 4) {
+                h = parseInt(timeStr.substring(0, 2), 10);
+                m = parseInt(timeStr.substring(2, 4), 10);
+            } else {
+                return null;
+            }
+
+            if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+
+            const now = new Date();
+            let d = new Date(now.getFullYear(), now.getMonth(), now.getDate(), h, m, 0);
+            
+            if (d.getTime() > now.getTime() + 60000) {
+                d.setDate(d.getDate() - 1);
+            }
+            return d;
+        }
+
+        document.getElementById('bossForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!await requireApprovedUser()) return;
+            const bossInput = document.getElementById('bossSelect').value.trim();
+            const timeInput = document.getElementById('killTime').value.trim();
+            const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
+            const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
+
+            if (!bossInput) return;
+
+            let killDate = parseInputTime(timeInput);
+            if (!killDate) {
+                alert(TRANSLATIONS[currentLang].invalidTimeAlert);
+                return;
+            }
+
+            const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
+            const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
+            const currentUser = localStorage.getItem('logged_user') || 'Unknown';
+
+            await bossRef.child(bossInput).set({
+                killTimeMs: killDate.getTime(),
+                spawnTimeMs: spawnTimeMs,
+                noticeMinutes: noticeMin,
+                recordedBy: currentUser,
+                notifiedNotice: false,
+                notifiedSpawn: false
+            });
+
+            document.getElementById('bossForm').reset();
+            document.getElementById('noticeMinutes').value = 5;
+        });
+
+        async function deleteBoss(bossName) {
+            if (!await requireApprovedUser()) return;
+            await bossRef.child(bossName).remove();
+        }
+
+        document.getElementById('clearAllBtn').addEventListener('click', async () => {
+            if (!await requireApprovedUser()) return;
+            if (confirm(TRANSLATIONS[currentLang].confirmClear)) {
+                await bossRef.remove();
+            }
+        });
+
+        function renderTable() {
+            const tbody = document.getElementById('bossTableBody');
+            tbody.innerHTML = '';
+            const langData = TRANSLATIONS[currentLang];
+            const sortedBosses = Object.keys(activeBosses).sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
+
+            if (sortedBosses.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
+                return;
+            }
+
+            sortedBosses.forEach(bossName => {
+                const data = activeBosses[bossName];
+                const tr = document.createElement('tr');
+                const killTimeStr = format24h(new Date(data.killTimeMs));
+                const spawnTimeStr = format24h(new Date(data.spawnTimeMs));
+                
+                tr.innerHTML = `
+                    <td class="fw-bold text-warning">${bossName}</td>
+                    <td>${killTimeStr}</td>
+                    <td class="text-info">${spawnTimeStr}</td>
+                    <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
+                    <td>${data.noticeMinutes} ${langData.minUnit}</td>
+                    <td><span class="badge bg-secondary">${data.recordedBy}</span></td>
+                    <td>
+                        <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+            updateCountdowns();
+        }
+
+        function updateCountdowns() {
+            const nowMs = new Date().getTime();
+            document.getElementById('liveClockDisplay').innerText = format24h(new Date());
+
+            Object.keys(activeBosses).forEach(bossName => {
+                const data = activeBosses[bossName];
+                const diffMs = data.spawnTimeMs - nowMs;
+                const cdCell = document.getElementById(`cd-${bossName}`);
+                
+                if (!cdCell) return;
+
+                if (diffMs <= 0) {
+                    cdCell.innerHTML = `<span class="text-success">${TRANSLATIONS[currentLang].spawned}</span>`;
+                    if (!browserNotified.has(`${bossName}|${data.spawnTimeMs}|spawn`)) {
+                        playAlertSound('spawn');
+                        const title = (TRANSLATIONS[currentLang].spawnNotifyTitle || "⚔️ {boss} Spawned!").replace('{boss}', bossName);
+                        const body = (TRANSLATIONS[currentLang].spawnNotifyBody || "Boss {boss} has spawned!").replace('{boss}', bossName);
+                        sendBrowserNotification(title, body);
+                        browserNotified.add(`${bossName}|${data.spawnTimeMs}|spawn`);
+                    }
+                } else {
+                    const totalSec = Math.floor(diffMs / 1000);
+                    const h = Math.floor(totalSec / 3600);
+                    const m = Math.floor((totalSec % 3600) / 60);
+                    const s = totalSec % 60;
+                    
+                    cdCell.innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+                    
+                    const noticeMs = data.noticeMinutes * 60 * 1000;
+                    if (diffMs <= noticeMs && diffMs > noticeMs - 5000 && !browserNotified.has(`${bossName}|${data.spawnTimeMs}|notice`)) {
+                         playAlertSound('notice');
+                         const title = (TRANSLATIONS[currentLang].noticeNotifyTitle || "⏳ {boss} Spawning Soon!").replace('{boss}', bossName);
+                         const body = (TRANSLATIONS[currentLang].noticeNotifyBody || "Boss {boss} will spawn in {min} mins").replace('{boss}', bossName).replace('{min}', data.noticeMinutes);
+                         sendBrowserNotification(title, body);
+                         browserNotified.add(`${bossName}|${data.spawnTimeMs}|notice`);
+                    }
+                }
             });
         }
+
+        function initApp() {
+            const dataList = document.getElementById('bossOptions');
+            Object.keys(BOSS_DATABASE).sort().forEach(boss => {
+                const option = document.createElement('option');
+                option.value = boss;
+                dataList.appendChild(option);
+            });
+
+            document.getElementById('langSelect').value = currentLang;
+            const authLangSelect = document.getElementById('authLangSelect');
+            if (authLangSelect) authLangSelect.value = currentLang;
+            
+            document.getElementById('tzSelect').value = currentTz;
+            
+            applyLanguage();
+            auth.onAuthStateChanged(() => checkAuthSession());
+            checkAuthSession();
+
+            setInterval(updateCountdowns, 1000);
+            setInterval(() => {
+                if (currentUserData && currentUserData.role === 'admin') loadAdminUsers();
+            }, 30000);
+        }
+
+        window.addEventListener('beforeunload', () => {
+            const sessionId = localStorage.getItem('logged_session_id');
+            if (sessionId) {
+                sessionsRef.child(sessionId).update({
+                    lastSeenAt: new Date().toISOString(),
+                    active: false,
+                    logoutAt: new Date().toISOString()
+                });
+            }
+        });
+
+        window.addEventListener('DOMContentLoaded', initApp);
     </script>
 </body>
 </html>
@@ -421,12 +1836,20 @@ def dashboard():
             "recorded_by": data.get("recorded_by", "-")
         })
 
+    web_config = os.environ.get("FIREBASE_WEB_CONFIG_JSON", "").strip()
+    try:
+        parsed_web_config = json.loads(web_config) if web_config else {}
+        if not isinstance(parsed_web_config, dict):
+            parsed_web_config = {}
+    except Exception:
+        parsed_web_config = {}
     return render_template_string(
-        HTML_TEMPLATE, 
+        HTML_TEMPLATE,
         bosses=boss_list,
         tts_th=tts_th_enabled,
         tts_en=tts_en_enabled,
-        tts_ko=tts_ko_enabled
+        tts_ko=tts_ko_enabled,
+        firebase_web_config_json=json.dumps(parsed_web_config, ensure_ascii=False)
     )
 
 @app.route('/api/toggle_tts', methods=['POST'])
@@ -1186,16 +2609,19 @@ async def speak_in_guild(guild: discord.Guild, text_th: str = None, text_en: str
 
         playback_succeeded = False
         try:
-            # Give edge-tts an explicit session so aiohttp resources are always closed.
-            async with aiohttp.ClientSession() as tts_session:
-                for _, text, voice, filename, rate, pitch in tts_files:
-                    try:
-                        communicator = edge_tts.Communicate(
-                            text, voice, rate=rate, pitch=pitch, session=tts_session
-                        )
-                        await communicator.save(filename)
-                    except Exception as e:
-                        print(f"❌ สร้าง TTS ไม่สำเร็จ ({_}): {e}")
+            # edge-tts versions currently used on Render no longer accept
+            # the legacy `session=` constructor argument. Let edge-tts manage
+            # its own HTTP session so TTS works across supported versions.
+            for _, text, voice, filename, rate, pitch in tts_files:
+                try:
+                    communicator = edge_tts.Communicate(
+                        text, voice, rate=rate, pitch=pitch
+                    )
+                    await communicator.save(filename)
+                    if not os.path.exists(filename) or os.path.getsize(filename) <= 0:
+                        print(f"❌ TTS ได้ไฟล์ว่าง ({_})")
+                except Exception as e:
+                    print(f"❌ สร้าง TTS ไม่สำเร็จ ({_}): {e}")
 
             ffmpeg_executable = get_ffmpeg_path()
             loop = asyncio.get_running_loop()
@@ -1443,6 +2869,21 @@ async def check_boss_notifications():
             notified_spawn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
             voice_advance = parse_bool(data.get("voice_notice_sent", data.get("voiceNoticeSent", False)))
             voice_spawn = parse_bool(data.get("voice_spawn_sent", data.get("voiceSpawnSent", False)))
+
+            # Never replay an old boss after a Render restart/deploy.
+            # A schedule more than 60 seconds past spawn is considered stale.
+            # Mark every notification flag complete before continuing.
+            if time_left < -60:
+                if not (notified_advance and notified_spawn and voice_advance and voice_spawn):
+                    await save_boss_notification_flags(
+                        boss_name,
+                        notified_advance=True,
+                        notified_spawn=True,
+                        voice_notice_sent=True,
+                        voice_spawn_sent=True,
+                    )
+                    print(f"⏭️ Stale boss suppressed: {boss_name} | left={time_left:.1f}s")
+                continue
 
             if 0 < time_left <= notice_seconds + 5 or -60 <= time_left <= 0:
                 print(
