@@ -3,22 +3,14 @@
 Keeps Firebase, Dashboard, slash commands and boss scheduling in bot.py.
 start.py installs this module after importing bot.py.
 
-This patch gives the configured Voice connection a single runtime owner and
-leaves Discord Gateway lifecycle ownership in start.py. It also starts the
-existing notification loops after command sync so notification scheduling is
-not lost during the on_ready/sync race.
-
-Important: a Discord Voice WebSocket close (for example 4006) is not the same
-thing as the main Discord Gateway connection. discord.py's VoiceClient owns
-its reconnect=True lifecycle. The watchdog therefore does NOT force
- disconnect/reconnect on every failed poll. It waits for the native voice
-reconnect first and only resets a stale client after a longer grace period.
+Voice recovery is owned here; Discord Gateway lifecycle remains in start.py.
+Notification loops are started only after start.py completes command sync.
 """
-
 import asyncio
 import os
 import time
 import uuid
+import logging
 
 import discord
 import edge_tts
@@ -40,13 +32,11 @@ def install(bot_module, log):
     async def ensure_voice(guild, target_channel=None):
         if guild is None:
             return None
-
         configured = None
         try:
             configured = bot_module.get_configured_voice_channel(guild)
         except Exception:
             pass
-
         target = configured or target_channel
         if target is None:
             vc = guild.voice_client
@@ -55,8 +45,6 @@ def install(bot_module, log):
         lock = _reconnect_locks.setdefault(guild.id, asyncio.Lock())
         async with lock:
             vc = guild.voice_client
-
-            # Healthy connection: do not reconnect or recreate it.
             if vc and vc.is_connected():
                 _voice_disconnected_since.pop(guild.id, None)
                 if vc.channel and vc.channel.id == target.id:
@@ -70,25 +58,14 @@ def install(bot_module, log):
                     return None
 
             now = time.monotonic()
-
-            # A VoiceClient that exists but is temporarily disconnected is
-            # normally already reconnecting internally because connect(...,
-            # reconnect=True) was used. Do NOT force-disconnect it immediately;
-            # doing so creates the 4006 -> reconnect -> disconnect loop seen in
-            # the Render logs.
             if vc is not None:
                 disconnected_at = _voice_disconnected_since.setdefault(guild.id, now)
                 age = now - disconnected_at
-
                 if age < VOICE_STALE_RESET_AFTER:
                     return None
-
                 last_attempt = _last_voice_connect_attempt.get(guild.id, 0.0)
                 if now - last_attempt < VOICE_RECONNECT_COOLDOWN:
                     return None
-
-                # Only after a long grace period do we reset a genuinely stale
-                # VoiceClient. This is separate from the Discord Gateway.
                 try:
                     await vc.disconnect(force=True)
                 except Exception:
@@ -99,7 +76,6 @@ def install(bot_module, log):
             last_attempt = _last_voice_connect_attempt.get(guild.id, 0.0)
             if now - last_attempt < VOICE_RECONNECT_COOLDOWN:
                 return None
-
             _last_voice_connect_attempt[guild.id] = now
             try:
                 vc = await target.connect(reconnect=True, timeout=20)
@@ -118,16 +94,13 @@ def install(bot_module, log):
                 log(f"❌ Voice connect failed ({guild.name}): {exc!r}")
             return None
 
-    # Make every existing bot.py caller use the same Voice lifecycle.
     bot_module.ensure_voice_runtime = ensure_voice
     bot_module.ensure_configured_voice = ensure_voice
 
     async def ensure_notification_tasks_started():
-        """Start the existing notification loops exactly once.
-
-        bot.py owns the loop implementations. This helper only makes sure the
-        already-defined loops are running after Gateway/command sync.
-        """
+        """Start existing notification loops only after command sync is complete."""
+        if hasattr(bot_module, "open_runtime_gate"):
+            bot_module.open_runtime_gate()
         task_names = (
             "check_boss_notifications",
             "check_bf_notifications",
@@ -142,7 +115,8 @@ def install(bot_module, log):
             try:
                 if not loop_obj.is_running():
                     loop_obj.start()
-                    started.append(name)
+                    if loop_obj.is_running():
+                        started.append(name)
             except RuntimeError as exc:
                 log(f"⚠️ Notification task start skipped ({name}): {exc!r}")
             except Exception as exc:
@@ -152,7 +126,6 @@ def install(bot_module, log):
         return started
 
     async def voice_watchdog():
-        """Keep /setvoice channels connected without touching Discord Gateway."""
         while True:
             try:
                 await asyncio.sleep(20)
@@ -175,11 +148,6 @@ def install(bot_module, log):
                 log(f"⚠️ Voice watchdog loop error: {exc!r}")
 
     async def notification_watchdog():
-        """Keep the existing bot.py notification loops alive.
-
-        This watchdog never creates a second scheduler. It only restarts a
-        Loop object that already exists in bot.py and has stopped unexpectedly.
-        """
         task_names = (
             "check_boss_notifications",
             "check_bf_notifications",
@@ -204,9 +172,8 @@ def install(bot_module, log):
                         if not running:
                             log(f"🔄 Restarting notification task: {name}")
                             loop_obj.start()
-                            log(f"🟢 Notification task restarted: {name}")
-                        else:
-                            logged_missing.discard(name)
+                            if loop_obj.is_running():
+                                log(f"🟢 Notification task restarted: {name}")
                     except RuntimeError as exc:
                         log(f"⚠️ Notification task restart skipped ({name}): {exc!r}")
                     except Exception as exc:
@@ -223,33 +190,24 @@ def install(bot_module, log):
             _watchdog_task = asyncio.create_task(voice_watchdog(), name="skynet-voice-watchdog")
             log("🟢 Voice watchdog started")
         if _notification_watchdog_task is None or _notification_watchdog_task.done():
-            _notification_watchdog_task = asyncio.create_task(
-                notification_watchdog(), name="skynet-notification-watchdog"
-            )
+            _notification_watchdog_task = asyncio.create_task(notification_watchdog(), name="skynet-notification-watchdog")
             log("🟢 Notification watchdog started")
         return _watchdog_task
 
     async def patched_speak_in_guild(guild, text_th=None, text_en=None, text_ko=None, target_channel=None):
-        """Generate and play enabled TTS languages in the configured Voice channel."""
         if guild is None:
             return
-
         actual = []
-
         def language_enabled(attribute, default=True):
             value = getattr(bot_module, attribute, default)
             parser = getattr(bot_module, "parse_bool", None)
-            if callable(parser):
-                return parser(value, default)
-            return bool(value)
-
+            return parser(value, default) if callable(parser) else bool(value)
         if language_enabled("tts_th_enabled", True) and text_th:
             actual.append(("th", text_th, getattr(bot_module, "VOICE_THAI", "th-TH-PremwadeeNeural"), "-20%", "+10Hz"))
         if language_enabled("tts_en_enabled", True) and text_en:
             actual.append(("en", text_en, getattr(bot_module, "VOICE_ENG", "en-US-AriaNeural"), "-10%", "+0Hz"))
         if language_enabled("tts_ko_enabled", True) and text_ko:
             actual.append(("ko", text_ko, getattr(bot_module, "VOICE_KOR", "ko-KR-SunHiNeural"), "-10%", "+0Hz"))
-
         if not actual:
             log("⚠️ TTS skipped: ไม่มีภาษาเปิดใช้งานหรือไม่มีข้อความ")
             return
@@ -276,14 +234,9 @@ def install(bot_module, log):
                             log(f"❌ TTS ได้ไฟล์ว่าง: {lang} ({guild.name})")
                     except Exception as exc:
                         log(f"❌ สร้าง TTS ไม่สำเร็จ ({lang}): {exc!r}")
-
                 if not files:
                     return
-
                 for index, (lang, filename) in enumerate(files):
-                    # Re-use the healthy connection. If Discord is in the
-                    # middle of a native voice reconnect, give it a few seconds
-                    # instead of creating another VoiceClient.
                     if not vc.is_connected():
                         for _ in range(10):
                             await asyncio.sleep(1)
@@ -292,22 +245,14 @@ def install(bot_module, log):
                     if not vc.is_connected():
                         log(f"❌ หยุดเล่น TTS: Voice ยังไม่กลับมา ({guild.name})")
                         break
-
                     finished = asyncio.Event()
                     loop = asyncio.get_running_loop()
-
                     def after_playing(error, event=finished, language=lang):
                         if error:
                             log(f"❌ เล่น TTS {language} ผิดพลาดใน {guild.name}: {error!r}")
                         loop.call_soon_threadsafe(event.set)
-
                     try:
-                        source = discord.FFmpegPCMAudio(
-                            filename,
-                            executable=bot_module.get_ffmpeg_path(),
-                            before_options="-loglevel error",
-                            options="-vn",
-                        )
+                        source = discord.FFmpegPCMAudio(filename, executable=bot_module.get_ffmpeg_path(), before_options="-loglevel error", options="-vn")
                         vc.play(source, after=after_playing)
                         log(f"▶️ กำลังเล่น TTS: {lang} -> {guild.name}")
                         try:
@@ -318,7 +263,6 @@ def install(bot_module, log):
                                 vc.stop()
                     except Exception as exc:
                         log(f"❌ เล่นเสียง TTS ไม่สำเร็จใน {guild.name}: {exc!r}")
-
                     if index < len(files) - 1:
                         await asyncio.sleep(0.4)
             finally:
@@ -333,4 +277,14 @@ def install(bot_module, log):
     bot_module.start_voice_watchdog = start_voice_watchdog
     bot_module.ensure_notification_tasks_started = ensure_notification_tasks_started
     bot_module.speak_in_guild = patched_speak_in_guild
+
+    # Install the additive Admin/Ban + startup gate after Voice functions are
+    # installed, so the gate wraps the actual runtime owner used by the bot.
+    try:
+        import admin_notification_patch
+        admin_notification_patch.install(bot_module, log)
+        log("🛡️ Admin/notification patch loaded")
+    except Exception as exc:
+        log(f"⚠️ Admin/notification patch unavailable: {exc!r}")
+
     return ensure_voice
