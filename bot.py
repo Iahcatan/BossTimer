@@ -1871,7 +1871,10 @@ def firebase_config_js():
     cfg.setdefault('authDomain', 'skynet-3ad44.firebaseapp.com')
     cfg.setdefault('databaseURL', 'https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app')
     payload = json.dumps(cfg, ensure_ascii=False).replace('</', '<\\/')
-    return Response(f'window.SKYNET_FIREBASE_CONFIG = {payload};', mimetype='application/javascript')
+    response = Response(f'window.SKYNET_FIREBASE_CONFIG = {payload};', mimetype='application/javascript')
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 @app.route('/api/toggle_tts', methods=['POST'])
 def toggle_tts_api():
@@ -2557,6 +2560,17 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
 # ==========================================
 # 🔊 Event แจ้งเตือน + ทักทายเมื่อมีคนเข้าห้องเสียง
 # ==========================================
+# ==========================================
+# 🤖 Discord Bot object
+# CRITICAL: must exist before any @bot.event / @bot.tree.command decorators.
+# ==========================================
+intents = discord.Intents.default()
+intents.message_content = True
+intents.voice_states = True
+intents.members = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     global ppl_notify_enabled, vip_config
