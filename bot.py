@@ -627,9 +627,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <script>
         // --- 1. ตั้งค่า FIREBASE CONFIG ---
         const firebaseConfig = Object.assign({
-            projectId: "skynet-3ad44",
+            apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqVAFuWby094",
             authDomain: "skynet-3ad44.firebaseapp.com",
-            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app"
+            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "skynet-3ad44",
+            storageBucket: "skynet-3ad44.firebasestorage.app",
+            messagingSenderId: "7120270934",
+            appId: "1:7120270934:web:5e3db3f5dae6542352adf7",
+            measurementId: "G-N8QER5X9BN"
         }, {{ firebase_web_config_json|safe }});
 
         // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
@@ -1955,6 +1960,7 @@ voice_locks = {}
 voice_connect_locks = {}
 disconnect_tasks = {}
 voice_config = {}
+custom_bosses = {}
 last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
 # Prevent overlapping boss notification passes (e.g. scheduled loop + manual /kill check).
@@ -2326,6 +2332,140 @@ async def save_voice_config():
         print(f"⚠️ บันทึก voice_config ลง Firebase ไม่สำเร็จ: {e}")
     await asyncio.to_thread(set_db_value, "voice_config", data)
     await asyncio.to_thread(save_json_local, VOICE_CONFIG_FILE, data)
+
+async def save_bot_settings():
+    """Persist notification/TTS switches to Firebase and local SQLite."""
+    data = {
+        "bf_notify_enabled": bool(bf_notify_enabled),
+        "lib_notify_enabled": bool(lib_notify_enabled),
+        "ppl_notify_enabled": bool(ppl_notify_enabled),
+        "tts_th_enabled": bool(tts_th_enabled),
+        "tts_en_enabled": bool(tts_en_enabled),
+        "tts_ko_enabled": bool(tts_ko_enabled),
+    }
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("bot_settings").update, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก bot_settings ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "bot_settings", data)
+    await asyncio.to_thread(save_json_local, SETTINGS_FILE, data)
+
+async def load_bot_settings():
+    """Load notification/TTS switches. Firebase is canonical; local storage is fallback."""
+    global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("bot_settings").get)
+    except Exception as e:
+        print(f"⚠️ โหลด bot_settings จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("bot_settings", None)
+    if isinstance(data, dict):
+        bf_notify_enabled = parse_bool(data.get("bf_notify_enabled"), bf_notify_enabled)
+        lib_notify_enabled = parse_bool(data.get("lib_notify_enabled"), lib_notify_enabled)
+        ppl_notify_enabled = parse_bool(data.get("ppl_notify_enabled"), ppl_notify_enabled)
+        tts_th_enabled = parse_bool(data.get("tts_th_enabled"), tts_th_enabled)
+        tts_en_enabled = parse_bool(data.get("tts_en_enabled"), tts_en_enabled)
+        tts_ko_enabled = parse_bool(data.get("tts_ko_enabled"), tts_ko_enabled)
+    print("✅ load_bot_settings สำเร็จ")
+
+async def load_custom_bosses():
+    """Load custom boss definitions from Firebase/local fallback."""
+    global custom_bosses
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("custom_bosses").get)
+    except Exception as e:
+        print(f"⚠️ โหลด custom_bosses จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("custom_bosses", None)
+    custom_bosses = data if isinstance(data, dict) else {}
+    loaded = 0
+    for name, cfg in custom_bosses.items():
+        if not isinstance(cfg, dict) or not str(name).strip():
+            continue
+        try:
+            seconds = int(cfg.get("respawnSeconds", 0) or 0)
+            if seconds <= 0:
+                continue
+            canonical = str(name).strip()
+            BOSS_RESPAWN_TIMES[canonical] = timedelta(seconds=seconds)
+            notice = max(1, int(cfg.get("noticeMinutes", 5) or 5))
+            ADVANCE_NOTICE_SECONDS[canonical] = notice * 60
+            ADVANCE_NOTICE_TEXT[canonical] = f"{notice} นาที"
+            BOSS_CD_TEXT[canonical] = str(cfg.get("cdText") or "").strip() or f"{seconds // 3600} ชั่วโมง {(seconds % 3600) // 60} นาที {seconds % 60} วินาที"
+            BOSS_PRONUNCIATION[canonical] = str(cfg.get("pronunciation") or canonical)
+            loaded += 1
+        except (TypeError, ValueError):
+            continue
+    print(f"✅ load_custom_bosses สำเร็จ ({loaded} custom bosses)")
+
+async def save_custom_bosses_to_github():
+    """Historical function name retained; persistence is Firebase + local JSON."""
+    data = dict(custom_bosses or {})
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("custom_bosses").set, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก custom_bosses ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "custom_bosses", data)
+    await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, data)
+
+async def load_live_config():
+    global live_message_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("live_message_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด live_message_config จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("live_message_config", None)
+    live_message_config = data if isinstance(data, dict) else {}
+    print("✅ load_live_config สำเร็จ")
+
+async def save_live_config():
+    data = dict(live_message_config or {})
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("live_message_config").set, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก live_message_config ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "live_message_config", data)
+    await asyncio.to_thread(save_json_local, LIVE_CONFIG_FILE, data)
+
+async def load_vip_config():
+    global vip_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("vip_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด vip_config จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("vip_config", None)
+    if isinstance(data, dict):
+        vip_config = {
+            "enabled": parse_bool(data.get("enabled"), False),
+            "user_id": int(data["user_id"]) if str(data.get("user_id", "")).isdigit() else None,
+            "user_name": str(data.get("user_name", "")),
+            "message": str(data.get("message", "")),
+        }
+    print("✅ load_vip_config สำเร็จ")
+
+async def save_vip_config():
+    data = dict(vip_config or {})
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("vip_config").set, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก vip_config ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "vip_config", data)
+    await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, data)
 
 async def load_voice_config():
     """โหลดห้อง Voice ที่ตั้งไว้จาก Firebase เมื่อบอทเริ่มทำงาน"""
@@ -3665,6 +3805,12 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
     ADVANCE_NOTICE_SECONDS[canonical] = notice_minutes * 60
     ADVANCE_NOTICE_TEXT[canonical] = f"{notice_minutes} นาที"
     BOSS_PRONUNCIATION.setdefault(canonical, canonical)
+    custom_bosses[canonical] = {
+        "respawnSeconds": int(total_seconds),
+        "noticeMinutes": int(notice_minutes),
+        "cdText": BOSS_CD_TEXT[canonical],
+        "pronunciation": BOSS_PRONUNCIATION[canonical]
+    }
     await save_custom_bosses_to_github()
     # IMPORTANT: /addboss never writes boss_schedule.
     await interaction.followup.send(
