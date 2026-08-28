@@ -673,9 +673,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         botSettingsRef.on('value', (snap) => {
             const data = snap.val() || {};
             // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
-            document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
-            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
-            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
+            document.getElementById('ttsThToggle').checked = data.tts_th_enabled === true;
+            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled === true;
+            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled === true;
         });
 
         // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
@@ -685,9 +685,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     e.target.checked = !e.target.checked;
                     return;
                 }
-                const key = id === 'ttsThToggle' ? 'tts_th_enabled' : 
+                const key = id === 'ttsThToggle' ? 'tts_th_enabled' :
                             id === 'ttsEnToggle' ? 'tts_en_enabled' : 'tts_ko_enabled';
-                await botSettingsRef.child(key).set(e.target.checked);
+                try {
+                    await withTimeout(botSettingsRef.update({[key]: !!e.target.checked}), 5000, 'TTS_SETTING_SAVE_TIMEOUT');
+                } catch (err) {
+                    console.error('[SKYNET] Failed to save TTS setting:', err);
+                    // Restore the exact Firebase value after a failed write.
+                    try {
+                        const snap = await withTimeout(botSettingsRef.once('value'), 5000, 'TTS_SETTING_READ_TIMEOUT');
+                        const data = snap.val() || {};
+                        document.getElementById('ttsThToggle').checked = data.tts_th_enabled === true;
+                        document.getElementById('ttsEnToggle').checked = data.tts_en_enabled === true;
+                        document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled === true;
+                    } catch (_) {}
+                    e.target.checked = !e.target.checked;
+                }
             });
         });
 
@@ -2321,55 +2334,42 @@ def start_firebase_listener(loop):
 
 def start_bot_settings_listener():
     """Keep Discord notification/TTS switches synchronized with Firebase.
-    Handles both root snapshots and child-level listener events.
+    Every event re-reads the complete bot_settings node so a child update cannot leave
+    another language stale in memory.
     """
-    def apply_setting(key, value):
-        nonlocal_key = key
-        if nonlocal_key == "bf_notify_enabled":
-            globals()["bf_notify_enabled"] = parse_bool(value, globals()["bf_notify_enabled"])
-        elif nonlocal_key == "lib_notify_enabled":
-            globals()["lib_notify_enabled"] = parse_bool(value, globals()["lib_notify_enabled"])
-        elif nonlocal_key == "ppl_notify_enabled":
-            globals()["ppl_notify_enabled"] = parse_bool(value, globals()["ppl_notify_enabled"])
-        elif nonlocal_key == "tts_th_enabled":
-            globals()["tts_th_enabled"] = parse_bool(value, globals()["tts_th_enabled"])
-        elif nonlocal_key == "tts_en_enabled":
-            globals()["tts_en_enabled"] = parse_bool(value, globals()["tts_en_enabled"])
-        elif nonlocal_key == "tts_ko_enabled":
-            globals()["tts_ko_enabled"] = parse_bool(value, globals()["tts_ko_enabled"])
-
     def listener(event):
+        global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
+        global tts_th_enabled, tts_en_enabled, tts_ko_enabled
         try:
-            data = event.data
-            path = str(getattr(event, "path", "") or "")
+            data = db.reference("bot_settings").get()
+            if not isinstance(data, dict):
+                data = {}
+            if "bf_notify_enabled" in data:
+                bf_notify_enabled = parse_bool(data["bf_notify_enabled"], bf_notify_enabled)
+            if "lib_notify_enabled" in data:
+                lib_notify_enabled = parse_bool(data["lib_notify_enabled"], lib_notify_enabled)
+            if "ppl_notify_enabled" in data:
+                ppl_notify_enabled = parse_bool(data["ppl_notify_enabled"], ppl_notify_enabled)
+            if "tts_th_enabled" in data:
+                tts_th_enabled = parse_bool(data["tts_th_enabled"], tts_th_enabled)
+            if "tts_en_enabled" in data:
+                tts_en_enabled = parse_bool(data["tts_en_enabled"], tts_en_enabled)
+            if "tts_ko_enabled" in data:
+                tts_ko_enabled = parse_bool(data["tts_ko_enabled"], tts_ko_enabled)
 
-            # Root event: /bot_settings -> dict
-            if isinstance(data, dict):
-                for key in (
-                    "bf_notify_enabled", "lib_notify_enabled", "ppl_notify_enabled",
-                    "tts_th_enabled", "tts_en_enabled", "tts_ko_enabled"
-                ):
-                    if key in data:
-                        apply_setting(key, data[key])
-            # Child event: /tts_th_enabled -> bool
-            else:
-                child_key = path.strip("/").split("/")[-1] if path else ""
-                if child_key:
-                    apply_setting(child_key, data)
-
+            path = str(getattr(event, "path", "") or "/")
             print(
                 "🔄 Firebase bot_settings sync: "
                 f"BF={bf_notify_enabled} LIB={lib_notify_enabled} PPL={ppl_notify_enabled} "
-                f"TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled} path={path or '/'}"
+                f"TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled} path={path}"
             )
         except Exception as exc:
             print(f"❌ Firebase bot_settings listener error: {exc!r}")
     try:
         db.reference("bot_settings").listen(listener)
-        print("🟢 Firebase bot_settings Listener พร้อมทำงาน")
+        print("🟢 Firebase bot_settings Listener พร้อมทำงาน (full-root refresh)")
     except Exception as exc:
         print(f"❌ ไม่สามารถเปิด bot_settings Listener ได้: {exc!r}")
-
 
 async def save_voice_config():
     """บันทึกการตั้งค่าห้อง Voice แบบถาวรลง Firebase และ local SQLite/JSON"""
@@ -2401,8 +2401,11 @@ async def save_bot_settings():
         )
     except Exception as e:
         print(f"⚠️ บันทึก bot_settings ลง Firebase ไม่สำเร็จ: {e}")
-    await asyncio.to_thread(set_db_value, "bot_settings", data)
-    await asyncio.to_thread(save_json_local, SETTINGS_FILE, data)
+    # Firebase is the canonical store for bot settings. Do not depend on local SQLite/JSON persistence on Render.
+    print(
+        f"✅ Firebase bot_settings saved: BF={data['bf_notify_enabled']} LIB={data['lib_notify_enabled']} "
+        f"PPL={data['ppl_notify_enabled']} TH={data['tts_th_enabled']} EN={data['tts_en_enabled']} KO={data['tts_ko_enabled']}"
+    )
 
 async def load_bot_settings():
     """Load notification/TTS switches. Firebase is canonical; local storage is fallback."""
@@ -2602,14 +2605,41 @@ def clean_display_name(name: str) -> str:
     return cleaned if cleaned else "สมาชิก"
 
 # 🔥 ฟังก์ชันแจ้งเตือนด้วยเสียง (ตรวจสอบสถานะเปิด-ปิด TTS แต่ละภาษาก่อนเล่น)
+async def get_effective_tts_settings(force_refresh=True):
+    """Return the authoritative TTS switches from Firebase.
+    Firebase /bot_settings is the single source of truth; in-memory globals are only a cache.
+    """
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    if force_refresh:
+        try:
+            data = await asyncio.wait_for(
+                asyncio.to_thread(db.reference("bot_settings").get), timeout=4
+            )
+            if isinstance(data, dict):
+                # Missing keys keep the current cache; explicit false/true always wins.
+                if "tts_th_enabled" in data:
+                    tts_th_enabled = parse_bool(data["tts_th_enabled"], tts_th_enabled)
+                if "tts_en_enabled" in data:
+                    tts_en_enabled = parse_bool(data["tts_en_enabled"], tts_en_enabled)
+                if "tts_ko_enabled" in data:
+                    tts_ko_enabled = parse_bool(data["tts_ko_enabled"], tts_ko_enabled)
+        except Exception as exc:
+            print(f"⚠️ อ่าน Firebase bot_settings ก่อน TTS ไม่สำเร็จ: {exc!r}")
+    print(
+        f"🔐 Effective TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}"
+    )
+    return tts_th_enabled, tts_en_enabled, tts_ko_enabled
+
+
 async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
-    """Generate TTS files using the installed edge-tts API."""
+    """Generate only the TTS languages currently enabled in Firebase."""
+    th_enabled, en_enabled, ko_enabled = await get_effective_tts_settings(force_refresh=True)
     actual = []
-    if tts_th_enabled and text_th:
+    if th_enabled and text_th:
         actual.append(("th", text_th, VOICE_THAI, "-20%", "+10Hz"))
-    if tts_en_enabled and text_en:
+    if en_enabled and text_en:
         actual.append(("en", text_en, VOICE_ENG, "-10%", "+0Hz"))
-    if tts_ko_enabled and text_ko:
+    if ko_enabled and text_ko:
         actual.append(("ko", text_ko, VOICE_KOR, "-10%", "+0Hz"))
 
     files = []
@@ -2835,6 +2865,7 @@ async def on_ready():
 
     init_db()
     await load_bot_settings()
+    print(f"🔐 Startup TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
     await load_custom_bosses()
     await load_boss_data()
     await load_live_config()
