@@ -2320,23 +2320,48 @@ def start_firebase_listener(loop):
         print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
 
 def start_bot_settings_listener():
-    """Keep Discord TTS switches synchronized with Firebase in near real time.
-    Firebase /bot_settings is the single source of truth; local JSON/SQLite are fallback only.
+    """Keep Discord notification/TTS switches synchronized with Firebase.
+    Handles both root snapshots and child-level listener events.
     """
+    def apply_setting(key, value):
+        nonlocal_key = key
+        if nonlocal_key == "bf_notify_enabled":
+            globals()["bf_notify_enabled"] = parse_bool(value, globals()["bf_notify_enabled"])
+        elif nonlocal_key == "lib_notify_enabled":
+            globals()["lib_notify_enabled"] = parse_bool(value, globals()["lib_notify_enabled"])
+        elif nonlocal_key == "ppl_notify_enabled":
+            globals()["ppl_notify_enabled"] = parse_bool(value, globals()["ppl_notify_enabled"])
+        elif nonlocal_key == "tts_th_enabled":
+            globals()["tts_th_enabled"] = parse_bool(value, globals()["tts_th_enabled"])
+        elif nonlocal_key == "tts_en_enabled":
+            globals()["tts_en_enabled"] = parse_bool(value, globals()["tts_en_enabled"])
+        elif nonlocal_key == "tts_ko_enabled":
+            globals()["tts_ko_enabled"] = parse_bool(value, globals()["tts_ko_enabled"])
+
     def listener(event):
-        global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
-        global tts_th_enabled, tts_en_enabled, tts_ko_enabled
         try:
             data = event.data
-            if not isinstance(data, dict):
-                return
-            bf_notify_enabled = parse_bool(data.get("bf_notify_enabled"), bf_notify_enabled)
-            lib_notify_enabled = parse_bool(data.get("lib_notify_enabled"), lib_notify_enabled)
-            ppl_notify_enabled = parse_bool(data.get("ppl_notify_enabled"), ppl_notify_enabled)
-            tts_th_enabled = parse_bool(data.get("tts_th_enabled"), tts_th_enabled)
-            tts_en_enabled = parse_bool(data.get("tts_en_enabled"), tts_en_enabled)
-            tts_ko_enabled = parse_bool(data.get("tts_ko_enabled"), tts_ko_enabled)
-            print(f"🔄 Firebase bot_settings sync: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
+            path = str(getattr(event, "path", "") or "")
+
+            # Root event: /bot_settings -> dict
+            if isinstance(data, dict):
+                for key in (
+                    "bf_notify_enabled", "lib_notify_enabled", "ppl_notify_enabled",
+                    "tts_th_enabled", "tts_en_enabled", "tts_ko_enabled"
+                ):
+                    if key in data:
+                        apply_setting(key, data[key])
+            # Child event: /tts_th_enabled -> bool
+            else:
+                child_key = path.strip("/").split("/")[-1] if path else ""
+                if child_key:
+                    apply_setting(child_key, data)
+
+            print(
+                "🔄 Firebase bot_settings sync: "
+                f"BF={bf_notify_enabled} LIB={lib_notify_enabled} PPL={ppl_notify_enabled} "
+                f"TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled} path={path or '/'}"
+            )
         except Exception as exc:
             print(f"❌ Firebase bot_settings listener error: {exc!r}")
     try:
@@ -2344,6 +2369,7 @@ def start_bot_settings_listener():
         print("🟢 Firebase bot_settings Listener พร้อมทำงาน")
     except Exception as exc:
         print(f"❌ ไม่สามารถเปิด bot_settings Listener ได้: {exc!r}")
+
 
 async def save_voice_config():
     """บันทึกการตั้งค่าห้อง Voice แบบถาวรลง Firebase และ local SQLite/JSON"""
@@ -2604,12 +2630,26 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
 
 
 async def _play_tts_in_channel(guild, channel, files):
-    """Join one active voice channel, play all TTS files, then leave."""
+    """Join the requested/configured Voice channel, play enabled TTS files, then leave."""
     if not isinstance(channel, discord.VoiceChannel):
+        print(f"❌ Voice target invalid in {getattr(guild, 'name', 'unknown guild')}: {channel!r}")
         return False
-    humans = [m for m in channel.members if not m.bot]
-    if not humans:
-        return False
+    # A configured /setvoice channel is authoritative for scheduled notifications.
+    # Do NOT require a human member to already be inside the room; the bot must
+    # be able to enter the configured room at the scheduled time.
+    try:
+        me = guild.me or guild.get_member(bot.user.id)
+        if me is not None:
+            perms = channel.permissions_for(me)
+            print(
+                f"🔐 Voice permissions {guild.name} -> {channel.name}: "
+                f"connect={perms.connect} speak={perms.speak}"
+            )
+            if not perms.connect or not perms.speak:
+                print(f"❌ Bot ไม่มีสิทธิ์ Connect/Speak ใน {guild.name} -> {channel.name}")
+                return False
+    except Exception as e:
+        print(f"⚠️ ตรวจสิทธิ์ Voice ไม่สำเร็จ {guild.name}/{channel.name}: {e!r}")
 
     vc = guild.voice_client
     try:
@@ -2688,16 +2728,22 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
     async with voice_locks[guild.id]:
         channels = []
         if target_channel and isinstance(target_channel, discord.VoiceChannel):
-            if any(not m.bot for m in target_channel.members):
-                channels = [target_channel]
+            channels = [target_channel]
         else:
-            channels = [
-                ch for ch in guild.voice_channels
-                if any(not m.bot for m in ch.members)
-            ]
+            # Prefer the explicitly configured /setvoice channel for scheduled
+            # notifications. Fall back to currently occupied rooms only when no
+            # configured target exists.
+            configured = get_configured_voice_channel(guild)
+            if configured is not None:
+                channels = [configured]
+            else:
+                channels = [
+                    ch for ch in guild.voice_channels
+                    if any(not m.bot for m in ch.members)
+                ]
 
         if not channels:
-            print(f"⏭️ ไม่มีห้อง Voice ที่มีสมาชิกสำหรับ TTS: {guild.name}")
+            print(f"⏭️ ไม่มีห้อง Voice ที่กำหนดไว้/มีสมาชิกสำหรับ TTS: {guild.name}")
             return False
 
         files = await _tts_generate_files(text_th, text_en, text_ko, guild.id)
@@ -2707,10 +2753,9 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
         success = False
         try:
             for channel in channels:
-                # Re-check immediately before joining; people may have left.
-                if not any(not m.bot for m in channel.members):
-                    continue
-                print(f"🔊 TTS -> {guild.name} -> {channel.name}")
+                # A configured target is allowed even when empty: scheduled BF/boss
+                # announcements must still connect to the configured channel.
+                print(f"🔊 TTS -> {guild.name} -> {channel.name} ({channel.id}) | humans={sum(1 for m in channel.members if not m.bot)}")
                 if await _play_tts_in_channel(guild, channel, files):
                     success = True
                 await asyncio.sleep(0.4)
@@ -2797,11 +2842,20 @@ async def check_bf_notifications():
 
     try:
         now = datetime.now(TZ_THAI)
-        if now.hour % 2 == 1 and now.minute == 57:
-            if last_bf_notified_hour != now.hour:
-                last_bf_notified_hour = now.hour
+        # BF starts every even hour. Send the 3-minute warning during the
+        # 57:00-57:59 window of the preceding odd hour, so a 30s loop cannot
+        # miss the notification because of a one-second scheduling drift.
+        trigger_window = now.hour % 2 == 1 and now.minute == 57
+        if trigger_window:
+            event_key = now.strftime("%Y-%m-%d-%H")
+            if last_bf_notified_hour != event_key:
+                last_bf_notified_hour = event_key
                 next_bf_hour = (now.hour + 1) % 24
                 next_bf_time = f"{next_bf_hour:02d}:00"
+                print(
+                    f"⏰ BF WARNING TRIGGER | now={now.strftime('%H:%M:%S')} | "
+                    f"next_bf={next_bf_time}:00 | bf_enabled={bf_notify_enabled}"
+                )
                 
                 for guild in bot.guilds:
                     mentions = []
@@ -2828,7 +2882,49 @@ async def check_bf_notifications():
                     spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
                     spoken_text_en = "Battlefield will start in 3 minutes."
                     spoken_text_ko = "배틀필드가 3분 후에 시작됩니다."
-                    asyncio.create_task(speak_in_guild(guild, text_th=spoken_text_th, text_en=spoken_text_en, text_ko=spoken_text_ko))
+
+                    # Use the configured /setvoice channel first. Await the actual
+                    # TTS operation so connection/playback failures are visible in Render.
+                    try:
+                        print(
+                            f"📢 BF TTS prepare: guild={guild.name} | "
+                            f"languages=TH:{tts_th_enabled} EN:{tts_en_enabled} KO:{tts_ko_enabled}"
+                        )
+                        configured_voice = get_configured_voice_channel(guild)
+                        if configured_voice is not None:
+                            print(
+                                f"📢 BF TTS target: {guild.name} -> {configured_voice.name} "
+                                f"({configured_voice.id}) | humans={sum(1 for m in configured_voice.members if not m.bot)}"
+                            )
+                            bf_tts_ok = await asyncio.wait_for(
+                                speak_in_guild(
+                                    guild,
+                                    text_th=spoken_text_th,
+                                    text_en=spoken_text_en,
+                                    text_ko=spoken_text_ko,
+                                    target_channel=configured_voice
+                                ),
+                                timeout=180
+                            )
+                        else:
+                            print(
+                                f"⚠️ BF TTS ไม่มี /setvoice channel ใน {guild.name} "
+                                f"— จะประกาศไปยังห้อง Voice ที่มีสมาชิกแทน"
+                            )
+                            bf_tts_ok = await asyncio.wait_for(
+                                speak_in_guild(
+                                    guild,
+                                    text_th=spoken_text_th,
+                                    text_en=spoken_text_en,
+                                    text_ko=spoken_text_ko
+                                ),
+                                timeout=180
+                            )
+                        print(f"📢 BF TTS result: guild={guild.name} ok={bf_tts_ok}")
+                    except asyncio.TimeoutError:
+                        print(f"❌ BF TTS timeout: {guild.name}")
+                    except Exception as e:
+                        print(f"❌ BF TTS failed: {guild.name}: {e!r}")
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
 
