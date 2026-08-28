@@ -2319,6 +2319,32 @@ def start_firebase_listener(loop):
     except Exception as e:
         print(f"❌ ไม่สามารถเปิด Firebase Listener ได้: {e}")
 
+def start_bot_settings_listener():
+    """Keep Discord TTS switches synchronized with Firebase in near real time.
+    Firebase /bot_settings is the single source of truth; local JSON/SQLite are fallback only.
+    """
+    def listener(event):
+        global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
+        global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+        try:
+            data = event.data
+            if not isinstance(data, dict):
+                return
+            bf_notify_enabled = parse_bool(data.get("bf_notify_enabled"), bf_notify_enabled)
+            lib_notify_enabled = parse_bool(data.get("lib_notify_enabled"), lib_notify_enabled)
+            ppl_notify_enabled = parse_bool(data.get("ppl_notify_enabled"), ppl_notify_enabled)
+            tts_th_enabled = parse_bool(data.get("tts_th_enabled"), tts_th_enabled)
+            tts_en_enabled = parse_bool(data.get("tts_en_enabled"), tts_en_enabled)
+            tts_ko_enabled = parse_bool(data.get("tts_ko_enabled"), tts_ko_enabled)
+            print(f"🔄 Firebase bot_settings sync: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
+        except Exception as exc:
+            print(f"❌ Firebase bot_settings listener error: {exc!r}")
+    try:
+        db.reference("bot_settings").listen(listener)
+        print("🟢 Firebase bot_settings Listener พร้อมทำงาน")
+    except Exception as exc:
+        print(f"❌ ไม่สามารถเปิด bot_settings Listener ได้: {exc!r}")
+
 async def save_voice_config():
     """บันทึกการตั้งค่าห้อง Voice แบบถาวรลง Firebase และ local SQLite/JSON"""
     with schedule_lock:
@@ -2759,6 +2785,7 @@ async def on_ready():
     is_bot_ready = True
     loop = asyncio.get_running_loop()
     threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
+    threading.Thread(target=start_bot_settings_listener, daemon=True).start()
 
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
