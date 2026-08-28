@@ -2728,13 +2728,17 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
     async with voice_locks[guild.id]:
         channels = []
         if target_channel and isinstance(target_channel, discord.VoiceChannel):
-            channels = [target_channel]
+            # Never enter an empty voice channel for any automatic/on-demand TTS.
+            if any(not m.bot for m in target_channel.members):
+                channels = [target_channel]
+            else:
+                print(f"⏭️ ข้าม Voice ที่ว่าง: {guild.name} -> {target_channel.name}")
+                return False
         else:
-            # Prefer the explicitly configured /setvoice channel for scheduled
-            # notifications. Fall back to currently occupied rooms only when no
-            # configured target exists.
+            # Prefer the configured /setvoice channel, but only when at least one
+            # human is currently inside it. Otherwise use any occupied room.
             configured = get_configured_voice_channel(guild)
-            if configured is not None:
+            if configured is not None and any(not m.bot for m in configured.members):
                 channels = [configured]
             else:
                 channels = [
@@ -2743,7 +2747,7 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
                 ]
 
         if not channels:
-            print(f"⏭️ ไม่มีห้อง Voice ที่กำหนดไว้/มีสมาชิกสำหรับ TTS: {guild.name}")
+            print(f"⏭️ ไม่มีห้อง Voice ที่มีสมาชิกสำหรับ TTS: {guild.name}")
             return False
 
         files = await _tts_generate_files(text_th, text_en, text_ko, guild.id)
@@ -2800,6 +2804,27 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             asyncio.create_task(speak_in_guild(member.guild, text_th=greeting_text_th, text_en=greeting_text_en, text_ko=greeting_text_ko, target_channel=after.channel))
 
 @bot.event
+async def sync_slash_commands_cleanly():
+    """Keep one authoritative GLOBAL slash-command set and remove stale guild copies."""
+    try:
+        # First publish the current command tree globally.
+        global_synced = await bot.tree.sync()
+        global_names = sorted(getattr(cmd, "qualified_name", getattr(cmd, "name", str(cmd))) for cmd in global_synced)
+        print(f"✅ Global Slash Commands synced: {len(global_names)}")
+        print("📋 Global Commands: " + ", ".join(global_names))
+
+        # Remove old guild-scoped registrations. Do NOT copy global commands back
+        # into guilds, otherwise every command can appear twice.
+        for guild in list(bot.guilds):
+            try:
+                bot.tree.clear_commands(guild=guild)
+                cleared = await bot.tree.sync(guild=guild)
+                print(f"🧹 Cleared guild-scoped commands: {guild.name} ({guild.id}) -> {len(cleared)}")
+            except Exception as exc:
+                print(f"⚠️ Could not clear guild commands {guild.name} ({guild.id}): {exc!r}")
+    except Exception as exc:
+        print(f"❌ Slash command cleanup/sync failed: {exc!r}")
+
 async def on_ready():
     global is_bot_ready
     if is_bot_ready:
@@ -2831,6 +2856,10 @@ async def on_ready():
     loop = asyncio.get_running_loop()
     threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
     threading.Thread(target=start_bot_settings_listener, daemon=True).start()
+
+    # Clean legacy guild-scoped slash commands after all @bot.tree.command
+    # decorators have been registered. Keep only one global command set.
+    await sync_slash_commands_cleanly()
 
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
@@ -3928,12 +3957,26 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
     ADVANCE_NOTICE_SECONDS[canonical] = notice_minutes * 60
     ADVANCE_NOTICE_TEXT[canonical] = f"{notice_minutes} นาที"
     BOSS_PRONUNCIATION.setdefault(canonical, canonical)
+    now_iso = datetime.now(TZ_THAI).isoformat()
     custom_bosses[canonical] = {
+        "name": canonical,
         "respawnSeconds": int(total_seconds),
         "noticeMinutes": int(notice_minutes),
         "cdText": BOSS_CD_TEXT[canonical],
-        "pronunciation": BOSS_PRONUNCIATION[canonical]
+        "pronunciation": BOSS_PRONUNCIATION[canonical],
+        "createdAt": custom_bosses.get(canonical, {}).get("createdAt", now_iso),
+        "updatedAt": now_iso
     }
+    # Persist the individual definition first so adding one boss cannot overwrite
+    # another boss if two admins add/modify definitions close together.
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference(f"custom_bosses/{canonical}").set, custom_bosses[canonical]),
+            timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ /add boss individual Firebase save failed: {canonical}: {e}")
+    # Keep a complete root snapshot + local fallback as backup.
     await save_custom_bosses_to_github()
     # IMPORTANT: /addboss never writes boss_schedule.
     await interaction.followup.send(
