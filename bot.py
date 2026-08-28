@@ -2967,9 +2967,17 @@ async def check_boss_notifications():
                     print(f"⏭️ Stale boss suppressed: {boss_name} | left={time_left:.1f}s")
                 continue
 
-            if 0 < time_left <= notice_seconds + 5 or -60 <= time_left <= 0:
+            # Do not spam Render logs every 5 seconds while nothing is changing.
+            # Log only when a real notification action is due.
+            notification_action_due = (
+                (0 < time_left <= notice_seconds and not notified_advance)
+                or (0 < time_left <= notice_seconds and not voice_advance)
+                or (time_left <= 0 and not notified_spawn)
+                or (-60 <= time_left <= 0 and not voice_spawn)
+            )
+            if notification_action_due:
                 print(
-                    f"🔎 Boss notification check (loop): {boss_name} | spawn={spawn_time.isoformat()} | "
+                    f"🔎 Boss notification action due: {boss_name} | spawn={spawn_time.isoformat()} | "
                     f"left={time_left:.1f}s | notice={notice_minutes}m | advance={notified_advance} | "
                     f"spawn_sent={notified_spawn} | voice_advance={voice_advance} | voice_spawn={voice_spawn}"
                 )
