@@ -2209,6 +2209,7 @@ def _schedule_record_to_firebase(boss_name: str, data: dict) -> dict:
         "spawn_time": datetime.fromtimestamp(spawn_ms / 1000, tz=TZ_THAI).isoformat(),
         "noticeMinutes": notice,
         "recordedBy": data.get("recordedBy") or data.get("recorded_by") or "-",
+        "recordedByUserId": str(data.get("recordedByUserId") or data.get("recorded_by_user_id") or "").strip(),
         "notifiedNotice": parse_bool(data.get("notifiedNotice", data.get("notified_advance", False))),
         "notifiedSpawn": parse_bool(data.get("notifiedSpawn", data.get("notified_spawn", False))),
         "voiceNoticeSent": parse_bool(data.get("voiceNoticeSent", data.get("voice_notice_sent", False))),
@@ -2243,6 +2244,7 @@ def _firebase_to_internal(boss_name: str, data: dict) -> dict | None:
         "voice_spawn_sent": record.get("voiceSpawnSent", False),
         "noticeMinutes": record.get("noticeMinutes", 5),
         "recorded_by": record.get("recordedBy", "-"),
+        "recordedByUserId": record.get("recordedByUserId", ""),
     }
 
 async def save_boss_data():
@@ -2404,16 +2406,29 @@ async def load_custom_bosses():
     print(f"✅ load_custom_bosses สำเร็จ ({loaded} custom bosses)")
 
 async def save_custom_bosses_to_github():
-    """Historical function name retained; persistence is Firebase + local JSON."""
-    data = dict(custom_bosses or {})
+    """Persist custom boss definitions durably in Firebase (canonical)."""
+    data = {str(k): dict(v) for k, v in (custom_bosses or {}).items() if isinstance(v, dict)}
+    if not data:
+        print("ℹ️ custom_bosses ว่าง — ไม่เขียนทับข้อมูล Firebase เดิม")
+        return True
     try:
+        # Save each boss separately first, so one bad record cannot erase the others.
+        for boss_name, cfg in data.items():
+            await asyncio.wait_for(
+                asyncio.to_thread(db.reference(f"custom_bosses/{boss_name}").set, cfg), timeout=8
+            )
+        # Then keep a complete root snapshot for compatibility.
         await asyncio.wait_for(
-            asyncio.to_thread(db.reference("custom_bosses").set, data), timeout=8
+            asyncio.to_thread(db.reference("custom_bosses").update, data), timeout=8
         )
+        print(f"💾 custom_bosses saved to Firebase: {len(data)} boss(es)")
+        ok = True
     except Exception as e:
-        print(f"⚠️ บันทึก custom_bosses ลง Firebase ไม่สำเร็จ: {e}")
+        print(f"❌ บันทึก custom_bosses ลง Firebase ไม่สำเร็จ: {e}")
+        ok = False
     await asyncio.to_thread(set_db_value, "custom_bosses", data)
     await asyncio.to_thread(save_json_local, CUSTOM_BOSSES_FILE, data)
+    return ok
 
 async def load_live_config():
     global live_message_config
@@ -2550,8 +2565,29 @@ def clean_display_name(name: str) -> str:
     return cleaned if cleaned else "สมาชิก"
 
 # 🔥 ฟังก์ชันแจ้งเตือนด้วยเสียง (ตรวจสอบสถานะเปิด-ปิด TTS แต่ละภาษาก่อนเล่น)
+async def refresh_tts_settings_from_firebase():
+    """Read bot_settings directly from Firebase immediately before TTS generation.
+    Firebase is the single source of truth; local SQLite/files are not used to decide
+    which languages the Discord bot speaks.
+    """
+    global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    try:
+        data = await asyncio.to_thread(db.reference("bot_settings").get)
+        if isinstance(data, dict):
+            tts_th_enabled = parse_bool(data.get("tts_th_enabled"), False)
+            tts_en_enabled = parse_bool(data.get("tts_en_enabled"), False)
+            tts_ko_enabled = parse_bool(data.get("tts_ko_enabled"), False)
+        else:
+            tts_th_enabled = tts_en_enabled = tts_ko_enabled = False
+    except Exception as e:
+        print(f"❌ TTS settings refresh from Firebase failed: {e}")
+        return False
+    print(f"🔐 Effective TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
+    return True
+
 async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
-    """Generate TTS files using the installed edge-tts API."""
+    """Generate TTS files using the installed edge-tts API and live Firebase settings."""
+    await refresh_tts_settings_from_firebase()
     actual = []
     if tts_th_enabled and text_th:
         actual.append(("th", text_th, VOICE_THAI, "-20%", "+10Hz"))
@@ -2582,8 +2618,7 @@ async def _play_tts_in_channel(guild, channel, files):
     if not isinstance(channel, discord.VoiceChannel):
         return False
     humans = [m for m in channel.members if not m.bot]
-    if not humans:
-        return False
+    print(f"🔊 Voice target: {guild.name} -> {channel.name} | humans={len(humans)}")
 
     vc = guild.voice_client
     try:
@@ -2662,8 +2697,7 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
     async with voice_locks[guild.id]:
         channels = []
         if target_channel and isinstance(target_channel, discord.VoiceChannel):
-            if any(not m.bot for m in target_channel.members):
-                channels = [target_channel]
+            channels = [target_channel]
         else:
             channels = [
                 ch for ch in guild.voice_channels
@@ -2681,10 +2715,7 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
         success = False
         try:
             for channel in channels:
-                # Re-check immediately before joining; people may have left.
-                if not any(not m.bot for m in channel.members):
-                    continue
-                print(f"🔊 TTS -> {guild.name} -> {channel.name}")
+                print(f"🔊 TTS -> {guild.name} -> {channel.name} | humans={len([m for m in channel.members if not m.bot])}")
                 if await _play_tts_in_channel(guild, channel, files):
                     success = True
                 await asyncio.sleep(0.4)
@@ -2739,6 +2770,7 @@ async def on_ready():
 
     init_db()
     await load_bot_settings()
+    print(f"🔐 Startup TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
     await load_custom_bosses()
     await load_boss_data()
     await load_live_config()
@@ -2801,7 +2833,13 @@ async def check_bf_notifications():
                     spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
                     spoken_text_en = "Battlefield will start in 3 minutes."
                     spoken_text_ko = "배틀필드가 3분 후에 시작됩니다."
-                    asyncio.create_task(speak_in_guild(guild, text_th=spoken_text_th, text_en=spoken_text_en, text_ko=spoken_text_ko))
+                    configured = get_configured_voice_channel(guild)
+                    print(f"⏰ BF WARNING TRIGGER | guild={guild.name} | target={configured.name if configured else 'AUTO-GLOBAL'}")
+                    try:
+                        ok = await speak_in_guild(guild, text_th=spoken_text_th, text_en=spoken_text_en, text_ko=spoken_text_ko, target_channel=configured)
+                        print(f"📣 BF VOICE RESULT | guild={guild.name} | success={ok}")
+                    except Exception as e:
+                        print(f"❌ BF VOICE ERROR | guild={guild.name} | {e}")
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
 
@@ -3702,6 +3740,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
             "voiceSpawnSent": is_already_past,
             "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
             "recordedBy": user_name,
+            "recordedByUserId": str(interaction.user.id),
             "spawnTimeMs": int(next_spawn.timestamp() * 1000)
         }
 
@@ -3715,7 +3754,8 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
                 "voice_notice_sent": is_already_past,
                 "voice_spawn_sent": is_already_past,
                 "noticeMinutes": record["noticeMinutes"],
-                "recorded_by": user_name
+                "recorded_by": user_name,
+                "recordedByUserId": str(interaction.user.id)
             }
 
         cd_text = get_boss_cd_text(canonical_name)
@@ -3805,13 +3845,24 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
     ADVANCE_NOTICE_SECONDS[canonical] = notice_minutes * 60
     ADVANCE_NOTICE_TEXT[canonical] = f"{notice_minutes} นาที"
     BOSS_PRONUNCIATION.setdefault(canonical, canonical)
+    now_iso = datetime.now(TZ_THAI).isoformat()
     custom_bosses[canonical] = {
         "respawnSeconds": int(total_seconds),
         "noticeMinutes": int(notice_minutes),
         "cdText": BOSS_CD_TEXT[canonical],
-        "pronunciation": BOSS_PRONUNCIATION[canonical]
+        "pronunciation": BOSS_PRONUNCIATION[canonical],
+        "createdAt": custom_bosses.get(canonical, {}).get("createdAt", now_iso),
+        "updatedAt": now_iso,
+        "createdBy": str(interaction.user.display_name),
+        "createdById": str(interaction.user.id)
     }
-    await save_custom_bosses_to_github()
+    saved_ok = await save_custom_bosses_to_github()
+    if not saved_ok:
+        await interaction.followup.send(
+            f"❌ เพิ่มบอส **{canonical}** ไม่สำเร็จในการบันทึก Firebase — ไม่ถือว่าสำเร็จจนกว่าจะบันทึกได้",
+            ephemeral=True
+        )
+        return
     # IMPORTANT: /addboss never writes boss_schedule.
     await interaction.followup.send(
         f"✅ เพิ่มบอส **{canonical}** เข้า Boss Definition สำเร็จ\n"
