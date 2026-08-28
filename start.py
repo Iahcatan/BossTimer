@@ -118,11 +118,17 @@ async def sync_commands_once():
         for guild in guilds:
             try:
                 bot_module.bot.tree.clear_commands(guild=guild)
+                bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
                 remote_names = sorted(getattr(command, "qualified_name", getattr(command, "name", str(command))) for command in synced)
                 log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
                 log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
 
+                missing_remote = sorted(required - set(remote_names))
+                if missing_remote:
+                    log("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
+                else:
+                    log("🟢 Required commands verified: /status /kill /setvoice")
                 successful += 1
             except Exception as exc:
                 log(f"❌ Guild Sync failed: {guild.name} ({guild.id}): {exc!r}")
