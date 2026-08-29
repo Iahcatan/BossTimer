@@ -1463,7 +1463,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: item.recordedBy || 'ไม่ระบุ'
+                    recordedBy: item.recordedBy || item.recorded_by || 'ไม่ระบุ',
+                    recordedByUserId: item.recordedByUserId || item.recorded_by_user_id || ''
                 };
             });
             renderTable();
@@ -1664,16 +1665,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }
 
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
-            const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000); 
-            const currentUser = localStorage.getItem('logged_user') || 'Unknown';
+            const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000);
+            const authUser = auth.currentUser;
+            let currentUser = localStorage.getItem('logged_user') || '';
+            let recordedByUserId = authUser ? authUser.uid : (localStorage.getItem('logged_user_key') || '');
+            if (authUser) {
+                try {
+                    const profileSnap = await usersRef.child(authUser.uid).once('value');
+                    const profile = profileSnap.val() || {};
+                    currentUser = profile.username || authUser.displayName || authUser.email || currentUser;
+                } catch (profileErr) {
+                    console.warn('ไม่สามารถอ่านชื่อผู้ใช้จาก Firebase ได้:', profileErr);
+                }
+            }
+            if (!currentUser) currentUser = 'ไม่ระบุ';
+
+            // ถ้าเวลาที่คำนวณได้ผ่านไปแล้ว ให้ถือว่าเหตุการณ์แจ้งเตือนของ Timer นี้จบไปแล้ว
+            // ป้องกัน Bot มองข้อมูลย้อนหลังเป็น "บอสเกิดแล้ว" และเข้าห้อง Voice ทันทีหลังบันทึก
+            const scheduleAlreadyPassed = spawnTimeMs <= Date.now();
 
             await bossRef.child(bossInput).set({
                 killTimeMs: killDate.getTime(),
                 spawnTimeMs: spawnTimeMs,
                 noticeMinutes: noticeMin,
                 recordedBy: currentUser,
-                notifiedNotice: false,
-                notifiedSpawn: false
+                recordedByUserId: recordedByUserId,
+                notifiedNotice: scheduleAlreadyPassed,
+                notifiedSpawn: scheduleAlreadyPassed,
+                voiceNoticeSent: scheduleAlreadyPassed,
+                voiceSpawnSent: scheduleAlreadyPassed
             });
 
             document.getElementById('bossForm').reset();
@@ -1710,12 +1730,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const spawnTimeStr = format24h(new Date(data.spawnTimeMs));
                 
                 tr.innerHTML = `
-                    <td class="fw-bold text-warning">${bossName}</td>
+                    <td class="fw-bold text-warning">${escapeHtml(bossName)}</td>
                     <td>${killTimeStr}</td>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
-                    <td><span class="badge bg-secondary">${data.recordedBy}</span></td>
+                    <td><span class="badge bg-secondary">${escapeHtml(data.recordedBy || 'ไม่ระบุ')}</span></td>
                     <td>
                         <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
                     </td>
@@ -2586,7 +2606,9 @@ async def refresh_tts_settings_from_firebase():
     return True
 
 async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
-    """Generate TTS files using the installed edge-tts API and live Firebase settings."""
+    """Generate TTS with live Firebase settings and bounded retries.
+    A transient Edge TTS "No audio was received" error must not make /notice silently fail.
+    """
     await refresh_tts_settings_from_firebase()
     actual = []
     if tts_th_enabled and text_th:
@@ -2600,16 +2622,31 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
     uid = uuid.uuid4().hex
     for lang, text, voice, rate, pitch in actual:
         filename = f"temp_tts_{lang}_{guild_id}_{uid}.mp3"
-        try:
-            communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-            await communicator.save(filename)
-            if os.path.exists(filename) and os.path.getsize(filename) > 0:
-                files.append((lang, filename))
-                print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id})")
-            else:
-                print(f"❌ TTS ได้ไฟล์ว่าง: {lang}")
-        except Exception as e:
-            print(f"❌ สร้าง TTS ไม่สำเร็จ ({lang}): {e}")
+        success = False
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+                # First attempt keeps configured prosody; retries fall back to plain voice
+                # because the upstream TTS service can intermittently reject rate/pitch.
+                if attempt == 1:
+                    communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+                else:
+                    communicator = edge_tts.Communicate(text, voice)
+                await communicator.save(filename)
+                if os.path.exists(filename) and os.path.getsize(filename) > 256:
+                    files.append((lang, filename))
+                    print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id}) attempt={attempt}")
+                    success = True
+                    break
+                last_error = RuntimeError("No audio was received")
+            except Exception as e:
+                last_error = e
+                print(f"⚠️ TTS attempt {attempt}/3 failed ({lang}): {e}")
+                await asyncio.sleep(0.8 * attempt)
+        if not success:
+            print(f"❌ สร้าง TTS ไม่สำเร็จ ({lang}) หลังลอง 3 ครั้ง: {last_error}")
     return files
 
 
@@ -3263,7 +3300,8 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
                 "notified_advance": is_already_past,
                 "notified_spawn": is_already_past,
                 "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
-                "recorded_by": user_name
+                "recorded_by": user_name,
+                "recordedByUserId": str(interaction.user.id)
             }
         await save_boss_data()
         cd_text = get_boss_cd_text(canonical_name)
@@ -3602,23 +3640,35 @@ async def notice_command(interaction: discord.Interaction, message: str):
         ephemeral=True
     )
 
-    async def _run_notice_tts():
-        results = []
-        for vc in occupied:
-            try:
-                ok = await speak_in_guild(
+    results = []
+    for vc in occupied:
+        try:
+            ok = await asyncio.wait_for(
+                speak_in_guild(
                     interaction.guild,
                     text_th=message, text_en=message, text_ko=message,
                     target_channel=vc
-                )
-                results.append((vc.name, ok))
-            except Exception as e:
-                print(f"❌ /notice TTS failed in {vc.name}: {e}")
-                results.append((vc.name, False))
-        ok_count = sum(1 for _, ok in results if ok)
-        print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
-
-    asyncio.create_task(_run_notice_tts())
+                ),
+                timeout=180
+            )
+            results.append((vc.name, ok))
+        except Exception as e:
+            print(f"❌ /notice TTS failed in {vc.name}: {e}")
+            results.append((vc.name, False))
+    ok_count = sum(1 for _, ok in results if ok)
+    print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
+    failed = [name for name, ok in results if not ok]
+    if failed:
+        await interaction.followup.send(
+            f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n" +
+            f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}",
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง",
+            ephemeral=True
+        )
 
 # ==========================================
 # ⚔️ 10. Boss Slash Commands
