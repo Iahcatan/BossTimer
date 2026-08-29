@@ -168,6 +168,57 @@ def parse_time_input(time_str: str, now: datetime) -> datetime:
         boss_died_at -= timedelta(days=1)
     return boss_died_at
 
+def parse_date_input(date_str: str, now: datetime):
+    """Parse an optional kill date. Blank means today's Thai date."""
+    raw = (date_str or "").strip()
+    if not raw:
+        return now.date()
+    raw = raw.replace(".", "-").replace("/", "-")
+    parts = raw.split("-")
+    try:
+        if len(parts) == 3:
+            if len(parts[0]) == 4:
+                y, m, d = map(int, parts)
+            elif len(parts[2]) == 4:
+                d, m, y = map(int, parts)
+            else:
+                raise ValueError
+            return datetime(y, m, d, tzinfo=TZ_THAI).date()
+    except Exception:
+        pass
+    raise ValueError("Invalid date format")
+
+def parse_kill_datetime(date_str: str, time_str: str, now: datetime) -> datetime:
+    """Combine optional YYYY-MM-DD date with optional HH:MM/HHMM time.
+    Blank date = today; blank time = current time. No implicit previous-day shift.
+    """
+    kill_date = parse_date_input(date_str, now)
+    raw_time = (time_str or "").strip()
+    if not raw_time:
+        hh, mm, ss = now.hour, now.minute, now.second
+    else:
+        cleaned = raw_time.replace(".", ":")
+        if re.fullmatch(r"\d{3,6}", cleaned):
+            if len(cleaned) == 3:
+                hh, mm, ss = int(cleaned[0]), int(cleaned[1:]), 0
+            elif len(cleaned) == 4:
+                hh, mm, ss = int(cleaned[:2]), int(cleaned[2:]), 0
+            elif len(cleaned) == 5:
+                hh, mm, ss = int(cleaned[0]), int(cleaned[1:3]), int(cleaned[3:])
+            else:
+                hh, mm, ss = int(cleaned[:2]), int(cleaned[2:4]), int(cleaned[4:])
+        elif ":" in cleaned:
+            vals = cleaned.split(":")
+            if not all(v.isdigit() for v in vals) or len(vals) not in (2, 3):
+                raise ValueError("Invalid time format")
+            hh, mm = int(vals[0]), int(vals[1])
+            ss = int(vals[2]) if len(vals) == 3 else 0
+        else:
+            raise ValueError("Invalid time format")
+        if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+            raise ValueError("Invalid time range")
+    return datetime(kill_date.year, kill_date.month, kill_date.day, hh, mm, ss, tzinfo=TZ_THAI)
+
 def get_boss_respawn_time(boss_name: str) -> timedelta:
     if not boss_name: return timedelta(minutes=30)
     cleaned = boss_name.strip().lower()
@@ -528,7 +579,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." data-i18n-ph="phBoss" required autocomplete="off">
                     <datalist id="bossOptions"></datalist>
                 </div>
-                <div class="col-md-3">
+                <div class="col-md-2">
+                    <label class="form-label" data-i18n="labelKillDate">วันที่บอสตาย</label>
+                    <input type="date" id="killDate" class="form-control" autocomplete="off">
+                    <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่างไว้ = วันนี้</small>
+                </div>
+                <div class="col-md-2">
                     <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>
                     <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">
                     <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
@@ -537,7 +593,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <label class="form-label" data-i18n="labelSpTime">เพิ่มเวลาพิเศษ (นาที)</label>
                     <input type="number" id="spTime" class="form-control" min="0" placeholder="0">
                 </div>
-                <div class="col-md-2">
+                <div class="col-md-1">
                     <label class="form-label" data-i18n="labelNotice">แจ้งเตือนล่วงหน้า (นาที)</label>
                     <input type="number" id="noticeMinutes" class="form-control" min="1" value="5">
                 </div>
@@ -558,6 +614,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <thead>
                         <tr>
                             <th data-i18n="thBoss">ชื่อบอส</th>
+                            <th data-i18n="thKillDate">วันที่ตาย</th>
                             <th data-i18n="thKillTime">เวลาตาย (24 ชม.)</th>
                             <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>
                             <th data-i18n="thCountdown">นับถอยหลัง</th>
@@ -736,6 +793,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 enableNotify: "🔔 เปิดระบบเสียง & แจ้งเตือน",
                 disableNotify: "🔕 ปิดระบบเสียง & แจ้งเตือน",
                 formTitle: "⏱️ บันทึกเวลาบอสตาย",
+                labelKillDate: "วันที่บอสตาย",
+                hintKillDate: "*เว้นว่างไว้ = วันนี้",
+                thKillDate: "วันที่ตาย",
                 labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
@@ -836,6 +896,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 enableNotify: "🔔 Enable Sound & Alerts",
                 disableNotify: "🔕 Disable Sound & Alerts",
                 formTitle: "⏱️ Record Boss Kill Time",
+                labelKillDate: "Boss Death Date",
+                hintKillDate: "*Leave blank = today",
+                thKillDate: "Death Date",
                 labelBoss: "Select or Type Boss Name",
                 phBoss: "Type to search or select...",
                 labelKillTime: "Kill Time (24h Format)",
@@ -936,6 +999,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 enableNotify: "🔔 소리 및 알림 켜기",
                 disableNotify: "🔕 소리 및 알림 끄기",
                 formTitle: "⏱️ 보스 처치 시간 기록",
+                labelKillDate: "보스 처치 날짜",
+                hintKillDate: "*비워두면 오늘 날짜",
+                thKillDate: "처치 날짜",
                 labelBoss: "보스 선택 또는 입력",
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
@@ -1494,6 +1560,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 activeBosses[bossName] = {
                     spawnTimeMs: spawnMs,
                     killTimeMs: killMs,
+                    killDate: item.killDate || (killMs ? formatKillDate(new Date(killMs)) : ''),
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
@@ -1656,6 +1723,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return `${h}:${m}:${s}`;
         }
 
+        function formatKillDate(dateObj) {
+            if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return '';
+            const parts = new Intl.DateTimeFormat('en-CA', {
+                timeZone: 'Asia/Bangkok', year: 'numeric', month: '2-digit', day: '2-digit'
+            }).formatToParts(dateObj);
+            const get = (type) => parts.find(p => p.type === type)?.value || '';
+            return `${get('year')}-${get('month')}-${get('day')}`;
+        }
+
+        function formatKillDateDisplay(value) {
+            if (!value) return '-';
+            const m = String(value).match(/^([0-9]{4})-([0-9]{2})-([0-9]{2})$/);
+            if (!m) return escapeHtml(value);
+            return `${m[3]}/${m[2]}/${m[1]}`;
+        }
+
         function parseInputTime(timeStr) {
             if (!timeStr) return new Date();
             let h, m;
@@ -1688,6 +1771,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             e.preventDefault();
             if (!await requireApprovedUser()) return;
             const bossInput = document.getElementById('bossSelect').value.trim();
+            const dateInput = document.getElementById('killDate').value.trim();
             const timeInput = document.getElementById('killTime').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
             const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
@@ -1706,6 +1790,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     },
                     body: JSON.stringify({
                         bossName: bossInput,
+                        killDate: dateInput,
                         killTime: timeInput,
                         noticeMinutes: noticeMin,
                         spTimeMinutes: spTimeMin,
@@ -1725,6 +1810,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     activeBosses[result.bossName] = {
                         spawnTimeMs: fallbackSpawn,
                         killTimeMs: fallbackKill,
+                        killDate: result.killDate || '',
                         noticeMinutes: noticeMin,
                         notifiedNotice: !!result.alreadyPassed,
                         notifiedSpawn: !!result.alreadyPassed,
@@ -1761,18 +1847,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const sortedBosses = Object.keys(activeBosses).sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
 
             if (sortedBosses.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
                 return;
             }
 
             sortedBosses.forEach(bossName => {
                 const data = activeBosses[bossName];
                 const tr = document.createElement('tr');
+                const killDateStr = formatKillDateDisplay(data.killDate || formatKillDate(new Date(data.killTimeMs)));
                 const killTimeStr = format24h(new Date(data.killTimeMs));
                 const spawnTimeStr = format24h(new Date(data.spawnTimeMs));
                 
                 tr.innerHTML = `
                     <td class="fw-bold text-warning">${escapeHtml(bossName)}</td>
+                    <td>${killDateStr}</td>
                     <td>${killTimeStr}</td>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
@@ -1984,6 +2072,7 @@ def record_boss_api():
             return _api_json({'success': False, 'error': 'Account is not approved'}), 403
 
         boss_name = str(payload.get('bossName') or '').strip()
+        date_input = str(payload.get('killDate') or '').strip()
         time_input = str(payload.get('killTime') or '').strip()
         try:
             notice_min = max(1, int(payload.get('noticeMinutes') or 5))
@@ -2003,9 +2092,9 @@ def record_boss_api():
         respawn = get_boss_respawn_time(canonical_name)
         now = datetime.now(TZ_THAI)
         try:
-            boss_died_at = parse_time_input(time_input, now)
-        except ValueError:
-            return _api_json({'success': False, 'error': 'Invalid time format'}), 400
+            boss_died_at = parse_kill_datetime(date_input, time_input, now)
+        except ValueError as exc:
+            return _api_json({'success': False, 'error': str(exc)}), 400
 
         next_spawn = boss_died_at + respawn + timedelta(minutes=sp_time_min)
         spawn_ms = int(next_spawn.timestamp() * 1000)
@@ -2019,6 +2108,7 @@ def record_boss_api():
         requested_at = datetime.now(TZ_THAI).isoformat()
 
         record = {
+            'killDate': boss_died_at.strftime('%Y-%m-%d'),
             'killTimeMs': kill_ms,
             'spawnTimeMs': spawn_ms,
             'spawn_time': next_spawn.isoformat(),
@@ -2043,6 +2133,8 @@ def record_boss_api():
         with schedule_lock:
             boss_schedule[canonical_name] = {
                 'spawn_time': next_spawn,
+                'killDate': boss_died_at.strftime('%Y-%m-%d'),
+                'killDate': boss_died_at.strftime('%Y-%m-%d'),
                 'killTimeMs': kill_ms,
                 'channel_id': payload.get('channelId'),
                 'notified_advance': already_passed,
@@ -2436,6 +2528,7 @@ def _schedule_record_to_firebase(boss_name: str, data: dict) -> dict:
     }
     if kill_ms is not None:
         record["killTimeMs"] = kill_ms
+        record["killDate"] = str(data.get("killDate") or (kill_dt.strftime("%Y-%m-%d") if kill_dt else ""))
     channel_id = data.get("channelId") or data.get("channel_id")
     if channel_id is not None:
         try: record["channelId"] = int(channel_id)
@@ -2455,6 +2548,7 @@ def _firebase_to_internal(boss_name: str, data: dict) -> dict | None:
     return {
         "spawn_time": parse_to_thai_datetime(record["spawnTimeMs"]),
         "killTimeMs": record.get("killTimeMs"),
+        "killDate": record.get("killDate") or (parse_to_thai_datetime(record.get("killTimeMs")).strftime("%Y-%m-%d") if record.get("killTimeMs") else ""),
         "channel_id": record.get("channelId"),
         "voice_channel_id": record.get("voiceChannelId"),
         "notified_advance": record.get("notifiedNotice", False),
@@ -3584,6 +3678,10 @@ class BossSelect(discord.ui.Select):
         await interaction.response.send_message(f"🎯 เลือกบอส: **{self.values[0]}** เรียบร้อยแล้ว (กดปุ่ม ⚔️ บอสตายแล้ว เพื่อระบุเวลาได้ทันที)", ephemeral=True)
 
 class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวลาบอสตาย"):
+    kill_date_input = discord.ui.TextInput(
+        label="วันที่บอสตาย (ไม่ใส่ = วันนี้)", style=discord.TextStyle.short,
+        placeholder="2026-08-29 หรือ 29/08/2026", required=False, max_length=10
+    )
     kill_time_input = discord.ui.TextInput(
         label="เวลาที่บอสตาย (ไม่ใส่ = เวลาปัจจุบัน)", style=discord.TextStyle.short,
         placeholder="ตัวอย่าง: 17:30 หรือ 1730 (ปล่อยว่างได้)", required=False, max_length=8
@@ -3593,8 +3691,9 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
         self.selected_boss = selected_boss
     async def on_submit(self, interaction: discord.Interaction):
         now = datetime.now(TZ_THAI)
+        raw_date = self.kill_date_input.value.strip() if self.kill_date_input.value else ""
         raw_val = self.kill_time_input.value.strip() if self.kill_time_input.value else ""
-        try: boss_died_at = parse_time_input(raw_val, now)
+        try: boss_died_at = parse_kill_datetime(raw_date, raw_val, now)
         except Exception:
             await interaction.response.send_message("❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอกแบบ **17:30** หรือ **1730** (หรือเว้นว่างไว้เพื่อใช้เวลาปัจจุบัน)", ephemeral=True)
             return
@@ -3612,6 +3711,7 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
             boss_schedule[canonical_name] = {
                 "spawn_time": next_spawn,
                 "killTimeMs": int(boss_died_at.timestamp() * 1000),
+                "killDate": boss_died_at.strftime("%Y-%m-%d"),
                 "channel_id": interaction.channel_id,
                 "notified_advance": is_already_past,
                 "notified_spawn": is_already_past,
@@ -3631,6 +3731,7 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
 
         embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
         embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
+        embed.add_field(name="📅 วันที่ตาย", value=boss_died_at.strftime("%d/%m/%Y"), inline=True)
         embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
         embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
         embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
@@ -4047,7 +4148,9 @@ def generate_boss_time_summary():
             tts_lines_en.append(f"Boss {boss} in {tts_time_en}.")
             tts_lines_ko.append(f"보스 {boss}가 {tts_time_ko} 남았습니다.")
 
-        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(บันทึกโดย: {rec_by})*", inline=False)
+        kill_dt = parse_to_thai_datetime(data.get("killTimeMs"))
+        date_text = kill_dt.strftime("%d/%m/%Y") if kill_dt else "-"
+        embed.add_field(name=f"👾 {boss}", value=f"วันที่ตาย: `{date_text}` | เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(บันทึกโดย: {rec_by})*", inline=False)
 
     if len(sorted_bosses) > 20:
         embed.add_field(name="📌 หมายเหตุ", value=f"*ยังมีบอสอีก {len(sorted_bosses) - 20} ตัว สามารถดูเพิ่มเติมได้บน Dashboard*", inline=False)
@@ -4081,11 +4184,12 @@ async def boss_time_prefix(ctx: commands.Context):
 @bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
 @app_commands.describe(
     boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
-    kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน"
+    kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน" ,
+    kill_date="ระบุวันที่บอสตาย (YYYY-MM-DD หรือ DD/MM/YYYY) ถ้าไม่ระบุ = วันนี้"
 )
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
-async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None):
+async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None, kill_date: str = None):
     # Acknowledge immediately.
     try:
         await interaction.response.defer()
@@ -4098,10 +4202,10 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         now = datetime.now(TZ_THAI)
 
         try:
-            boss_died_at = parse_time_input(kill_time, now)
+            boss_died_at = parse_kill_datetime(kill_date, kill_time, now)
         except ValueError:
             await interaction.followup.send(
-                "❌ รูปแบบเวลาไม่ถูกต้อง! กรุณากรอกแบบ **17:30** หรือ **1730**",
+                "❌ วันที่หรือเวลาไม่ถูกต้อง! วันที่ใช้ **YYYY-MM-DD** หรือ **DD/MM/YYYY** และเวลาใช้ **17:30** หรือ **1730**",
                 ephemeral=True
             )
             return
@@ -4113,6 +4217,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
         record = {
             "spawn_time": next_spawn.isoformat(),
+            "killDate": boss_died_at.strftime("%Y-%m-%d"),
             "killTimeMs": int(boss_died_at.timestamp() * 1000),
             "channelId": interaction.channel_id,
             "notifiedNotice": is_already_past,
@@ -4133,6 +4238,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
             boss_schedule[canonical_name] = {
                 "spawn_time": next_spawn,
                 "killTimeMs": record["killTimeMs"],
+                "killDate": record["killDate"],
                 "channel_id": interaction.channel_id,
                 "notified_advance": is_already_past,
                 "notified_spawn": is_already_past,
@@ -4150,6 +4256,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
 
         embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
         embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
+        embed.add_field(name="📅 วันที่ตาย", value=boss_died_at.strftime("%d/%m/%Y"), inline=True)
         embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
         embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
         embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
@@ -4185,6 +4292,7 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
                     interaction.user,
                     "บันทึกเวลาบอสตาย (/kill)",
                     f"👾 บอส: `{canonical_name}`\n"
+                    f"📅 วันที่ตาย: `{boss_died_at.strftime('%d/%m/%Y')}`\n"
                     f"👤 ผู้บันทึก: `{user_name}`\n"
                     f"🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}",
                     discord.Color.red()
@@ -4320,7 +4428,9 @@ async def boss_status(interaction: discord.Interaction):
 
         notice_text = get_boss_advance_notice_text(boss)
         rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*", inline=False)
+        kill_dt = parse_to_thai_datetime(data.get("killTimeMs"))
+        date_text = kill_dt.strftime("%d/%m/%Y") if kill_dt else "-"
+        embed.add_field(name=f"👾 {boss}", value=f"วันที่ตาย: `{date_text}` | เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*", inline=False)
 
     if len(sorted_bosses) > 20:
         embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
