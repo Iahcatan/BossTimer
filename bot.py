@@ -168,6 +168,45 @@ def parse_time_input(time_str: str, now: datetime) -> datetime:
         boss_died_at -= timedelta(days=1)
     return boss_died_at
 
+def parse_date_time_input(date_str: str, time_str: str, now: datetime) -> datetime:
+    """Parse an explicit YYYY-MM-DD + HH:MM/HHMM in Asia/Bangkok. Blank date = today."""
+    date_clean = str(date_str or '').strip()
+    if not date_clean:
+        selected_date = now.date()
+    else:
+        try:
+            selected_date = datetime.strptime(date_clean, "%Y-%m-%d").date()
+        except ValueError as exc:
+            raise ValueError("Invalid date format; expected YYYY-MM-DD") from exc
+
+    time_clean = str(time_str or '').strip()
+    if not time_clean:
+        return now.replace(year=selected_date.year, month=selected_date.month, day=selected_date.day)
+
+    cleaned = time_clean.replace('.', ':')
+    if re.fullmatch(r'\d{3,6}', cleaned):
+        if len(cleaned) == 3:
+            hh, mm, ss = int(cleaned[0]), int(cleaned[1:]), 0
+        elif len(cleaned) == 4:
+            hh, mm, ss = int(cleaned[:2]), int(cleaned[2:]), 0
+        elif len(cleaned) == 5:
+            hh, mm, ss = int(cleaned[0]), int(cleaned[1:3]), int(cleaned[3:])
+        else:
+            hh, mm, ss = int(cleaned[:2]), int(cleaned[2:4]), int(cleaned[4:])
+    elif ':' in cleaned:
+        parts = cleaned.split(':')
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            hh, mm, ss = int(parts[0]), int(parts[1]), 0
+        elif len(parts) == 3 and all(p.isdigit() for p in parts):
+            hh, mm, ss = int(parts[0]), int(parts[1]), int(parts[2])
+        else:
+            raise ValueError("Invalid time format")
+    else:
+        raise ValueError("Invalid time format")
+    if not (0 <= hh <= 23 and 0 <= mm <= 59 and 0 <= ss <= 59):
+        raise ValueError("Invalid time range")
+    return now.replace(year=selected_date.year, month=selected_date.month, day=selected_date.day, hour=hh, minute=mm, second=ss, microsecond=0)
+
 def get_boss_respawn_time(boss_name: str) -> timedelta:
     if not boss_name: return timedelta(minutes=30)
     cleaned = boss_name.strip().lower()
@@ -528,6 +567,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <input list="bossOptions" id="bossSelect" class="form-control" placeholder="พิมพ์เพื่อค้นหา หรือคลิกเลือก..." data-i18n-ph="phBoss" required autocomplete="off">
                     <datalist id="bossOptions"></datalist>
                 </div>
+                <div class="col-md-2">
+                    <label class="form-label" data-i18n="labelKillDate">วันที่บอสตาย</label>
+                    <input type="date" id="killDate" class="form-control" autocomplete="off">
+                    <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่าง = วันนี้</small>
+                </div>
                 <div class="col-md-3">
                     <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>
                     <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">
@@ -558,6 +602,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <thead>
                         <tr>
                             <th data-i18n="thBoss">ชื่อบอส</th>
+                            <th data-i18n="thKillDate">วันที่ตาย</th>
                             <th data-i18n="thKillTime">เวลาตาย (24 ชม.)</th>
                             <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>
                             <th data-i18n="thCountdown">นับถอยหลัง</th>
@@ -736,6 +781,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 enableNotify: "🔔 เปิดระบบเสียง & แจ้งเตือน",
                 disableNotify: "🔕 ปิดระบบเสียง & แจ้งเตือน",
                 formTitle: "⏱️ บันทึกเวลาบอสตาย",
+                labelKillDate: "วันที่บอสตาย",
+                hintKillDate: "*เว้นว่าง = วันนี้",
                 labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
@@ -747,6 +794,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 tableTitle: "📜 ตารางเวลาบอสล่าสุด",
                 btnClear: "ล้างตารางทั้งหมด",
                 thBoss: "ชื่อบอส",
+                thKillDate: "วันที่ตาย",
                 thKillTime: "เวลาตาย (24 ชม.)",
                 thSpawnTime: "เวลาเกิด (24 ชม.)",
                 thCountdown: "นับถอยหลัง",
@@ -847,6 +895,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 tableTitle: "📜 Boss Schedule Table",
                 btnClear: "Clear All Data",
                 thBoss: "Boss Name",
+                thKillDate: "Kill Date",
                 thKillTime: "Kill Time (24h)",
                 thSpawnTime: "Spawn Time (24h)",
                 thCountdown: "Countdown",
@@ -936,6 +985,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 enableNotify: "🔔 소리 및 알림 켜기",
                 disableNotify: "🔕 소리 및 알림 끄기",
                 formTitle: "⏱️ 보스 처치 시간 기록",
+                labelKillDate: "보스 사망 날짜",
+                hintKillDate: "*비워두면 오늘",
                 labelBoss: "보스 선택 또는 입력",
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
@@ -947,6 +998,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 tableTitle: "📜 최근 보스 시간표",
                 btnClear: "전체 목록 삭제",
                 thBoss: "보스 이름",
+                thKillDate: "사망 날짜",
                 thKillTime: "처치 시간 (24h)",
                 thSpawnTime: "젠 시간 (24h)",
                 thCountdown: "카운트다운",
@@ -1366,7 +1418,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
 
             if (!userRows.length) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
             }
         }
 
@@ -1463,17 +1515,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         function resolveRecordedBy(item) {
-            const raw = item.recordedBy || item.recorded_by || '';
+            const raw = item.recordedBy || item.recorded_by || item.recordedByName || item.recorded_by_name || '';
             const uid = item.recordedByUserId || item.recorded_by_user_id || '';
-            const profile = uid ? dashboardUsersCache[uid] : null;
-            if (profile && profile.username) return profile.username;
-            if (raw && !['unknown','unknow','ไม่ระบุ'].includes(String(raw).trim().toLowerCase())) return raw;
+            const bad = ['', '-', 'unknown', 'unknow', 'undefined', 'null', 'ไม่ระบุ'];
+            const cleanRaw = String(raw || '').trim();
             const authUser = auth.currentUser;
-            if (uid && authUser && uid === authUser.uid) {
-                if (currentUserData && currentUserData.username) return currentUserData.username;
-                return authUser.email || 'สมาชิก';
+            if (uid && authUser && String(uid) === String(authUser.uid) && currentUserData) {
+                const me = String(currentUserData.username || authUser.displayName || authUser.email || '').trim();
+                if (me) return me;
             }
-            return 'ไม่ระบุ';
+            const profile = uid ? dashboardUsersCache[uid] : null;
+            if (profile) {
+                const name = String(profile.username || profile.displayName || profile.email || '').trim();
+                if (name) return name;
+            }
+            if (cleanRaw && !bad.includes(cleanRaw.toLowerCase())) return cleanRaw;
+            if (authUser && (!uid || String(uid) === String(authUser.uid))) {
+                const me = String((currentUserData && currentUserData.username) || authUser.displayName || authUser.email || '').trim();
+                if (me) return me;
+            }
+            const storedUser = String(localStorage.getItem('logged_user') || '').trim();
+            if (!uid && storedUser && !bad.includes(storedUser.toLowerCase())) return storedUser;
+            return 'สมาชิก';
         }
 
         bossRef.on('value', (snapshot) => {
@@ -1653,6 +1716,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return `${h}:${m}:${s}`;
         }
 
+        function parseInputDateTime(dateStr, timeStr) {
+            const now = new Date();
+            let baseDate = now;
+            if (dateStr) {
+                const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+                if (!m) return null;
+                baseDate = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0);
+                if (baseDate.getFullYear() !== Number(m[1]) || baseDate.getMonth() !== Number(m[2]) - 1 || baseDate.getDate() !== Number(m[3])) return null;
+            }
+            if (!timeStr) {
+                return new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), now.getHours(), now.getMinutes(), now.getSeconds(), 0);
+            }
+            let h, m;
+            const cleaned = String(timeStr).trim();
+            if (cleaned.includes(':')) {
+                const parts = cleaned.split(':');
+                h = parseInt(parts[0], 10); m = parseInt(parts[1], 10);
+            } else if (cleaned.length === 3) {
+                h = parseInt(cleaned.substring(0, 1), 10); m = parseInt(cleaned.substring(1, 3), 10);
+            } else if (cleaned.length === 4) {
+                h = parseInt(cleaned.substring(0, 2), 10); m = parseInt(cleaned.substring(2, 4), 10);
+            } else {
+                return null;
+            }
+            if (isNaN(h) || isNaN(m) || h < 0 || h > 23 || m < 0 || m > 59) return null;
+            return new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate(), h, m, 0, 0);
+        }
+
         function parseInputTime(timeStr) {
             if (!timeStr) return new Date();
             let h, m;
@@ -1681,10 +1772,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return d;
         }
 
+        // Date input defaults to today; blank is accepted by the API as today too.
+        const initialKillDate = document.getElementById('killDate');
+        if (initialKillDate && !initialKillDate.value) {
+            const nowForDate = new Date();
+            initialKillDate.value = [nowForDate.getFullYear(), String(nowForDate.getMonth()+1).padStart(2,'0'), String(nowForDate.getDate()).padStart(2,'0')].join('-');
+        }
+
         document.getElementById('bossForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             if (!await requireApprovedUser()) return;
             const bossInput = document.getElementById('bossSelect').value.trim();
+            const dateInput = document.getElementById('killDate').value.trim();
             const timeInput = document.getElementById('killTime').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
             const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
@@ -1703,6 +1802,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     },
                     body: JSON.stringify({
                         bossName: bossInput,
+                        killDate: dateInput,
                         killTime: timeInput,
                         noticeMinutes: noticeMin,
                         spTimeMinutes: spTimeMin,
@@ -1715,6 +1815,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 }
                 document.getElementById('bossForm').reset();
                 document.getElementById('noticeMinutes').value = 5;
+                const kd = document.getElementById('killDate'); if (kd) kd.value = new Date().toISOString().slice(0,10);
                 // Update the UI immediately from the authoritative backend response.
                 if (result.bossName) {
                     const fallbackKill = Number(result.killTimeMs) || Date.now();
@@ -1757,7 +1858,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const sortedBosses = Object.keys(activeBosses).sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
 
             if (sortedBosses.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
                 return;
             }
 
@@ -1769,6 +1870,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 
                 tr.innerHTML = `
                     <td class="fw-bold text-warning">${escapeHtml(bossName)}</td>
+                    <td>${new Date(data.killTimeMs).toLocaleDateString('th-TH')}</td>
                     <td>${killTimeStr}</td>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
@@ -1980,6 +2082,7 @@ def record_boss_api():
             return _api_json({'success': False, 'error': 'Account is not approved'}), 403
 
         boss_name = str(payload.get('bossName') or '').strip()
+        date_input = str(payload.get('killDate') or '').strip()
         time_input = str(payload.get('killTime') or '').strip()
         try:
             notice_min = max(1, int(payload.get('noticeMinutes') or 5))
@@ -1999,9 +2102,9 @@ def record_boss_api():
         respawn = get_boss_respawn_time(canonical_name)
         now = datetime.now(TZ_THAI)
         try:
-            boss_died_at = parse_time_input(time_input, now)
-        except ValueError:
-            return _api_json({'success': False, 'error': 'Invalid time format'}), 400
+            boss_died_at = parse_date_time_input(date_input, time_input, now)
+        except ValueError as exc:
+            return _api_json({'success': False, 'error': str(exc)}), 400
 
         next_spawn = boss_died_at + respawn + timedelta(minutes=sp_time_min)
         spawn_ms = int(next_spawn.timestamp() * 1000)
@@ -2052,10 +2155,13 @@ def record_boss_api():
                 'confirmationStatus': 'pending'
             }
 
-        # Queue confirmation immediately from the Bot process. The Firebase listener
-        # remains as a safety net but this removes timing dependence on the listener.
+        # Trigger the Voice confirmation from the same Bot event loop and wait for the
+        # actual result. This prevents the Dashboard API from returning before the
+        # confirmation attempt is executed. Firebase listener remains a safety net.
+        confirmation_result = None
         try:
-            queue_voice_confirmation(canonical_name, dict(boss_schedule[canonical_name]), source='dashboard')
+            confirmation_result = queue_voice_confirmation(canonical_name, dict(boss_schedule[canonical_name]), source='dashboard', wait=True, timeout=150)
+            print(f"📣 Dashboard confirmation result | boss={canonical_name} | success={confirmation_result}")
         except Exception as exc:
             print(f"⚠️ Dashboard confirmation queue failed: {exc}")
 
@@ -2068,7 +2174,8 @@ def record_boss_api():
             'spawnTimeMs': spawn_ms,
             'spawnTime': next_spawn.isoformat(),
             'confirmationRequestId': request_id,
-            'alreadyPassed': already_passed
+            'alreadyPassed': already_passed,
+            'confirmationSuccess': bool(confirmation_result) if confirmation_result is not None else False
         })
     except Exception as exc:
         print(f"❌ /api/record-boss failed: {exc}")
@@ -2499,7 +2606,7 @@ async def load_boss_data():
 
 _confirmation_queue_ids = set()
 
-def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'):
+def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown', wait: bool = False, timeout: int = 150):
     """Queue one voice confirmation on the Discord event loop; safe against duplicate listener/API triggers."""
     request_id = str(data.get("confirmationRequestId") or "").strip()
     if not request_id:
@@ -2516,7 +2623,13 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
         return False
     _confirmation_queue_ids.add(request_id)
     print(f"📢 Queue voice confirmation | source={source} | boss={boss_name} | request={request_id}")
-    asyncio.run_coroutine_threadsafe(_voice_confirm_boss_recording(boss_name, dict(data)), bot_event_loop)
+    future = asyncio.run_coroutine_threadsafe(_voice_confirm_boss_recording(boss_name, dict(data)), bot_event_loop)
+    if wait:
+        try:
+            return bool(future.result(timeout=timeout))
+        except Exception as exc:
+            print(f"⚠️ Voice confirmation wait failed: {boss_name}: {exc}")
+            return False
     return True
 
 async def _voice_confirm_boss_recording(boss_name: str, data: dict):
@@ -2557,6 +2670,7 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
                 continue
             for room in rooms:
                 try:
+                    print(f"📢 Boss confirmation voice target | guild={guild.name} | channel={room.name} ({room.id}) | humans={len([m for m in room.members if not m.bot])}")
                     ok = await asyncio.wait_for(
                         speak_in_guild(guild, text_th=text_th, text_en=text_en, text_ko=text_ko, target_channel=room),
                         timeout=180
@@ -2565,6 +2679,7 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
                 except Exception as exc:
                     print(f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{room.name}): {exc}")
         print(f"✅ Boss record confirmation | boss={boss_name} | user={recorded_by} | success={success}")
+        return success
     finally:
         try:
             await asyncio.to_thread(
@@ -2941,6 +3056,10 @@ async def _play_tts_in_channel(guild, channel, files):
 
         if not vc or not vc.is_connected():
             return False
+
+        # TTS can lose the first syllable if playback begins immediately after the
+        # Discord voice handshake. Warm up the connection before starting audio.
+        await asyncio.sleep(1.0)
 
         loop = asyncio.get_running_loop()
         ok = False
