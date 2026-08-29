@@ -1443,6 +1443,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         // --- 4. ระบบ Real-time Sync จาก Firebase ---
+        const dashboardUsersCache = {};
+
+        function resolveRecordedBy(item) {
+            const raw = item.recordedBy || item.recorded_by || '';
+            const uid = item.recordedByUserId || item.recorded_by_user_id || '';
+            const profile = uid ? dashboardUsersCache[uid] : null;
+            if (profile && profile.username) return profile.username;
+            if (raw && !['unknown','unknow','ไม่ระบุ'].includes(String(raw).trim().toLowerCase())) return raw;
+            const authUser = auth.currentUser;
+            if (uid && authUser && uid === authUser.uid) return authUser.email || 'สมาชิก';
+            return 'ไม่ระบุ';
+        }
 
         bossRef.on('value', (snapshot) => {
             const rawData = snapshot.val() || {};
@@ -1464,6 +1476,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
                     recordedBy: item.recordedBy || item.recorded_by || 'ไม่ระบุ',
+                    resolvedRecordedBy: resolveRecordedBy(item),
                     recordedByUserId: item.recordedByUserId || item.recorded_by_user_id || ''
                 };
             });
@@ -1666,8 +1679,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
             const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
             const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000);
-            const authUser = auth.currentUser;
             let currentUser = localStorage.getItem('logged_user') || '';
+            const authUser = auth.currentUser;
             let recordedByUserId = authUser ? authUser.uid : (localStorage.getItem('logged_user_key') || '');
             if (authUser) {
                 try {
@@ -1693,7 +1706,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 notifiedNotice: scheduleAlreadyPassed,
                 notifiedSpawn: scheduleAlreadyPassed,
                 voiceNoticeSent: scheduleAlreadyPassed,
-                voiceSpawnSent: scheduleAlreadyPassed
+                voiceSpawnSent: scheduleAlreadyPassed,
+                confirmationRequestId: (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`),
+                confirmationRequestedAt: new Date().toISOString(),
+                confirmationStatus: 'pending'
             });
 
             document.getElementById('bossForm').reset();
@@ -1735,7 +1751,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
-                    <td><span class="badge bg-secondary">${escapeHtml(data.recordedBy || 'ไม่ระบุ')}</span></td>
+                    <td><span class="badge bg-secondary">${escapeHtml(resolveRecordedBy(data) || data.recordedBy || 'ไม่ระบุ')}</span></td>
                     <td>
                         <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
                     </td>
@@ -2161,6 +2177,10 @@ BOSS_PRONUNCIATION = {
 boss_schedule = {}
 live_message_config = {}
 
+# One-shot Voice confirmation for newly recorded boss times.
+_confirmation_seen_ids = set()
+_confirmation_claim_lock = asyncio.Lock()
+
 # ==========================================
 # 📝 3. ระบบ Audit Log
 # ==========================================
@@ -2230,6 +2250,9 @@ def _schedule_record_to_firebase(boss_name: str, data: dict) -> dict:
         "noticeMinutes": notice,
         "recordedBy": data.get("recordedBy") or data.get("recorded_by") or "-",
         "recordedByUserId": str(data.get("recordedByUserId") or data.get("recorded_by_user_id") or "").strip(),
+        "confirmationRequestId": str(data.get("confirmationRequestId") or data.get("confirmation_request_id") or "").strip(),
+        "confirmationRequestedAt": data.get("confirmationRequestedAt") or data.get("confirmation_requested_at") or None,
+        "confirmationStatus": str(data.get("confirmationStatus") or data.get("confirmation_status") or "").strip(),
         "notifiedNotice": parse_bool(data.get("notifiedNotice", data.get("notified_advance", False))),
         "notifiedSpawn": parse_bool(data.get("notifiedSpawn", data.get("notified_spawn", False))),
         "voiceNoticeSent": parse_bool(data.get("voiceNoticeSent", data.get("voice_notice_sent", False))),
@@ -2265,6 +2288,9 @@ def _firebase_to_internal(boss_name: str, data: dict) -> dict | None:
         "noticeMinutes": record.get("noticeMinutes", 5),
         "recorded_by": record.get("recordedBy", "-"),
         "recordedByUserId": record.get("recordedByUserId", ""),
+        "confirmationRequestId": record.get("confirmationRequestId", ""),
+        "confirmationRequestedAt": record.get("confirmationRequestedAt"),
+        "confirmationStatus": record.get("confirmationStatus", ""),
     }
 
 async def save_boss_data():
@@ -2311,6 +2337,82 @@ async def load_boss_data():
                 boss_schedule[canonical] = internal
     print(f"✅ โหลด boss_schedule จาก Firebase สำเร็จ {len(boss_schedule)} รายการ")
 
+
+async def _claim_voice_confirmation(boss_name: str, request_id: str) -> bool:
+    """Atomically claim a pending confirmation so Firebase listener updates do not speak twice."""
+    if not boss_name or not request_id:
+        return False
+    ref = db.reference(f"boss_schedule/{boss_name}")
+    try:
+        def txn(current):
+            if not isinstance(current, dict):
+                return current
+            current_id = str(current.get("confirmationRequestId") or "")
+            status = str(current.get("confirmationStatus") or "")
+            if current_id != request_id or status not in ("", "pending"):
+                return current
+            current = dict(current)
+            current["confirmationStatus"] = "processing"
+            return current
+        result = await asyncio.to_thread(ref.transaction, txn)
+        return isinstance(result, dict) and str(result.get("confirmationRequestId") or "") == request_id and str(result.get("confirmationStatus") or "") == "processing"
+    except Exception as exc:
+        print(f"⚠️ Voice confirmation claim failed: {boss_name}: {exc}")
+        return False
+
+async def _voice_confirm_boss_recording(boss_name: str, data: dict):
+    """Speak one-shot confirmation for a newly recorded boss time in occupied Voice rooms only."""
+    request_id = str(data.get("confirmationRequestId") or "").strip()
+    requested_at = data.get("confirmationRequestedAt")
+    status = str(data.get("confirmationStatus") or "").strip()
+    if not request_id or status not in ("", "pending"):
+        return
+    try:
+        requested_ms = float(requested_at) if isinstance(requested_at, (int, float)) else datetime.fromisoformat(str(requested_at).replace("Z", "+00:00")).timestamp() * 1000
+        if (time.time() * 1000 - requested_ms) > 5 * 60 * 1000:
+            return
+    except Exception:
+        pass
+
+    if not await _claim_voice_confirmation(boss_name, request_id):
+        return
+
+    spoken_name = get_boss_pronunciation(boss_name)
+    recorded_by = str(data.get("recordedBy") or data.get("recorded_by") or "").strip()
+    if not recorded_by or recorded_by.lower() in {"unknown", "unknow", "ไม่ระบุ"}:
+        recorded_by = "สมาชิก"
+
+    success = False
+    try:
+        await refresh_tts_settings_from_firebase()
+        # User explicitly requested a confirmation after saving; use the Thai text
+        # and the currently enabled languages for the same TTS policy.
+        text_th = f"บันทึกเวลาบอส {spoken_name} สำเร็จแล้วค่ะ"
+        text_en = f"Boss {boss_name} time saved successfully."
+        text_ko = f"보스 {boss_name} 시간이 성공적으로 저장되었습니다."
+        for guild in list(bot.guilds):
+            rooms = get_occupied_voice_channels(guild)
+            if not rooms:
+                continue
+            for room in rooms:
+                try:
+                    ok = await asyncio.wait_for(
+                        speak_in_guild(guild, text_th=text_th, text_en=text_en, text_ko=text_ko, target_channel=room),
+                        timeout=180
+                    )
+                    success = success or bool(ok)
+                except Exception as exc:
+                    print(f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{room.name}): {exc}")
+        print(f"✅ Boss record confirmation | boss={boss_name} | user={recorded_by} | success={success}")
+    finally:
+        try:
+            await asyncio.to_thread(
+                db.reference(f"boss_schedule/{boss_name}").update,
+                {"confirmationStatus": "sent" if success else "failed"}
+            )
+        except Exception as exc:
+            print(f"⚠️ Could not persist confirmation status for {boss_name}: {exc}")
+
 def start_firebase_listener(loop):
     """Safe listener: always read the boss_schedule root, never trust event.data as the full tree."""
     def listener(event):
@@ -2330,8 +2432,19 @@ def start_firebase_listener(loop):
                 if internal:
                     new_schedule[canonical] = internal
             with schedule_lock:
+                previous = dict(boss_schedule)
                 boss_schedule.clear()
                 boss_schedule.update(new_schedule)
+
+            # Trigger one-shot confirmation only for newly requested recordings.
+            for boss_name, item in new_schedule.items():
+                req_id = str(item.get("confirmationRequestId") or "").strip()
+                if not req_id or req_id in _confirmation_seen_ids:
+                    continue
+                prev_id = str((previous.get(boss_name) or {}).get("confirmationRequestId") or "").strip()
+                _confirmation_seen_ids.add(req_id)
+                if req_id != prev_id and str(item.get("confirmationStatus") or "pending") in ("", "pending"):
+                    asyncio.run_coroutine_threadsafe(_voice_confirm_boss_recording(boss_name, item), loop)
             print(f"🔄 Firebase boss_schedule sync: {len(new_schedule)} รายการ")
         except Exception as e:
             print(f"❌ Firebase Listener boss_schedule ผิดพลาด: {e}")
@@ -3292,6 +3405,8 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
         is_already_past = next_spawn <= now
         user_name = interaction.user.display_name
 
+        quick_confirmation_id = uuid.uuid4().hex
+        quick_confirmation_at = datetime.now(TZ_THAI).isoformat()
         with schedule_lock:
             boss_schedule[canonical_name] = {
                 "spawn_time": next_spawn,
@@ -3301,9 +3416,15 @@ class KillBossModal(discord.ui.Modal, title="⚔️ บันทึกเวล�
                 "notified_spawn": is_already_past,
                 "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
                 "recorded_by": user_name,
-                "recordedByUserId": str(interaction.user.id)
+                "recordedByUserId": str(interaction.user.id),
+                "confirmationRequestId": quick_confirmation_id,
+                "confirmationRequestedAt": quick_confirmation_at,
+                "confirmationStatus": "pending"
             }
         await save_boss_data()
+        with schedule_lock:
+            quick_confirmation_data = dict(boss_schedule.get(canonical_name, {}))
+        asyncio.create_task(_voice_confirm_boss_recording(canonical_name, quick_confirmation_data))
         cd_text = get_boss_cd_text(canonical_name)
 
         embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
@@ -3799,7 +3920,10 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
             "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
             "recordedBy": user_name,
             "recordedByUserId": str(interaction.user.id),
-            "spawnTimeMs": int(next_spawn.timestamp() * 1000)
+            "spawnTimeMs": int(next_spawn.timestamp() * 1000),
+            "confirmationRequestId": (uuid.uuid4().hex),
+            "confirmationRequestedAt": datetime.now(TZ_THAI).isoformat(),
+            "confirmationStatus": "pending"
         }
 
         with schedule_lock:
@@ -3813,7 +3937,10 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
                 "voice_spawn_sent": is_already_past,
                 "noticeMinutes": record["noticeMinutes"],
                 "recorded_by": user_name,
-                "recordedByUserId": str(interaction.user.id)
+                "recordedByUserId": str(interaction.user.id),
+                "confirmationRequestId": record["confirmationRequestId"],
+                "confirmationRequestedAt": record["confirmationRequestedAt"],
+                "confirmationStatus": "pending"
             }
 
         cd_text = get_boss_cd_text(canonical_name)
