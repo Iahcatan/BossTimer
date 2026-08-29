@@ -1999,6 +1999,7 @@ def record_boss_api():
 
         boss_name = str(payload.get('bossName') or '').strip()
         time_input = str(payload.get('killTime') or '').strip()
+        date_input = str(payload.get('killDate') or '').strip()
         try:
             notice_min = max(1, int(payload.get('noticeMinutes') or 5))
         except (TypeError, ValueError):
@@ -2017,9 +2018,21 @@ def record_boss_api():
         respawn = get_boss_respawn_time(canonical_name)
         now = datetime.now(TZ_THAI)
         try:
-            boss_died_at = parse_time_input(time_input, now)
+            if date_input:
+                date_match = re.fullmatch(r'\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*', date_input)
+                if not date_match:
+                    raise ValueError('Invalid date format')
+                day, month, year = map(int, date_match.groups())
+                selected_date = datetime(year, month, day, tzinfo=TZ_THAI)
+                if time_input:
+                    parsed_time = parse_time_input(time_input, now)
+                    boss_died_at = datetime(year, month, day, parsed_time.hour, parsed_time.minute, parsed_time.second, tzinfo=TZ_THAI)
+                else:
+                    boss_died_at = datetime(year, month, day, now.hour, now.minute, now.second, tzinfo=TZ_THAI)
+            else:
+                boss_died_at = parse_time_input(time_input, now)
         except ValueError:
-            return _api_json({'success': False, 'error': 'Invalid time format'}), 400
+            return _api_json({'success': False, 'error': 'Invalid date/time format. Use DD/MM/YYYY and HH:MM'}), 400
 
         next_spawn = boss_died_at + respawn + timedelta(minutes=sp_time_min)
         spawn_ms = int(next_spawn.timestamp() * 1000)
@@ -2034,6 +2047,7 @@ def record_boss_api():
 
         record = {
             'killTimeMs': kill_ms,
+            'killDate': boss_died_at.strftime('%Y-%m-%d'),
             'spawnTimeMs': spawn_ms,
             'spawn_time': next_spawn.isoformat(),
             'noticeMinutes': notice_min,
@@ -2054,6 +2068,7 @@ def record_boss_api():
 
         ref = db.reference(f'boss_schedule/{canonical_name}')
         ref.set(record)
+        print(f"✅ Dashboard Firebase save complete | boss={canonical_name} | request={request_id} | user={username}")
         with schedule_lock:
             boss_schedule[canonical_name] = {
                 'spawn_time': next_spawn,
@@ -2104,6 +2119,17 @@ def record_boss_api():
         print(f"❌ /api/record-boss failed: {exc}")
         traceback.print_exc()
         return _api_json({'success': False, 'error': str(exc)}), 500
+
+@app.route('/api/record-boss/health', methods=['GET'])
+def record_boss_health():
+    return jsonify({
+        'success': True,
+        'bot_ready': bool(is_bot_ready),
+        'event_loop_ready': bool(bot_event_loop is not None),
+        'guild_count': len(bot.guilds),
+        'voice_config_servers': len(voice_config),
+        'voice_targets': sum(len(cfg.get('channels', {})) for cfg in voice_config.values() if isinstance(cfg, dict)),
+    })
 
 @app.route('/api/toggle_tts', methods=['POST'])
 def toggle_tts_api():
@@ -3273,6 +3299,7 @@ async def on_ready():
     init_db()
     await load_bot_settings()
     print(f"🔐 Startup TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
+    print(f"🔔 Startup notification settings: BF={bf_notify_enabled} LIB={lib_notify_enabled} PPL={ppl_notify_enabled}")
     await load_custom_bosses()
     await load_boss_data()
     await load_live_config()
@@ -3307,18 +3334,27 @@ async def check_bf_notifications():
 
     try:
         now = datetime.now(TZ_THAI)
-        # BF starts on even hours; announce 3 minutes before at HH:57.
-        # Use a 15-second loop and a small minute window so scheduler jitter cannot miss it.
-        if now.hour % 2 != 1 or now.minute != 57:
+
+        # BF starts on even hours. Trigger during the entire 3-minute window
+        # before the scheduled start (and allow a few seconds of scheduler drift),
+        # so a loop/restart at :58 or :59 cannot miss the announcement.
+        candidate = now.replace(minute=0, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(hours=1)
+        while candidate.hour % 2 != 0:
+            candidate += timedelta(hours=1)
+
+        seconds_until_bf = (candidate - now).total_seconds()
+        if not (-15 <= seconds_until_bf <= 180):
             return
 
-        trigger_key = now.strftime('%Y-%m-%d-%H')
+        trigger_key = candidate.strftime('%Y-%m-%d-%H')
         if last_bf_notified_hour == trigger_key:
             return
         last_bf_notified_hour = trigger_key
 
-        next_bf_hour = (now.hour + 1) % 24
-        next_bf_time = f"{next_bf_hour:02d}:00"
+        next_bf_time = candidate.strftime('%H:%M')
+        print(f"⏰ BF WARNING WINDOW | guilds={len(bot.guilds)} | now={now.strftime('%Y-%m-%d %H:%M:%S')} | next={candidate.isoformat()} | seconds_until={seconds_until_bf:.1f}")
 
         for guild in bot.guilds:
             print(f"⏰ BF WARNING TRIGGER | guild={guild.name} | now={now.strftime('%H:%M:%S')} | next={next_bf_time}")
@@ -3360,17 +3396,29 @@ async def check_bf_notifications():
             for room in occupied:
                 try:
                     print(f"📢 BF VOICE START | guild={guild.name} | channel={room.name} | humans={len([m for m in room.members if not m.bot])}")
-                    ok = await asyncio.wait_for(
-                        speak_in_guild(
-                            guild,
-                            text_th=spoken_text_th,
-                            text_en=spoken_text_en,
-                            text_ko=spoken_text_ko,
-                            target_channel=room
-                        ),
-                        timeout=180
-                    )
+                    ok = False
+                    last_exc = None
+                    for attempt in range(1, 3):
+                        try:
+                            ok = await asyncio.wait_for(
+                                speak_in_guild(
+                                    guild,
+                                    text_th=spoken_text_th,
+                                    text_en=spoken_text_en,
+                                    text_ko=spoken_text_ko,
+                                    target_channel=room
+                                ),
+                                timeout=120
+                            )
+                            if ok:
+                                break
+                        except Exception as exc:
+                            last_exc = exc
+                            print(f"⚠️ BF VOICE RETRY {attempt}/2 | guild={guild.name} | channel={room.name} | {exc}")
+                            await asyncio.sleep(1.0)
                     results.append(bool(ok))
+                    if last_exc and not ok:
+                        print(f"❌ BF VOICE ERROR FINAL | guild={guild.name}/{room.name} | {last_exc}")
                     print(f"📣 BF VOICE RESULT | guild={guild.name} | channel={room.name} | success={ok}")
                 except Exception as exc:
                     results.append(False)
