@@ -650,6 +650,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
         const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
+        // API is hosted on Render while this Dashboard can be served by GitHub Pages.
+        // Override with window.SKYNET_API_ORIGIN only when deploying the backend elsewhere.
+        window.SKYNET_API_ORIGIN = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
         const sessionsRef = db.ref('dashboard_sessions');
 
         // 🔐 Admin account
@@ -1689,7 +1692,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
             try {
                 const idToken = await auth.currentUser.getIdToken(true);
-                const response = await fetch('/api/record-boss', {
+                // Dashboard may be hosted on GitHub Pages, while the API runs on Render.
+                // Use the Render API origin explicitly so recording works from either host.
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/record-boss`, {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -1709,6 +1715,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 }
                 document.getElementById('bossForm').reset();
                 document.getElementById('noticeMinutes').value = 5;
+                // Update the UI immediately from the authoritative backend response.
+                if (result.bossName) {
+                    const fallbackKill = Number(result.killTimeMs) || Date.now();
+                    const fallbackSpawn = Number(result.spawnTimeMs) || fallbackKill;
+                    activeBosses[result.bossName] = {
+                        spawnTimeMs: fallbackSpawn,
+                        killTimeMs: fallbackKill,
+                        noticeMinutes: noticeMin,
+                        notifiedNotice: !!result.alreadyPassed,
+                        notifiedSpawn: !!result.alreadyPassed,
+                        recordedBy: result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ',
+                        recordedByUserId: result.recordedByUserId || auth.currentUser?.uid || '',
+                        resolvedRecordedBy: result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ'
+                    };
+                    renderTable();
+                }
                 console.log(`✅ Boss recorded: ${result.bossName} | by ${result.recordedBy} | uid=${result.recordedByUserId} | confirmation=${result.confirmationRequestId}`);
             } catch (err) {
                 console.error('Dashboard boss record failed:', err);
@@ -1918,28 +1940,44 @@ def firebase_config_js():
     return response
 
 
-@app.route('/api/record-boss', methods=['POST'])
+@app.route('/api/record-boss', methods=['POST', 'OPTIONS'])
 def record_boss_api():
+    if request.method == 'OPTIONS':
+        response = jsonify({'success': True})
+        response.headers['Access-Control-Allow-Origin'] = 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
     """Authenticated Dashboard boss recording endpoint.
     Saves one canonical boss_schedule record using Firebase Admin SDK and triggers
     the one-shot Voice confirmation from the same server process.
     """
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        response.headers['Access-Control-Allow-Origin'] = 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Type'
+        return response
+
     try:
         payload = request.get_json(silent=True) or {}
         auth_header = request.headers.get('Authorization', '').strip()
         if not auth_header.lower().startswith('bearer '):
-            return jsonify({'success': False, 'error': 'Missing Firebase ID token'}), 401
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
         id_token = auth_header.split(' ', 1)[1].strip()
         decoded = firebase_auth.verify_id_token(id_token)
         uid = str(decoded.get('uid') or '').strip()
         if not uid:
-            return jsonify({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
 
         profile = db.reference(f'users/{uid}').get() or {}
         if not isinstance(profile, dict):
-            return jsonify({'success': False, 'error': 'User profile not found'}), 403
+            return _api_json({'success': False, 'error': 'User profile not found'}), 403
         if profile.get('status') != 'approved':
-            return jsonify({'success': False, 'error': 'Account is not approved'}), 403
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
 
         boss_name = str(payload.get('bossName') or '').strip()
         time_input = str(payload.get('killTime') or '').strip()
@@ -1953,7 +1991,7 @@ def record_boss_api():
             sp_time_min = 0
 
         if not boss_name:
-            return jsonify({'success': False, 'error': 'Boss name is required'}), 400
+            return _api_json({'success': False, 'error': 'Boss name is required'}), 400
 
         canonical_name = get_boss_canonical_name(boss_name)
         # Dashboard uses BOSS_DATABASE for custom definitions, but the server must
@@ -1963,7 +2001,7 @@ def record_boss_api():
         try:
             boss_died_at = parse_time_input(time_input, now)
         except ValueError:
-            return jsonify({'success': False, 'error': 'Invalid time format'}), 400
+            return _api_json({'success': False, 'error': 'Invalid time format'}), 400
 
         next_spawn = boss_died_at + respawn + timedelta(minutes=sp_time_min)
         spawn_ms = int(next_spawn.timestamp() * 1000)
@@ -2021,7 +2059,7 @@ def record_boss_api():
         except Exception as exc:
             print(f"⚠️ Dashboard confirmation queue failed: {exc}")
 
-        return jsonify({
+        return _api_json({
             'success': True,
             'bossName': canonical_name,
             'recordedBy': username,
@@ -2035,7 +2073,7 @@ def record_boss_api():
     except Exception as exc:
         print(f"❌ /api/record-boss failed: {exc}")
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(exc)}), 500
+        return _api_json({'success': False, 'error': str(exc)}), 500
 
 @app.route('/api/toggle_tts', methods=['POST'])
 def toggle_tts_api():
