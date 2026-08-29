@@ -2597,23 +2597,24 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
         text_en = f"Boss {boss_name} time saved successfully."
         text_ko = f"보스 {boss_name} 시간이 성공적으로 저장되었습니다."
         for guild in list(bot.guilds):
-            configured = get_configured_voice_channel(guild)
-            if configured is None:
-                print(f"⚠️ Boss confirmation skipped: no /setvoice target | guild={guild.name}")
+            configured_channels = get_configured_voice_channels(guild)
+            if not configured_channels:
+                print(f"⚠️ Boss confirmation skipped: no /setvoice targets | guild={guild.name}")
                 continue
-            humans = [m for m in configured.members if not m.bot]
-            if not humans:
-                print(f"⏭️ Boss confirmation skipped: configured Voice is empty | guild={guild.name} | channel={configured.name}")
-                continue
-            print(f"📢 Boss confirmation voice target | guild={guild.name} | channel={configured.name} | humans={len(humans)}")
-            try:
-                ok = await asyncio.wait_for(
-                    speak_in_guild(guild, text_th=text_th, text_en=text_en, text_ko=text_ko, target_channel=configured),
-                    timeout=180
-                )
-                success = success or bool(ok)
-            except Exception as exc:
-                print(f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{configured.name}): {exc}")
+            for configured in configured_channels:
+                humans = [m for m in configured.members if not m.bot]
+                if not humans:
+                    print(f"⏭️ Boss confirmation skipped: configured Voice is empty | guild={guild.name} | channel={configured.name}")
+                    continue
+                print(f"📢 Boss confirmation voice target | guild={guild.name} | channel={configured.name} | humans={len(humans)}")
+                try:
+                    ok = await asyncio.wait_for(
+                        speak_in_guild(guild, text_th=text_th, text_en=text_en, text_ko=text_ko, target_channel=configured),
+                        timeout=180
+                    )
+                    success = success or bool(ok)
+                except Exception as exc:
+                    print(f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{configured.name}): {exc}")
         print(f"✅ Boss record confirmation | boss={boss_name} | user={recorded_by} | success={success}")
     finally:
         try:
@@ -2827,7 +2828,7 @@ async def save_vip_config():
     await asyncio.to_thread(save_json_local, VIP_CONFIG_FILE, data)
 
 async def load_voice_config():
-    """โหลดห้อง Voice ที่ตั้งไว้จาก Firebase เมื่อบอทเริ่มทำงาน"""
+    """Load and normalize persisted Voice targets. Supports legacy single-channel records and new multi-channel records."""
     global voice_config
     data = None
     try:
@@ -2836,42 +2837,114 @@ async def load_voice_config():
         print(f"⚠️ โหลด voice_config จาก Firebase ไม่สำเร็จ: {e}")
     if not data:
         data = get_db_value("voice_config", None)
+
+    normalized = {}
     if isinstance(data, dict):
-        normalized = {}
         for gid, cfg in data.items():
             if not isinstance(cfg, dict):
                 continue
-            channel_id = cfg.get("voice_channel_id") or cfg.get("voiceChannelId")
+            guild_id = int(gid) if str(gid).isdigit() else gid
+            channels = {}
+
+            # New schema: channels = {channel_id: {...}}
+            raw_channels = cfg.get("channels")
+            if isinstance(raw_channels, dict):
+                for cid, cdata in raw_channels.items():
+                    if not isinstance(cdata, dict):
+                        continue
+                    try:
+                        channel_id = int(cdata.get("voice_channel_id") or cdata.get("voiceChannelId") or cid)
+                    except (TypeError, ValueError):
+                        continue
+                    channels[str(channel_id)] = {
+                        "voice_channel_id": channel_id,
+                        "guild_id": guild_id,
+                        "channel_name": cdata.get("channel_name", ""),
+                        "enabled": parse_bool(cdata.get("enabled", True), True),
+                        "updated_by": cdata.get("updated_by", cfg.get("updated_by", "")),
+                        "updated_at": cdata.get("updated_at", cfg.get("updated_at", ""))
+                    }
+
+            # Legacy schema: one voice_channel_id at guild root. Keep it.
+            if not channels:
+                legacy_id = cfg.get("voice_channel_id") or cfg.get("voiceChannelId")
+                if legacy_id:
+                    try:
+                        channel_id = int(legacy_id)
+                        channels[str(channel_id)] = {
+                            "voice_channel_id": channel_id,
+                            "guild_id": guild_id,
+                            "channel_name": cfg.get("channel_name", ""),
+                            "enabled": parse_bool(cfg.get("enabled", True), True),
+                            "updated_by": cfg.get("updated_by", ""),
+                            "updated_at": cfg.get("updated_at", "")
+                        }
+                    except (TypeError, ValueError):
+                        pass
+
+            if channels:
+                normalized[str(gid)] = {
+                    "guild_id": guild_id,
+                    "channels": channels,
+                    "enabled": parse_bool(cfg.get("enabled", True), True),
+                    "mode": cfg.get("mode", "on-demand"),
+                    "updated_by": cfg.get("updated_by", ""),
+                    "updated_at": cfg.get("updated_at", "")
+                }
+
+    voice_config = normalized
+    total_targets = sum(len(cfg.get("channels", {})) for cfg in voice_config.values())
+    print(f"🔊 โหลด voice_config สำเร็จ {total_targets} ห้อง / {len(voice_config)} เซิร์ฟเวอร์")
+
+
+def get_configured_voice_channels(guild: discord.Guild):
+    """Return all configured /setvoice channels for a guild (new + legacy schema)."""
+    if not guild:
+        return []
+    cfg = voice_config.get(str(guild.id))
+    if not cfg or not parse_bool(cfg.get("enabled", True), True):
+        return []
+
+    channels = []
+    raw_channels = cfg.get("channels")
+    if isinstance(raw_channels, dict):
+        for cdata in raw_channels.values():
+            if not isinstance(cdata, dict) or not parse_bool(cdata.get("enabled", True), True):
+                continue
+            channel_id = cdata.get("voice_channel_id")
             try:
                 channel_id = int(channel_id) if channel_id is not None else None
             except (TypeError, ValueError):
                 channel_id = None
-            if channel_id:
-                normalized[str(gid)] = {
-                    "voice_channel_id": channel_id,
-                    "guild_id": int(gid) if str(gid).isdigit() else gid,
-                    "channel_name": cfg.get("channel_name", ""),
-                    "enabled": parse_bool(cfg.get("enabled", True), True),
-                    "updated_by": cfg.get("updated_by", ""),
-                    "updated_at": cfg.get("updated_at", "")
-                }
-        voice_config = normalized
-    print(f"🔊 โหลด voice_config สำเร็จ {len(voice_config)} เซิร์ฟเวอร์")
+            if not channel_id:
+                continue
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                channels.append(channel)
+    else:
+        channel_id = cfg.get("voice_channel_id") or cfg.get("voiceChannelId")
+        try:
+            channel_id = int(channel_id) if channel_id is not None else None
+        except (TypeError, ValueError):
+            channel_id = None
+        if channel_id:
+            channel = guild.get_channel(channel_id)
+            if isinstance(channel, discord.VoiceChannel):
+                channels.append(channel)
+    # Stable order and de-duplicate by channel id.
+    seen = set()
+    result = []
+    for channel in channels:
+        if channel.id not in seen:
+            seen.add(channel.id)
+            result.append(channel)
+    return result
 
 
 def get_configured_voice_channel(guild: discord.Guild):
-    if not guild:
-        return None
-    cfg = voice_config.get(str(guild.id))
-    if not cfg or not parse_bool(cfg.get("enabled", True), True):
-        return None
-    channel_id = cfg.get("voice_channel_id")
-    if not channel_id:
-        return None
-    channel = guild.get_channel(int(channel_id))
-    if isinstance(channel, discord.VoiceChannel):
-        return channel
-    return None
+    """Backward-compatible first configured channel."""
+    channels = get_configured_voice_channels(guild)
+    return channels[0] if channels else None
 
 def get_occupied_voice_channels(guild: discord.Guild):
     """Return VoiceChannels that currently contain at least one human member."""
@@ -2975,66 +3048,130 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
 
 
 async def _play_tts_in_channel(guild, channel, files):
-    """Join one active voice channel, play all TTS files, then leave."""
+    """Join one active voice channel, play all TTS files, then leave.
+
+    Robustness rules:
+    - Verify the configured room is occupied and the bot has Connect/Speak permissions.
+    - Reuse an existing connection only when it is healthy; otherwise reconnect.
+    - Retry Voice connection once after a short backoff.
+    - Wait for the audio player callback, so a successful function return means audio was actually played.
+    """
     if not isinstance(channel, discord.VoiceChannel):
         return False
+
     humans = [m for m in channel.members if not m.bot]
     print(f"🔊 Voice target: {guild.name} -> {channel.name} | humans={len(humans)}")
+    if not humans:
+        print(f"⏭️ Voice skip: {guild.name} -> {channel.name} is empty")
+        return False
 
-    vc = guild.voice_client
-    try:
-        if vc and vc.is_connected():
-            if vc.channel and vc.channel.id != channel.id:
-                await vc.move_to(channel)
-        else:
-            vc = await channel.connect(reconnect=True, timeout=20)
-
-        if not vc or not vc.is_connected():
+    me = guild.me
+    if me is not None:
+        perms = channel.permissions_for(me)
+        print(f"🔐 Voice permissions {guild.name} -> {channel.name}: connect={perms.connect} speak={perms.speak}")
+        if not perms.connect or not perms.speak:
+            print(f"❌ Voice permission denied: {guild.name}/{channel.name}")
             return False
 
-        # Give Discord/FFmpeg/Opus a short warm-up after connecting; without it
-        # the first syllables can occasionally be clipped on a fresh connection.
+    vc = guild.voice_client
+    connected_here = False
+    try:
+        # Remove a stale connection before starting a fresh on-demand session.
+        if vc and vc.is_connected() and vc.channel and vc.channel.id != channel.id:
+            try:
+                print(f"🔄 Voice moving: {guild.name} -> {vc.channel.name} => {channel.name}")
+                await vc.move_to(channel)
+                connected_here = True
+            except Exception as exc:
+                print(f"⚠️ Voice move failed, reconnecting: {guild.name}/{channel.name}: {exc}")
+                try:
+                    await vc.disconnect(force=True)
+                except Exception:
+                    pass
+                vc = None
+
+        if not vc or not vc.is_connected():
+            last_exc = None
+            for attempt in range(1, 3):
+                try:
+                    print(f"🔌 Voice connect attempt {attempt}/2: {guild.name} -> {channel.name}")
+                    vc = await channel.connect(reconnect=True, timeout=20, self_deaf=False, self_mute=False)
+                    if vc and vc.is_connected():
+                        connected_here = True
+                        print(f"✅ Voice connect success: {guild.name} -> {channel.name}")
+                        break
+                except Exception as exc:
+                    last_exc = exc
+                    print(f"⚠️ Voice connect attempt {attempt}/2 failed: {guild.name}/{channel.name}: {exc}")
+                    await asyncio.sleep(1.2 * attempt)
+            if not vc or not vc.is_connected():
+                print(f"❌ Voice connect failed: {guild.name}/{channel.name}: {last_exc}")
+                return False
+
+        # Give the Discord voice websocket and UDP path time to become ready.
         await asyncio.sleep(0.8)
+        print(f"🎙️ Voice ready for playback: {guild.name} -> {channel.name}")
 
         loop = asyncio.get_running_loop()
-        ok = False
-        for lang, filename in files:
-            if not os.path.exists(filename):
+        played_any = False
+        for index, (lang, filename) in enumerate(files, start=1):
+            if not os.path.exists(filename) or os.path.getsize(filename) <= 256:
+                print(f"⚠️ Skip empty/missing TTS file: {lang} -> {filename}")
                 continue
             if not vc.is_connected():
+                print(f"❌ Voice disconnected before playback: {guild.name}/{channel.name}")
                 break
+
             if vc.is_playing():
                 vc.stop()
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.25)
 
             done = asyncio.Event()
+            playback_error = {"error": None}
 
-            def after(error, event=done, lang_name=lang):
+            def after(error, event=done, err_holder=playback_error, lang_name=lang):
+                err_holder["error"] = error
                 if error:
                     print(f"❌ เล่น TTS {lang_name} ผิดพลาดใน {guild.name}: {error}")
                 loop.call_soon_threadsafe(event.set)
 
-            source = discord.FFmpegPCMAudio(
-                filename,
-                executable=get_ffmpeg_path(),
-                before_options="-loglevel error",
-                options="-vn"
-            )
             try:
+                source = discord.FFmpegPCMAudio(
+                    filename,
+                    executable=get_ffmpeg_path(),
+                    before_options="-nostdin -loglevel error",
+                    options="-vn"
+                )
+                print(f"▶️ กำลังเล่น TTS: {lang} | {guild.name} -> {channel.name}")
                 vc.play(source, after=after)
-                await asyncio.wait_for(done.wait(), timeout=60)
-                ok = True
-            except Exception as e:
-                print(f"❌ เล่นเสียง TTS ไม่สำเร็จใน {guild.name}/{channel.name}: {e}")
+            except Exception as exc:
+                print(f"❌ เริ่มเล่นเสียง TTS ไม่สำเร็จ: {guild.name}/{channel.name}/{lang}: {exc}")
+                continue
 
-            if lang != files[-1][0]:
+            try:
+                await asyncio.wait_for(done.wait(), timeout=90)
+            except asyncio.TimeoutError:
+                print(f"⏱️ TTS playback timeout: {guild.name}/{channel.name}/{lang}")
+                try:
+                    if vc.is_playing():
+                        vc.stop()
+                except Exception:
+                    pass
+                continue
+
+            if playback_error["error"] is None:
+                played_any = True
+                print(f"✅ TTS playback complete: {lang} | {guild.name} -> {channel.name}")
+            if index < len(files):
                 await asyncio.sleep(0.35)
-        return ok
+
+        return played_any
     except Exception as e:
         print(f"❌ Voice broadcast failed {guild.name}/{channel.name}: {e}")
+        traceback.print_exc()
         return False
     finally:
-        # On-demand mode: do not leave the bot stuck in a voice room.
+        # On-demand mode: disconnect after playback.
         try:
             vc_now = guild.voice_client
             if vc_now and vc_now.is_connected():
@@ -3162,53 +3299,88 @@ async def on_ready():
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
 # ==========================================
-@tasks.loop(seconds=30)
+@tasks.loop(seconds=15)
 async def check_bf_notifications():
     global last_bf_notified_hour, bf_notify_enabled
-    if not bf_notify_enabled: return
+    if not bf_notify_enabled:
+        return
 
     try:
         now = datetime.now(TZ_THAI)
-        if now.hour % 2 == 1 and now.minute == 57:
-            if last_bf_notified_hour != now.hour:
-                last_bf_notified_hour = now.hour
-                next_bf_hour = (now.hour + 1) % 24
-                next_bf_time = f"{next_bf_hour:02d}:00"
-                
-                for guild in bot.guilds:
-                    mentions = []
-                    for role_id in BF_ROLE_IDS:
-                        role = guild.get_role(role_id)
-                        if role: mentions.append(role.mention)
-                    mention_target = " ".join(mentions) if mentions else ""
+        # BF starts on even hours; announce 3 minutes before at HH:57.
+        # Use a 15-second loop and a small minute window so scheduler jitter cannot miss it.
+        if now.hour % 2 != 1 or now.minute != 57:
+            return
 
-                    channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
-                    if not channel:
-                        channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
-                    
-                    if channel:
-                        embed = discord.Embed(
-                            title="⚔️ แจ้งเตือนสงคราม Battlefield (BF)!",
-                            description=f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
-                            color=discord.Color.red()
-                        )
-                        try:
-                            send_content = mention_target if mention_target.strip() else None
-                            await channel.send(content=send_content, embed=embed)
-                        except Exception as e: print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {e}")
-                    
-                    spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
-                    spoken_text_en = "Battlefield will start in 3 minutes."
-                    spoken_text_ko = "배틀필드가 3분 후에 시작됩니다."
-                    configured = get_configured_voice_channel(guild)
-                    print(f"⏰ BF WARNING TRIGGER | guild={guild.name} | target={configured.name if configured else 'AUTO-GLOBAL'}")
-                    try:
-                        ok = await speak_in_guild(guild, text_th=spoken_text_th, text_en=spoken_text_en, text_ko=spoken_text_ko, target_channel=configured)
-                        print(f"📣 BF VOICE RESULT | guild={guild.name} | success={ok}")
-                    except Exception as e:
-                        print(f"❌ BF VOICE ERROR | guild={guild.name} | {e}")
+        trigger_key = now.strftime('%Y-%m-%d-%H')
+        if last_bf_notified_hour == trigger_key:
+            return
+        last_bf_notified_hour = trigger_key
+
+        next_bf_hour = (now.hour + 1) % 24
+        next_bf_time = f"{next_bf_hour:02d}:00"
+
+        for guild in bot.guilds:
+            print(f"⏰ BF WARNING TRIGGER | guild={guild.name} | now={now.strftime('%H:%M:%S')} | next={next_bf_time}")
+
+            mentions = []
+            for role_id in BF_ROLE_IDS:
+                role = guild.get_role(role_id)
+                if role:
+                    mentions.append(role.mention)
+            mention_target = " ".join(mentions) if mentions else ""
+
+            text_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+            if not text_channel:
+                text_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+            if text_channel:
+                embed = discord.Embed(
+                    title="⚔️ แจ้งเตือนสงคราม Battlefield (BF)!",
+                    description=f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
+                    color=discord.Color.red()
+                )
+                try:
+                    await text_channel.send(content=mention_target or None, embed=embed)
+                    print(f"✅ BF text notification sent | guild={guild.name}")
+                except Exception as exc:
+                    print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {guild.name}: {exc}")
+
+            spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
+            spoken_text_en = "Battlefield will start in 3 minutes."
+            spoken_text_ko = "배틀필드가 3분 후에 시작됩니다."
+
+            configured = get_configured_voice_channels(guild)
+            occupied = [ch for ch in configured if any(not m.bot for m in ch.members)]
+            print(f"⏰ BF VOICE TARGETS | guild={guild.name} | configured={len(configured)} | occupied={len(occupied)}")
+            if not occupied:
+                print(f"⏭️ BF VOICE SKIP | guild={guild.name} | no occupied /setvoice rooms")
+                continue
+
+            results = []
+            for room in occupied:
+                try:
+                    print(f"📢 BF VOICE START | guild={guild.name} | channel={room.name} | humans={len([m for m in room.members if not m.bot])}")
+                    ok = await asyncio.wait_for(
+                        speak_in_guild(
+                            guild,
+                            text_th=spoken_text_th,
+                            text_en=spoken_text_en,
+                            text_ko=spoken_text_ko,
+                            target_channel=room
+                        ),
+                        timeout=180
+                    )
+                    results.append(bool(ok))
+                    print(f"📣 BF VOICE RESULT | guild={guild.name} | channel={room.name} | success={ok}")
+                except Exception as exc:
+                    results.append(False)
+                    print(f"❌ BF VOICE ERROR | guild={guild.name}/{room.name} | {exc}")
+
+            print(f"✅ BF VOICE COMPLETE | guild={guild.name} | success={sum(1 for x in results if x)}/{len(results)}")
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
+        traceback.print_exc()
+
 
 @tasks.loop(seconds=30)
 async def check_library_boss_notifications():
@@ -3398,10 +3570,7 @@ async def check_boss_notifications():
                 all_ok = True
                 spoken_rooms = 0
                 for guild in target_guilds:
-                    rooms = get_occupied_voice_channels(guild)
-                    if not rooms:
-                        configured = get_configured_voice_channel(guild)
-                        rooms = [configured] if configured else []
+                    rooms = [r for r in get_configured_voice_channels(guild) if any(not m.bot for m in r.members)]
                     for room in rooms:
                         try:
                             result = await asyncio.wait_for(
@@ -3451,10 +3620,7 @@ async def check_boss_notifications():
                 all_ok = True
                 spoken_rooms = 0
                 for guild in target_guilds:
-                    rooms = get_occupied_voice_channels(guild)
-                    if not rooms:
-                        configured = get_configured_voice_channel(guild)
-                        rooms = [configured] if configured else []
+                    rooms = [r for r in get_configured_voice_channels(guild) if any(not m.bot for m in r.members)]
                     for room in rooms:
                         try:
                             result = await asyncio.wait_for(
@@ -3838,11 +4004,11 @@ async def toggle_vip_greet(interaction: discord.Interaction, status: app_command
         await interaction.followup.send(embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "ปิดระบบทักทายคนพิเศษ (/vip)", "ยกเลิกข้อมูลคนพิเศษเรียบร้อยแล้ว", discord.Color.red())
 
-@bot.tree.command(name="setvoice", description="ตั้งค่าห้อง Voice สำหรับ Boss TTS (เข้าเฉพาะตอนแจ้งเตือน)")
+@bot.tree.command(name="setvoice", description="เพิ่มห้อง Voice สำหรับ Boss TTS (เข้าเฉพาะตอนแจ้งเตือน)")
 @app_commands.describe(channel="ห้อง Voice ที่ต้องการให้บอทใช้ประกาศ (เว้นว่าง = ห้องที่คุณอยู่)")
 @has_allowed_role()
 async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
-    """Save the target voice channel only. Never keep a persistent voice connection."""
+    """Add one Voice channel to the guild's persistent /setvoice targets."""
     try:
         await interaction.response.defer(ephemeral=True)
     except Exception as e:
@@ -3861,55 +4027,72 @@ async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChan
             target = interaction.user.voice.channel
 
         guild_id = interaction.guild.id
+        cfg = voice_config.get(str(guild_id), {})
+        channels = dict(cfg.get("channels") or {}) if isinstance(cfg, dict) else {}
+
+        # Migrate a legacy single-channel record in memory before adding.
+        legacy_id = cfg.get("voice_channel_id") if isinstance(cfg, dict) else None
+        if legacy_id and not channels:
+            try:
+                legacy_id = int(legacy_id)
+                channels[str(legacy_id)] = {
+                    "voice_channel_id": legacy_id,
+                    "guild_id": guild_id,
+                    "channel_name": cfg.get("channel_name", ""),
+                    "enabled": True,
+                    "updated_by": cfg.get("updated_by", ""),
+                    "updated_at": cfg.get("updated_at", "")
+                }
+            except (TypeError, ValueError):
+                pass
+
+        now_iso = datetime.now(TZ_THAI).isoformat()
+        channels[str(target.id)] = {
+            "voice_channel_id": int(target.id),
+            "guild_id": guild_id,
+            "channel_name": target.name,
+            "enabled": True,
+            "updated_by": str(interaction.user.id),
+            "updated_at": now_iso
+        }
         voice_config[str(guild_id)] = {
             "guild_id": guild_id,
-            "voice_channel_id": int(target.id),
-            "channel_name": target.name,
+            "channels": channels,
             "enabled": True,
             "mode": "on-demand",
             "updated_by": str(interaction.user.id),
-            "updated_at": datetime.now(TZ_THAI).isoformat()
+            "updated_at": now_iso
         }
 
-        try:
-            await asyncio.wait_for(save_voice_config(), timeout=8)
-        except Exception as e:
-            print(f"❌ /setvoice Firebase save failed: {e}")
+        await asyncio.wait_for(save_voice_config(), timeout=10)
 
-        # If a stale persistent connection exists from the previous version, remove it now.
+        # Never keep a persistent Voice connection. Disconnect any stale one.
         vc = interaction.guild.voice_client
         if vc:
             try:
                 if vc.is_playing():
                     vc.stop()
                 await vc.disconnect(force=True)
-                print(f"🔌 /setvoice cleared old persistent Voice connection: {interaction.guild.name}")
             except Exception as e:
                 print(f"⚠️ /setvoice could not clear old Voice connection: {e}")
 
+        configured_names = []
+        for c in get_configured_voice_channels(interaction.guild):
+            configured_names.append(f"• **{c.name}** (`{c.id}`)")
+        targets_text = "\n".join(configured_names) if configured_names else "-"
+
         await interaction.followup.send(
-            f"🔊 บันทึกห้อง Voice **{target.name}** แล้ว\n"
-            f"ID: `{target.id}`\n"
-            f"🟢 โหมด: **ON-DEMAND** — บอทจะเข้าห้องเฉพาะตอนแจ้งเตือน/ประกาศ และออกหลังพูดจบ\n"
-            f"ℹ️ ตอนนี้บอทจะยังไม่ค้างอยู่ในห้อง Voice",
+            f"🔊 เพิ่มห้อง Voice **{target.name}** สำเร็จ\n"
+            f"\n📋 ห้องที่ตั้ง /setvoice ไว้ทั้งหมด ({len(configured_names)} ห้อง):\n{targets_text}\n"
+            f"\n🟢 โหมด: **ON-DEMAND** — บอทจะเข้าเฉพาะห้องที่มีสมาชิกอยู่ตอนแจ้งเตือน แล้วออกหลังพูดจบ",
             ephemeral=True
         )
-        print(f"🔊 /setvoice saved ON-DEMAND: {interaction.guild.name} -> {target.name} ({target.id})")
-        try:
-            await send_audit_log(
-                interaction.guild,
-                interaction.user,
-                "ตั้งค่าห้อง Voice (/setvoice)",
-                f"🔊 ห้อง: {target.mention}\nID: `{target.id}`\nMode: ON-DEMAND",
-                discord.Color.green()
-            )
-        except Exception as e:
-            print(f"⚠️ /setvoice audit log failed: {e}")
+        print(f"🔊 /setvoice saved ON-DEMAND: {interaction.guild.name} -> {target.name} ({target.id}) | total={len(configured_names)}")
     except Exception as e:
-        print(f"❌ /setvoice unexpected error: {e}")
+        print(f"❌ /setvoice error: {e}")
         traceback.print_exc()
         try:
-            await interaction.followup.send(f"❌ /setvoice เกิดข้อผิดพลาด: `{e}`", ephemeral=True)
+            await interaction.followup.send(f"❌ ตั้งค่าห้อง Voice ไม่สำเร็จ: `{e}`", ephemeral=True)
         except Exception:
             pass
 
