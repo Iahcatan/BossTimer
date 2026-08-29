@@ -2226,6 +2226,8 @@ tts_ko_enabled = True
 
 vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
 last_bf_notified_hour = -1
+last_bf_text_notified_hour = -1
+last_bf_voice_success_hour = -1
 last_lib_notified_key = ""
 
 cached_live_message = None
@@ -3162,14 +3164,31 @@ async def _play_tts_in_channel(guild, channel, files):
                 loop.call_soon_threadsafe(event.set)
 
             try:
-                source = discord.FFmpegPCMAudio(
+                # Use FFmpeg -> Opus directly for Discord voice playback. This avoids
+                # an extra PCM -> Opus encoding path and is more reliable on Render.
+                source = discord.FFmpegOpusAudio(
                     filename,
                     executable=get_ffmpeg_path(),
-                    before_options="-nostdin -loglevel error",
-                    options="-vn"
+                    before_options="-nostdin -hide_banner -loglevel error",
+                    options="-vn -application lowdelay -frame_duration 20",
+                    bitrate=128
                 )
                 print(f"▶️ กำลังเล่น TTS: {lang} | {guild.name} -> {channel.name}")
                 vc.play(source, after=after)
+                # Confirm discord.py actually transitioned into PLAYING. A callback
+                # alone can fire even when the source stops immediately.
+                playing_deadline = loop.time() + 5
+                while not vc.is_playing() and loop.time() < playing_deadline:
+                    if playback_error["error"] is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                if not vc.is_playing() and playback_error["error"] is None:
+                    print(f"❌ TTS playback did not enter PLAYING state: {guild.name}/{channel.name}/{lang}")
+                    try:
+                        source.cleanup()
+                    except Exception:
+                        pass
+                    continue
             except Exception as exc:
                 print(f"❌ เริ่มเล่นเสียง TTS ไม่สำเร็จ: {guild.name}/{channel.name}/{lang}: {exc}")
                 continue
@@ -3328,16 +3347,12 @@ async def on_ready():
 # ==========================================
 @tasks.loop(seconds=15)
 async def check_bf_notifications():
-    global last_bf_notified_hour, bf_notify_enabled
+    global last_bf_notified_hour, last_bf_text_notified_hour, last_bf_voice_success_hour, bf_notify_enabled
     if not bf_notify_enabled:
         return
 
     try:
         now = datetime.now(TZ_THAI)
-
-        # BF starts on even hours. Trigger during the entire 3-minute window
-        # before the scheduled start (and allow a few seconds of scheduler drift),
-        # so a loop/restart at :58 or :59 cannot miss the announcement.
         candidate = now.replace(minute=0, second=0, microsecond=0)
         if candidate <= now:
             candidate += timedelta(hours=1)
@@ -3345,41 +3360,40 @@ async def check_bf_notifications():
             candidate += timedelta(hours=1)
 
         seconds_until_bf = (candidate - now).total_seconds()
+        # Run from 3 minutes before the BF start through 15 seconds after.
         if not (-15 <= seconds_until_bf <= 180):
             return
 
         trigger_key = candidate.strftime('%Y-%m-%d-%H')
-        if last_bf_notified_hour == trigger_key:
-            return
-        last_bf_notified_hour = trigger_key
-
         next_bf_time = candidate.strftime('%H:%M')
-        print(f"⏰ BF WARNING WINDOW | guilds={len(bot.guilds)} | now={now.strftime('%Y-%m-%d %H:%M:%S')} | next={candidate.isoformat()} | seconds_until={seconds_until_bf:.1f}")
+        print(f"⏰ BF WARNING WINDOW | now={now.strftime('%Y-%m-%d %H:%M:%S')} | next={candidate.isoformat()} | seconds_until={seconds_until_bf:.1f}")
 
         for guild in bot.guilds:
-            print(f"⏰ BF WARNING TRIGGER | guild={guild.name} | now={now.strftime('%H:%M:%S')} | next={next_bf_time}")
-
-            mentions = []
-            for role_id in BF_ROLE_IDS:
-                role = guild.get_role(role_id)
-                if role:
-                    mentions.append(role.mention)
-            mention_target = " ".join(mentions) if mentions else ""
-
-            text_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
-            if not text_channel:
-                text_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
-            if text_channel:
-                embed = discord.Embed(
-                    title="⚔️ แจ้งเตือนสงคราม Battlefield (BF)!",
-                    description=f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
-                    color=discord.Color.red()
-                )
-                try:
-                    await text_channel.send(content=mention_target or None, embed=embed)
-                    print(f"✅ BF text notification sent | guild={guild.name}")
-                except Exception as exc:
-                    print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {guild.name}: {exc}")
+            # Text notification is one-shot, but Voice is independently retried
+            # until at least one configured occupied room succeeds.
+            if last_bf_text_notified_hour != trigger_key:
+                print(f"⏰ BF WARNING TRIGGER | guild={guild.name} | now={now.strftime('%H:%M:%S')} | next={next_bf_time}")
+                mentions = []
+                for role_id in BF_ROLE_IDS:
+                    role = guild.get_role(role_id)
+                    if role:
+                        mentions.append(role.mention)
+                mention_target = " ".join(mentions) if mentions else ""
+                text_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+                if not text_channel:
+                    text_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+                if text_channel:
+                    embed = discord.Embed(
+                        title="⚔️ แจ้งเตือนสงคราม Battlefield (BF)!",
+                        description=f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
+                        color=discord.Color.red()
+                    )
+                    try:
+                        await text_channel.send(content=mention_target or None, embed=embed)
+                        last_bf_text_notified_hour = trigger_key
+                        print(f"✅ BF text notification sent | guild={guild.name}")
+                    except Exception as exc:
+                        print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {guild.name}: {exc}")
 
             spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
             spoken_text_en = "Battlefield will start in 3 minutes."
@@ -3387,9 +3401,11 @@ async def check_bf_notifications():
 
             configured = get_configured_voice_channels(guild)
             occupied = [ch for ch in configured if any(not m.bot for m in ch.members)]
-            print(f"⏰ BF VOICE TARGETS | guild={guild.name} | configured={len(configured)} | occupied={len(occupied)}")
+            print(f"⏰ BF VOICE TARGETS | guild={guild.name} | configured={len(configured)} | occupied={len(occupied)} | voice_success={last_bf_voice_success_hour == trigger_key}")
             if not occupied:
-                print(f"⏭️ BF VOICE SKIP | guild={guild.name} | no occupied /setvoice rooms")
+                print(f"⏭️ BF VOICE WAIT | guild={guild.name} | no occupied /setvoice rooms yet")
+                continue
+            if last_bf_voice_success_hour == trigger_key:
                 continue
 
             results = []
@@ -3398,7 +3414,11 @@ async def check_bf_notifications():
                     print(f"📢 BF VOICE START | guild={guild.name} | channel={room.name} | humans={len([m for m in room.members if not m.bot])}")
                     ok = False
                     last_exc = None
-                    for attempt in range(1, 3):
+                    for attempt in range(1, 4):
+                        # Refresh occupancy immediately before each attempt.
+                        if not any(not m.bot for m in room.members):
+                            print(f"⏭️ BF VOICE SKIP NOW EMPTY | guild={guild.name} | channel={room.name}")
+                            break
                         try:
                             ok = await asyncio.wait_for(
                                 speak_in_guild(
@@ -3414,8 +3434,8 @@ async def check_bf_notifications():
                                 break
                         except Exception as exc:
                             last_exc = exc
-                            print(f"⚠️ BF VOICE RETRY {attempt}/2 | guild={guild.name} | channel={room.name} | {exc}")
-                            await asyncio.sleep(1.0)
+                            print(f"⚠️ BF VOICE RETRY {attempt}/3 | guild={guild.name} | channel={room.name} | {exc}")
+                            await asyncio.sleep(min(2.0 * attempt, 5.0))
                     results.append(bool(ok))
                     if last_exc and not ok:
                         print(f"❌ BF VOICE ERROR FINAL | guild={guild.name}/{room.name} | {last_exc}")
@@ -3424,7 +3444,19 @@ async def check_bf_notifications():
                     results.append(False)
                     print(f"❌ BF VOICE ERROR | guild={guild.name}/{room.name} | {exc}")
 
-            print(f"✅ BF VOICE COMPLETE | guild={guild.name} | success={sum(1 for x in results if x)}/{len(results)}")
+            success_count = sum(1 for x in results if x)
+            if success_count:
+                last_bf_voice_success_hour = trigger_key
+                # Only mark the whole BF notification as done once Voice has actually succeeded.
+                last_bf_notified_hour = trigger_key
+            print(f"✅ BF VOICE COMPLETE | guild={guild.name} | success={success_count}/{len(results)}")
+
+        # If text has been sent for this BF but Voice did not succeed yet, keep the
+        # text one-shot state while allowing voice retries on later loop iterations.
+        if last_bf_notified_hour != trigger_key:
+            # Text-only send was intentionally not globally latched here; each guild
+            # independently gets one text send. Voice remains independently retryable.
+            pass
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_bf_notifications': {e}")
         traceback.print_exc()
