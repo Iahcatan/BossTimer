@@ -24,7 +24,7 @@ import imageio_ffmpeg
 
 # 🔥 Firebase Admin SDK Setup
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, db, auth as firebase_auth
 
 # ==========================================
 # 🔥 0. เชื่อมต่อ Firebase Realtime Database
@@ -1452,7 +1452,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (profile && profile.username) return profile.username;
             if (raw && !['unknown','unknow','ไม่ระบุ'].includes(String(raw).trim().toLowerCase())) return raw;
             const authUser = auth.currentUser;
-            if (uid && authUser && uid === authUser.uid) return authUser.email || 'สมาชิก';
+            if (uid && authUser && uid === authUser.uid) {
+                if (currentUserData && currentUserData.username) return currentUserData.username;
+                return authUser.email || 'สมาชิก';
+            }
             return 'ไม่ระบุ';
         }
 
@@ -1668,52 +1671,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const timeInput = document.getElementById('killTime').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
             const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
-
             if (!bossInput) return;
 
-            let killDate = parseInputTime(timeInput);
-            if (!killDate) {
-                alert(TRANSLATIONS[currentLang].invalidTimeAlert);
-                return;
-            }
-
-            const cdSec = BOSS_DATABASE[bossInput] ? BOSS_DATABASE[bossInput].cd : 0;
-            const spawnTimeMs = killDate.getTime() + (cdSec * 1000) + (spTimeMin * 60 * 1000);
-            let currentUser = localStorage.getItem('logged_user') || '';
-            const authUser = auth.currentUser;
-            let recordedByUserId = authUser ? authUser.uid : (localStorage.getItem('logged_user_key') || '');
-            if (authUser) {
-                try {
-                    const profileSnap = await usersRef.child(authUser.uid).once('value');
-                    const profile = profileSnap.val() || {};
-                    currentUser = profile.username || authUser.displayName || authUser.email || currentUser;
-                } catch (profileErr) {
-                    console.warn('ไม่สามารถอ่านชื่อผู้ใช้จาก Firebase ได้:', profileErr);
+            try {
+                const idToken = await auth.currentUser.getIdToken(true);
+                const response = await fetch('/api/record-boss', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${idToken}`
+                    },
+                    body: JSON.stringify({
+                        bossName: bossInput,
+                        killTime: timeInput,
+                        noticeMinutes: noticeMin,
+                        spTimeMinutes: spTimeMin,
+                        channelId: null
+                    })
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.success) {
+                    throw new Error(result.error || `HTTP ${response.status}`);
                 }
+                document.getElementById('bossForm').reset();
+                document.getElementById('noticeMinutes').value = 5;
+                console.log(`✅ Boss recorded: ${result.bossName} | by ${result.recordedBy} | confirmation=${result.confirmationRequestId}`);
+            } catch (err) {
+                console.error('Dashboard boss record failed:', err);
+                alert(`❌ บันทึกเวลาบอสไม่สำเร็จ\n${err.message || err}`);
             }
-            if (!currentUser) currentUser = 'ไม่ระบุ';
-
-            // ถ้าเวลาที่คำนวณได้ผ่านไปแล้ว ให้ถือว่าเหตุการณ์แจ้งเตือนของ Timer นี้จบไปแล้ว
-            // ป้องกัน Bot มองข้อมูลย้อนหลังเป็น "บอสเกิดแล้ว" และเข้าห้อง Voice ทันทีหลังบันทึก
-            const scheduleAlreadyPassed = spawnTimeMs <= Date.now();
-
-            await bossRef.child(bossInput).set({
-                killTimeMs: killDate.getTime(),
-                spawnTimeMs: spawnTimeMs,
-                noticeMinutes: noticeMin,
-                recordedBy: currentUser,
-                recordedByUserId: recordedByUserId,
-                notifiedNotice: scheduleAlreadyPassed,
-                notifiedSpawn: scheduleAlreadyPassed,
-                voiceNoticeSent: scheduleAlreadyPassed,
-                voiceSpawnSent: scheduleAlreadyPassed,
-                confirmationRequestId: (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`),
-                confirmationRequestedAt: new Date().toISOString(),
-                confirmationStatus: 'pending'
-            });
-
-            document.getElementById('bossForm').reset();
-            document.getElementById('noticeMinutes').value = 5;
         });
 
         async function deleteBoss(bossName) {
@@ -1917,6 +1903,126 @@ def firebase_config_js():
     response.headers['Cache-Control'] = 'no-store'
     return response
 
+
+@app.route('/api/record-boss', methods=['POST'])
+def record_boss_api():
+    """Authenticated Dashboard boss recording endpoint.
+    Saves one canonical boss_schedule record using Firebase Admin SDK and triggers
+    the one-shot Voice confirmation from the same server process.
+    """
+    try:
+        payload = request.get_json(silent=True) or {}
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return jsonify({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return jsonify({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict):
+            return jsonify({'success': False, 'error': 'User profile not found'}), 403
+        if profile.get('status') != 'approved':
+            return jsonify({'success': False, 'error': 'Account is not approved'}), 403
+
+        boss_name = str(payload.get('bossName') or '').strip()
+        time_input = str(payload.get('killTime') or '').strip()
+        try:
+            notice_min = max(1, int(payload.get('noticeMinutes') or 5))
+        except (TypeError, ValueError):
+            notice_min = 5
+        try:
+            sp_time_min = max(0, int(payload.get('spTimeMinutes') or 0))
+        except (TypeError, ValueError):
+            sp_time_min = 0
+
+        if not boss_name:
+            return jsonify({'success': False, 'error': 'Boss name is required'}), 400
+
+        canonical_name = get_boss_canonical_name(boss_name)
+        # Dashboard uses BOSS_DATABASE for custom definitions, but the server must
+        # use the persisted BOSS_RESPAWN_TIMES so /add boss survives deploys.
+        respawn = get_boss_respawn_time(canonical_name)
+        now = datetime.now(TZ_THAI)
+        try:
+            boss_died_at = parse_time_input(time_input, now)
+        except ValueError:
+            return jsonify({'success': False, 'error': 'Invalid time format'}), 400
+
+        next_spawn = boss_died_at + respawn + timedelta(minutes=sp_time_min)
+        spawn_ms = int(next_spawn.timestamp() * 1000)
+        kill_ms = int(boss_died_at.timestamp() * 1000)
+        already_passed = spawn_ms <= int(time.time() * 1000)
+        username = str(profile.get('username') or decoded.get('email') or uid)
+        request_id = uuid.uuid4().hex
+        requested_at = datetime.now(TZ_THAI).isoformat()
+
+        record = {
+            'killTimeMs': kill_ms,
+            'spawnTimeMs': spawn_ms,
+            'spawn_time': next_spawn.isoformat(),
+            'noticeMinutes': notice_min,
+            'recordedBy': username,
+            'recordedByUserId': uid,
+            'confirmationRequestId': request_id,
+            'confirmationRequestedAt': requested_at,
+            'confirmationStatus': 'pending',
+            'notifiedNotice': already_passed,
+            'notifiedSpawn': already_passed,
+            'voiceNoticeSent': already_passed,
+            'voiceSpawnSent': already_passed,
+            'channelId': payload.get('channelId')
+        }
+        if record['channelId'] is None:
+            record.pop('channelId')
+
+        ref = db.reference(f'boss_schedule/{canonical_name}')
+        ref.set(record)
+        with schedule_lock:
+            boss_schedule[canonical_name] = {
+                'spawn_time': next_spawn,
+                'killTimeMs': kill_ms,
+                'channel_id': payload.get('channelId'),
+                'notified_advance': already_passed,
+                'notified_spawn': already_passed,
+                'voice_notice_sent': already_passed,
+                'voice_spawn_sent': already_passed,
+                'noticeMinutes': notice_min,
+                'recorded_by': username,
+                'recordedByUserId': uid,
+                'confirmationRequestId': request_id,
+                'confirmationRequestedAt': requested_at,
+                'confirmationStatus': 'pending'
+            }
+
+        # Queue confirmation immediately from the Bot process. The Firebase listener
+        # remains as a safety net but this removes timing dependence on the listener.
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _voice_confirm_boss_recording(canonical_name, dict(boss_schedule[canonical_name])),
+                bot_event_loop
+            ) if bot_event_loop is not None else None
+        except Exception as exc:
+            print(f"⚠️ Dashboard confirmation queue failed: {exc}")
+
+        return jsonify({
+            'success': True,
+            'bossName': canonical_name,
+            'recordedBy': username,
+            'recordedByUserId': uid,
+            'killTimeMs': kill_ms,
+            'spawnTimeMs': spawn_ms,
+            'spawnTime': next_spawn.isoformat(),
+            'confirmationRequestId': request_id,
+            'alreadyPassed': already_passed
+        })
+    except Exception as exc:
+        print(f"❌ /api/record-boss failed: {exc}")
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
 @app.route('/api/toggle_tts', methods=['POST'])
 def toggle_tts_api():
     global tts_th_enabled, tts_en_enabled, tts_ko_enabled
@@ -2001,6 +2107,7 @@ last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
 # Prevent overlapping boss notification passes (e.g. scheduled loop + manual /kill check).
 boss_notification_pass_lock = asyncio.Lock()
+bot_event_loop = None
 
 bf_notify_enabled = True
 lib_notify_enabled = True
@@ -2938,8 +3045,10 @@ async def on_ready():
     if not update_live_embed.is_running(): update_live_embed.start()
     if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
 
+    global bot_event_loop
+    bot_event_loop = asyncio.get_running_loop()
     is_bot_ready = True
-    loop = asyncio.get_running_loop()
+    loop = bot_event_loop
     threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
 
 # ==========================================
@@ -3966,6 +4075,12 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
                     timeout=10
                 )
                 print(f"💾 /kill saved: {canonical_name} -> {next_spawn.isoformat()}")
+                try:
+                    with schedule_lock:
+                        confirm_data = dict(boss_schedule.get(canonical_name, {}))
+                    await _voice_confirm_boss_recording(canonical_name, confirm_data)
+                except Exception as confirmation_error:
+                    print(f"⚠️ /kill confirmation failed: {confirmation_error}")
             except Exception as e:
                 print(f"❌ /kill Firebase save failed: {e}")
                 traceback.print_exc()
