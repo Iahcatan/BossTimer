@@ -631,8 +631,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }, {{ firebase_web_config_json|safe }});
 
         // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
-        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
-            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
+        const firebaseConfigMissing = ['apiKey','authDomain','databaseURL','projectId','storageBucket','messagingSenderId','appId']
+            .filter(k => !String(firebaseConfig[k] || '').trim());
+        const firebaseConfigPlaceholder = ['apiKey','authDomain','projectId','appId']
+            .some(k => String(firebaseConfig[k] || '').includes('PASTE_YOUR_'));
+        if (firebaseConfigMissing.length || firebaseConfigPlaceholder) {
+            console.error('❌ Firebase Config จาก Render ไม่ครบ: ' + (firebaseConfigMissing.length ? firebaseConfigMissing.join(', ') : 'placeholder values'));
         }
 
         // Initialize Firebase
@@ -1836,13 +1840,53 @@ def dashboard():
             "recorded_by": data.get("recorded_by", "-")
         })
 
+    # Firebase Web App config for the GitHub Pages dashboard.
+    # Prefer the complete JSON variable, but also support the individual
+    # FIREBASE_WEB_* variables so a malformed/partial JSON value does not
+    # silently break Firebase Auth on the dashboard.
     web_config = os.environ.get("FIREBASE_WEB_CONFIG_JSON", "").strip()
-    try:
-        parsed_web_config = json.loads(web_config) if web_config else {}
-        if not isinstance(parsed_web_config, dict):
-            parsed_web_config = {}
-    except Exception:
-        parsed_web_config = {}
+    parsed_web_config = {}
+    if web_config:
+        try:
+            parsed_web_config = json.loads(web_config)
+            if not isinstance(parsed_web_config, dict):
+                parsed_web_config = {}
+        except Exception:
+            # Tolerate accidental KEY/Value labels pasted into Render.
+            cleaned = web_config.strip()
+            if "{" in cleaned and "}" in cleaned:
+                try:
+                    cleaned = cleaned[cleaned.find("{"):cleaned.rfind("}")+1]
+                    parsed_web_config = json.loads(cleaned)
+                except Exception:
+                    parsed_web_config = {}
+
+    env_aliases = {
+        "apiKey": os.environ.get("FIREBASE_WEB_API_KEY", "").strip(),
+        "authDomain": os.environ.get("FIREBASE_WEB_AUTH_DOMAIN", "").strip(),
+        "databaseURL": os.environ.get("FIREBASE_WEB_DATABASE_URL", os.environ.get("FIREBASE_DATABASE_URL", "")).strip(),
+        "projectId": os.environ.get("FIREBASE_WEB_PROJECT_ID", "").strip(),
+        "storageBucket": os.environ.get("FIREBASE_WEB_STORAGE_BUCKET", "").strip(),
+        "messagingSenderId": os.environ.get("FIREBASE_WEB_MESSAGING_SENDER_ID", "").strip(),
+        "appId": os.environ.get("FIREBASE_WEB_APP_ID", "").strip(),
+        "measurementId": os.environ.get("FIREBASE_WEB_MEASUREMENT_ID", "").strip(),
+    }
+    for key, value in env_aliases.items():
+        if value:
+            parsed_web_config[key] = value
+
+    # Always provide the known project/database endpoints; these are not
+    # secrets and keep older Render environments compatible.
+    parsed_web_config.setdefault("authDomain", "skynet-3ad44.firebaseapp.com")
+    parsed_web_config.setdefault("databaseURL", DATABASE_URL)
+    parsed_web_config.setdefault("projectId", "skynet-3ad44")
+
+    required_web_keys = ["apiKey", "authDomain", "databaseURL", "projectId", "storageBucket", "messagingSenderId", "appId"]
+    missing_web_keys = [k for k in required_web_keys if not str(parsed_web_config.get(k, "")).strip()]
+    if missing_web_keys:
+        print("❌ Firebase Web config incomplete for Dashboard: " + ", ".join(missing_web_keys))
+    else:
+        print("✅ Firebase Web config ready for Dashboard | apiKey=present projectId=" + str(parsed_web_config.get("projectId")))
     return render_template_string(
         HTML_TEMPLATE,
         bosses=boss_list,
