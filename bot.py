@@ -2586,9 +2586,13 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
         return True
     try:
         result = future.result(timeout=float(timeout))
-        print(f"📣 Voice confirmation finished | boss={boss_name} | source={source} | success={bool(result)}")
-        return bool(result)
+        ok = bool(result)
+        print(f"📣 Voice confirmation finished | boss={boss_name} | source={source} | success={ok}")
+        if not ok:
+            _confirmation_queue_ids.discard(request_id)
+        return ok
     except Exception as exc:
+        _confirmation_queue_ids.discard(request_id)
         print(f"❌ Voice confirmation wait failed | boss={boss_name} | source={source} | {exc}")
         return False
 
@@ -2644,6 +2648,7 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
                 except Exception as exc:
                     print(f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{configured.name}): {exc}")
         print(f"✅ Boss record confirmation | boss={boss_name} | user={recorded_by} | success={success}")
+        return bool(success)
     finally:
         try:
             await asyncio.to_thread(
