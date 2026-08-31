@@ -2215,6 +2215,8 @@ last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
 # Prevent overlapping boss notification passes (e.g. scheduled loop + manual /kill check).
 boss_notification_pass_lock = asyncio.Lock()
+# Serialize manual /notice commands so interaction responses and Voice/TTS jobs do not overlap.
+notice_command_lock = asyncio.Lock()
 bot_event_loop = None
 
 bf_notify_enabled = True
@@ -4225,58 +4227,124 @@ async def disconnect_voice(interaction: discord.Interaction):
 @app_commands.describe(message="ข้อความที่ต้องการให้บอทประกาศ")
 @has_allowed_role()
 async def notice_command(interaction: discord.Interaction, message: str):
-    await interaction.response.defer(ephemeral=True)
-    if not message.strip():
-        await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
-        return
-
-    # Global notice: visit every occupied voice channel in this guild.
-    occupied = []
-    for vc in interaction.guild.voice_channels:
-        humans = [m for m in vc.members if not m.bot]
-        if humans:
-            occupied.append(vc)
-
-    if not occupied:
-        await interaction.followup.send("⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย", ephemeral=True)
-        return
-
-    names = ", ".join(f"**{vc.name}**" for vc in occupied)
-    await interaction.followup.send(
-        f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\n"
-        "บอทจะเข้า → พูด → ออกทีละห้อง",
-        ephemeral=True
-    )
-
-    results = []
-    for vc in occupied:
+    # IMPORTANT: respond to the interaction exactly once, immediately.
+    # The previous defer + multiple followups could itself hit Discord global 429s.
+    async with notice_command_lock:
         try:
-            ok = await asyncio.wait_for(
-                speak_in_guild(
-                    interaction.guild,
-                    text_th=message, text_en=message, text_ko=message,
-                    target_channel=vc
-                ),
-                timeout=180
+            await interaction.response.send_message(
+                "⏳ กำลังเตรียมประกาศเสียง...",
+                ephemeral=True
             )
-            results.append((vc.name, ok))
-        except Exception as e:
-            print(f"❌ /notice TTS failed in {vc.name}: {e}")
-            results.append((vc.name, False))
-    ok_count = sum(1 for _, ok in results if ok)
-    print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
-    failed = [name for name, ok in results if not ok]
-    if failed:
-        await interaction.followup.send(
-            f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n" +
-            f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}",
-            ephemeral=True
-        )
-    else:
-        await interaction.followup.send(
-            f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง",
-            ephemeral=True
-        )
+        except discord.HTTPException as exc:
+            # A 429 here means Discord is throttling the interaction callback itself.
+            # Retry briefly; if the callback still cannot be acknowledged, there is
+            # no valid interaction token path to safely continue.
+            if getattr(exc, "status", None) == 429:
+                retry_after = getattr(exc, "retry_after", None)
+                try:
+                    delay = float(retry_after) if retry_after is not None else 0.5
+                except (TypeError, ValueError):
+                    delay = 0.5
+                if 0 < delay <= 2.0:
+                    await asyncio.sleep(delay + 0.1)
+                    try:
+                        await interaction.response.send_message(
+                            "⏳ กำลังเตรียมประกาศเสียง...",
+                            ephemeral=True
+                        )
+                    except Exception as retry_exc:
+                        print(f"❌ /notice interaction response rate-limited after retry: {retry_exc}")
+                        return
+                else:
+                    print(f"❌ /notice interaction response blocked by Discord rate limit: {exc}")
+                    return
+            else:
+                print(f"❌ /notice interaction response failed: {exc}")
+                return
+
+        if not message or not message.strip():
+            try:
+                await interaction.edit_original_response(content="❌ กรุณาระบุข้อความที่ต้องการประกาศครับ")
+            except Exception:
+                pass
+            return
+
+        guild = interaction.guild
+        if guild is None:
+            try:
+                await interaction.edit_original_response(content="❌ คำสั่งนี้ใช้ได้เฉพาะในเซิร์ฟเวอร์ครับ")
+            except Exception:
+                pass
+            return
+
+        # Snapshot the occupied rooms at the beginning of the command.
+        # Voice playback itself re-checks the target/permissions before connecting.
+        occupied = []
+        for vc in guild.voice_channels:
+            humans = [m for m in vc.members if not m.bot]
+            if humans:
+                occupied.append(vc)
+
+        if not occupied:
+            try:
+                await interaction.edit_original_response(content="⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย")
+            except Exception:
+                pass
+            return
+
+        names = ", ".join(f"**{vc.name}**" for vc in occupied)
+        try:
+            await interaction.edit_original_response(
+                content=f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\nบอทจะเข้า → พูด → ออกทีละห้อง"
+            )
+        except Exception as exc:
+            print(f"⚠️ /notice status update failed: {exc}")
+
+        results = []
+        for vc in occupied:
+            # Re-check occupancy immediately before processing each room.
+            humans_now = [m for m in vc.members if not m.bot]
+            if not humans_now:
+                print(f"⏭️ /notice skipped now-empty room: {guild.name} -> {vc.name}")
+                results.append((vc.name, False))
+                continue
+            try:
+                ok = await asyncio.wait_for(
+                    speak_in_guild(
+                        guild,
+                        text_th=message, text_en=message, text_ko=message,
+                        target_channel=vc
+                    ),
+                    timeout=180
+                )
+                results.append((vc.name, bool(ok)))
+            except Exception as e:
+                print(f"❌ /notice TTS failed in {vc.name}: {e}")
+                results.append((vc.name, False))
+
+        ok_count = sum(1 for _, ok in results if ok)
+        failed = [name for name, ok in results if not ok]
+        print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
+
+        try:
+            if failed:
+                await interaction.edit_original_response(
+                    content=(
+                        f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n"
+                        f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}"
+                    )
+                )
+            else:
+                await interaction.edit_original_response(
+                    content=f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง"
+                )
+        except discord.HTTPException as exc:
+            if getattr(exc, "status", None) == 429:
+                print(f"⚠️ /notice final status update rate-limited: {exc}")
+            else:
+                print(f"⚠️ /notice final status update failed: {exc}")
+        except Exception as exc:
+            print(f"⚠️ /notice final status update failed: {exc}")
 
 # ==========================================
 # ⚔️ 10. Boss Slash Commands
