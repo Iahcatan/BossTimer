@@ -2652,6 +2652,11 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
             )
         except Exception as exc:
             print(f"⚠️ Could not persist confirmation status for {boss_name}: {exc}")
+    # IMPORTANT: propagate the actual Voice result back to the synchronous
+    # Dashboard/API caller. Without this return, the coroutine yielded None
+    # even after a successful Voice playback, causing the Dashboard to show
+    # a false failure warning.
+    return bool(success)
 
 def start_firebase_listener(loop):
     """Safe listener: always read the boss_schedule root, never trust event.data as the full tree."""
