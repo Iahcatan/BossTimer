@@ -2215,8 +2215,6 @@ last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
 # Prevent overlapping boss notification passes (e.g. scheduled loop + manual /kill check).
 boss_notification_pass_lock = asyncio.Lock()
-# Serialize manual /notice commands so interaction responses and Voice/TTS jobs do not overlap.
-notice_command_lock = asyncio.Lock()
 bot_event_loop = None
 
 bf_notify_enabled = True
@@ -2588,9 +2586,13 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
         return True
     try:
         result = future.result(timeout=float(timeout))
-        print(f"📣 Voice confirmation finished | boss={boss_name} | source={source} | success={bool(result)}")
-        return bool(result)
+        ok = bool(result)
+        print(f"📣 Voice confirmation finished | boss={boss_name} | source={source} | success={ok}")
+        if not ok:
+            _confirmation_queue_ids.discard(request_id)
+        return ok
     except Exception as exc:
+        _confirmation_queue_ids.discard(request_id)
         print(f"❌ Voice confirmation wait failed | boss={boss_name} | source={source} | {exc}")
         return False
 
@@ -2646,6 +2648,7 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
                 except Exception as exc:
                     print(f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{configured.name}): {exc}")
         print(f"✅ Boss record confirmation | boss={boss_name} | user={recorded_by} | success={success}")
+        return bool(success)
     finally:
         try:
             await asyncio.to_thread(
@@ -2654,11 +2657,6 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
             )
         except Exception as exc:
             print(f"⚠️ Could not persist confirmation status for {boss_name}: {exc}")
-    # IMPORTANT: propagate the actual Voice result back to the synchronous
-    # Dashboard/API caller. Without this return, the coroutine yielded None
-    # even after a successful Voice playback, causing the Dashboard to show
-    # a false failure warning.
-    return bool(success)
 
 def start_firebase_listener(loop):
     """Safe listener: always read the boss_schedule root, never trust event.data as the full tree."""
@@ -4227,124 +4225,58 @@ async def disconnect_voice(interaction: discord.Interaction):
 @app_commands.describe(message="ข้อความที่ต้องการให้บอทประกาศ")
 @has_allowed_role()
 async def notice_command(interaction: discord.Interaction, message: str):
-    # IMPORTANT: respond to the interaction exactly once, immediately.
-    # The previous defer + multiple followups could itself hit Discord global 429s.
-    async with notice_command_lock:
+    await interaction.response.defer(ephemeral=True)
+    if not message.strip():
+        await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
+        return
+
+    # Global notice: visit every occupied voice channel in this guild.
+    occupied = []
+    for vc in interaction.guild.voice_channels:
+        humans = [m for m in vc.members if not m.bot]
+        if humans:
+            occupied.append(vc)
+
+    if not occupied:
+        await interaction.followup.send("⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย", ephemeral=True)
+        return
+
+    names = ", ".join(f"**{vc.name}**" for vc in occupied)
+    await interaction.followup.send(
+        f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\n"
+        "บอทจะเข้า → พูด → ออกทีละห้อง",
+        ephemeral=True
+    )
+
+    results = []
+    for vc in occupied:
         try:
-            await interaction.response.send_message(
-                "⏳ กำลังเตรียมประกาศเสียง...",
-                ephemeral=True
+            ok = await asyncio.wait_for(
+                speak_in_guild(
+                    interaction.guild,
+                    text_th=message, text_en=message, text_ko=message,
+                    target_channel=vc
+                ),
+                timeout=180
             )
-        except discord.HTTPException as exc:
-            # A 429 here means Discord is throttling the interaction callback itself.
-            # Retry briefly; if the callback still cannot be acknowledged, there is
-            # no valid interaction token path to safely continue.
-            if getattr(exc, "status", None) == 429:
-                retry_after = getattr(exc, "retry_after", None)
-                try:
-                    delay = float(retry_after) if retry_after is not None else 0.5
-                except (TypeError, ValueError):
-                    delay = 0.5
-                if 0 < delay <= 2.0:
-                    await asyncio.sleep(delay + 0.1)
-                    try:
-                        await interaction.response.send_message(
-                            "⏳ กำลังเตรียมประกาศเสียง...",
-                            ephemeral=True
-                        )
-                    except Exception as retry_exc:
-                        print(f"❌ /notice interaction response rate-limited after retry: {retry_exc}")
-                        return
-                else:
-                    print(f"❌ /notice interaction response blocked by Discord rate limit: {exc}")
-                    return
-            else:
-                print(f"❌ /notice interaction response failed: {exc}")
-                return
-
-        if not message or not message.strip():
-            try:
-                await interaction.edit_original_response(content="❌ กรุณาระบุข้อความที่ต้องการประกาศครับ")
-            except Exception:
-                pass
-            return
-
-        guild = interaction.guild
-        if guild is None:
-            try:
-                await interaction.edit_original_response(content="❌ คำสั่งนี้ใช้ได้เฉพาะในเซิร์ฟเวอร์ครับ")
-            except Exception:
-                pass
-            return
-
-        # Snapshot the occupied rooms at the beginning of the command.
-        # Voice playback itself re-checks the target/permissions before connecting.
-        occupied = []
-        for vc in guild.voice_channels:
-            humans = [m for m in vc.members if not m.bot]
-            if humans:
-                occupied.append(vc)
-
-        if not occupied:
-            try:
-                await interaction.edit_original_response(content="⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย")
-            except Exception:
-                pass
-            return
-
-        names = ", ".join(f"**{vc.name}**" for vc in occupied)
-        try:
-            await interaction.edit_original_response(
-                content=f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\nบอทจะเข้า → พูด → ออกทีละห้อง"
-            )
-        except Exception as exc:
-            print(f"⚠️ /notice status update failed: {exc}")
-
-        results = []
-        for vc in occupied:
-            # Re-check occupancy immediately before processing each room.
-            humans_now = [m for m in vc.members if not m.bot]
-            if not humans_now:
-                print(f"⏭️ /notice skipped now-empty room: {guild.name} -> {vc.name}")
-                results.append((vc.name, False))
-                continue
-            try:
-                ok = await asyncio.wait_for(
-                    speak_in_guild(
-                        guild,
-                        text_th=message, text_en=message, text_ko=message,
-                        target_channel=vc
-                    ),
-                    timeout=180
-                )
-                results.append((vc.name, bool(ok)))
-            except Exception as e:
-                print(f"❌ /notice TTS failed in {vc.name}: {e}")
-                results.append((vc.name, False))
-
-        ok_count = sum(1 for _, ok in results if ok)
-        failed = [name for name, ok in results if not ok]
-        print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
-
-        try:
-            if failed:
-                await interaction.edit_original_response(
-                    content=(
-                        f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n"
-                        f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}"
-                    )
-                )
-            else:
-                await interaction.edit_original_response(
-                    content=f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง"
-                )
-        except discord.HTTPException as exc:
-            if getattr(exc, "status", None) == 429:
-                print(f"⚠️ /notice final status update rate-limited: {exc}")
-            else:
-                print(f"⚠️ /notice final status update failed: {exc}")
-        except Exception as exc:
-            print(f"⚠️ /notice final status update failed: {exc}")
+            results.append((vc.name, ok))
+        except Exception as e:
+            print(f"❌ /notice TTS failed in {vc.name}: {e}")
+            results.append((vc.name, False))
+    ok_count = sum(1 for _, ok in results if ok)
+    print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
+    failed = [name for name, ok in results if not ok]
+    if failed:
+        await interaction.followup.send(
+            f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n" +
+            f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}",
+            ephemeral=True
+        )
+    else:
+        await interaction.followup.send(
+            f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง",
+            ephemeral=True
+        )
 
 # ==========================================
 # ⚔️ 10. Boss Slash Commands
@@ -4756,135 +4688,54 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
 # 🚀 11. Run Bot Entry Point
 # ==========================================
 async def run_bot_with_backoff(token: str):
-    """Run exactly one Discord Gateway session at a time with exponential backoff.
-
-    Important:
-    - Do not create overlapping bot.start() sessions.
-    - Let discord.py handle normal Gateway reconnects via reconnect=True.
-    - After an HTTP 429, honor retry_after when present and back off exponentially.
-    - Do not reconnect in a tight loop after repeated 429s; pause longer instead.
-    """
-    # Per-process single-session guard.  This prevents accidental concurrent
-    # calls to bot.start() from start.py / duplicate startup paths.
-    if getattr(run_bot_with_backoff, "_running", False):
-        print("⚠️ Discord runner already active — skip duplicate session start")
-        return
-    run_bot_with_backoff._running = True
-
-    # Start conservatively. Normal reconnects are delegated to discord.py.
-    backoff = 30.0
-    max_backoff = 900.0
-    consecutive_429 = 0
-    severe_429_cooldown = 900.0
-
-    try:
-        while True:
-            # Never start a second session while the current client still has
-            # a live/closing connection state.
-            if not bot.is_closed():
-                print("⚠️ Discord client session already open/closing — waiting before retry")
-                try:
-                    await bot.close()
-                except Exception as close_error:
-                    print(f"⚠️ ปิด Discord session ก่อน retry ไม่สำเร็จ: {close_error}")
-                await asyncio.sleep(min(backoff, max_backoff))
-
-            try:
-                print("🔌 กำลังเชื่อมต่อ Discord Gateway...")
-                await bot.start(token, reconnect=True)
-
-                # A clean return means discord.py stopped the client normally.
-                print("🛑 Discord bot stopped normally.")
-                return
-
-            except discord.HTTPException as e:
-                status = getattr(e, "status", None)
-                if status == 429:
-                    consecutive_429 += 1
-                    retry_after = getattr(e, "retry_after", 0)
-                    try:
-                        retry_after = float(retry_after or 0)
-                    except (TypeError, ValueError):
-                        retry_after = 0.0
-
-                    # Exponential backoff. Never spin every 10 seconds.
-                    delay = max(retry_after, backoff)
-
-                    # If 429 keeps recurring, deliberately pause much longer
-                    # rather than hammering Discord again and extending the ban.
-                    if consecutive_429 >= 3:
-                        delay = max(delay, severe_429_cooldown)
-                        print(
-                            f"🛑 Discord 429 ยังเกิดซ้ำ ({consecutive_429} ครั้ง) — "
-                            f"พัก reconnect {delay:.0f} วินาทีก่อนลองใหม่"
-                        )
-                    else:
-                        print(
-                            f"🛑 Discord 429 — พัก reconnect {delay:.0f} วินาที "
-                            f"(ครั้งที่ {consecutive_429})"
-                        )
-
-                    try:
-                        await bot.close()
-                    except Exception as close_error:
-                        print(f"⚠️ ปิด Discord session หลัง 429 ไม่สำเร็จ: {close_error}")
-
-                    await asyncio.sleep(delay)
-                    backoff = min(backoff * 2.0, max_backoff)
-                    continue
-
-                # Other HTTP errors use the same controlled exponential backoff.
+    """Run Discord with bounded retry and explicitly close failed HTTP sessions."""
+    backoff = 10
+    while True:
+        try:
+            print("🔌 กำลังเชื่อมต่อ Discord Gateway...")
+            await bot.start(token, reconnect=True)
+            print("🛑 Discord bot stopped normally.")
+            return
+        except discord.HTTPException as e:
+            status = getattr(e, "status", None)
+            if status == 429:
+                retry_after = getattr(e, "retry_after", 0)
+                try: retry_after = float(retry_after or 0)
+                except (TypeError, ValueError): retry_after = 0
+                delay = max(retry_after, backoff)
+                print(f"🛑 Discord 429 — รอ {delay:.0f} วินาทีก่อนเชื่อมต่อใหม่")
+            else:
+                delay = backoff
                 print(f"❌ Discord HTTP error status={status}: {e}")
-                try:
-                    await bot.close()
-                except Exception as close_error:
-                    print(f"⚠️ ปิด Discord HTTP session หลัง error ไม่สำเร็จ: {close_error}")
+            try:
+                await bot.close()
+            except Exception as close_error:
+                print(f"⚠️ ปิด Discord HTTP session หลัง error ไม่สำเร็จ: {close_error}")
+            await asyncio.sleep(delay)
+            backoff = min(backoff * 2, 300)
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            print(f"⚠️ Discord connection error: {e} — ปิด session แล้ว retry ใน {backoff} วินาที")
+            try:
+                await bot.close()
+            except Exception as close_error:
+                print(f"⚠️ ปิด Discord HTTP session ไม่สำเร็จ: {close_error}")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 300)
+        except RuntimeError as e:
+            if "Session is closed" in str(e):
+                print("⚠️ Discord session ถูกปิด — จะสร้าง session ใหม่ในรอบถัดไป")
+                try: await bot.close()
+                except Exception: pass
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, max_backoff)
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                print(
-                    f"⚠️ Discord connection error: {e} — "
-                    f"retry ใน {backoff:.0f} วินาที"
-                )
-                try:
-                    await bot.close()
-                except Exception as close_error:
-                    print(f"⚠️ ปิด Discord HTTP session ไม่สำเร็จ: {close_error}")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, max_backoff)
-
-            except RuntimeError as e:
-                if "Session is closed" in str(e):
-                    print(
-                        f"⚠️ Discord session ถูกปิด — "
-                        f"พัก reconnect {backoff:.0f} วินาที"
-                    )
-                    try:
-                        await bot.close()
-                    except Exception:
-                        pass
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2.0, max_backoff)
-                    continue
-                raise
-
-            except Exception as e:
-                print(f"❌ Discord startup error: {e}")
-                traceback.print_exc()
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
-                # Keep the single-session rule, but do not silently spin.
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2.0, max_backoff)
-
-            # Reaching this point means a non-429 connection error occurred
-            # and a retry is controlled by the exponential backoff above.
-
-    finally:
-        run_bot_with_backoff._running = False
+                backoff = min(backoff * 2, 300)
+                continue
+            raise
+        except Exception as e:
+            print(f"❌ Discord startup error: {e}")
+            traceback.print_exc()
+            try: await bot.close()
+            except Exception: pass
+            raise
 
 if __name__ == "__main__":
     # Render needs the HTTP listener immediately; start it exactly once.
