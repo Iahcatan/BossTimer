@@ -4045,7 +4045,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V14_429_BF_NOTICE_STABLE"
+NOTICE_BF_PATCH_VERSION = "V17_GATEWAY_429_PRECHECK_HARD_STOP"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
@@ -4773,119 +4773,127 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
 # ==========================================
 # 🚀 11. Run Bot Entry Point
 # ==========================================
+async def _probe_gateway_session_start_limit(token: str):
+    """Query Discord's Get Gateway Bot endpoint before a new IDENTIFY.
+    This is a REST preflight used only by the Gateway startup controller.
+    It helps distinguish temporary HTTP 429 from exhausted session-start quota.
+    """
+    url = "https://discord.com/api/v10/gateway/bot"
+    headers = {"Authorization": f"Bot {token}", "User-Agent": "SKYNET/1.0"}
+    timeout = aiohttp.ClientTimeout(total=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status != 200:
+                    print(f"⚠️ Gateway preflight HTTP {resp.status}: {data}", flush=True)
+                    return None
+                limit = data.get("session_start_limit") or {}
+                remaining = int(limit.get("remaining", -1))
+                total = int(limit.get("total", -1))
+                reset_after_ms = int(limit.get("reset_after", 0) or 0)
+                max_concurrency = int(limit.get("max_concurrency", 0) or 0)
+                print(
+                    f"🔎 Gateway session limit | remaining={remaining}/{total} "
+                    f"reset_after={reset_after_ms}ms max_concurrency={max_concurrency}",
+                    flush=True,
+                )
+                return {
+                    "remaining": remaining,
+                    "total": total,
+                    "reset_after_ms": reset_after_ms,
+                    "max_concurrency": max_concurrency,
+                }
+    except Exception as e:
+        print(f"⚠️ Gateway preflight failed: {e}", flush=True)
+        return None
+
+
 async def run_bot_with_backoff(token: str):
-    """Single-session Discord runner. Let discord.py handle normal reconnects; only retry
-    bot.start() after a terminal startup failure, with exponential backoff and 429 cooldowns.
+    """Own exactly one Discord Gateway startup controller.
+
+    Normal reconnect/resume stays inside discord.py. This outer controller handles
+    only terminal startup failures. Gateway 429 is a HARD STOP: it does not create
+    another IDENTIFY session automatically, because repeated IDENTIFY attempts can
+    consume Discord's global session-start allowance. The process stays alive for
+    the web service, but the Discord client remains stopped until an operator can
+    safely retry (or replace the token when Discord has exhausted/reset it).
     """
     global is_bot_ready
     if getattr(run_bot_with_backoff, "_active", False):
-        print("⚠️ Discord runner already active — skip duplicate session start")
+        print("⚠️ Discord runner already active — skip duplicate session start", flush=True)
         return
     run_bot_with_backoff._active = True
 
-    backoff = 30.0
-    max_backoff = 900.0
-    attempt = 0
     try:
-        while True:
-            try:
-                # A failed/closed client must be recreated before a new startup attempt.
-                if getattr(bot, "is_closed", lambda: False)():
-                    print("🔄 Discord client is closed — preparing a single new Gateway session")
-                print("🔌 กำลังเชื่อมต่อ Discord Gateway...")
-                await bot.start(token, reconnect=True)
-                print("🛑 Discord bot stopped normally.")
-                return
+        print("🔎 ตรวจ Discord Gateway session-start limit ก่อนเชื่อมต่อ...", flush=True)
+        limit_info = await _probe_gateway_session_start_limit(token)
+        if limit_info and limit_info.get("remaining", -1) == 0:
+            reset_after = max(0, int(limit_info.get("reset_after_ms", 0)))
+            print(
+                f"🛑 Discord IDENTIFY quota exhausted | remaining=0 | reset_after={reset_after}ms",
+                flush=True,
+            )
+            print(
+                "⛔ HARD STOP: ไม่สร้าง Gateway session ใหม่อัตโนมัติ. "
+                "หาก Discord รีเซ็ต Bot Token แล้ว ต้องใส่ token ใหม่ใน Render",
+                flush=True,
+            )
+            is_bot_ready = False
+            return
 
-            except discord.HTTPException as e:
-                status = getattr(e, "status", None)
-                if status != 429:
-                    attempt += 1
-                    is_bot_ready = False
-                    delay = min(backoff, max_backoff)
-                    print(f"❌ Discord HTTP error status={status}: {e}")
-                    print(f"⏳ Gateway retry {attempt} in {delay:.0f}s")
-                else:
-                    attempt += 1
-                    is_bot_ready = False
-                    retry_after = 0.0
-                    try:
-                        retry_after = float(getattr(e, "retry_after", 0) or 0)
-                    except (TypeError, ValueError):
-                        retry_after = 0.0
+        print("🔌 กำลังเชื่อมต่อ Discord Gateway...", flush=True)
+        is_bot_ready = False
+        await bot.start(token, reconnect=True)
+        print("🛑 Discord bot stopped normally.", flush=True)
 
-                    # Respect Discord's server-provided retry delay. For repeated/large 429s,
-                    # enter a long cooldown instead of reconnecting every few seconds.
-                    if retry_after >= 60 or attempt >= 3:
-                        delay = max(retry_after, max_backoff)
-                        print(
-                            f"🛑 Discord 429 รุนแรง/เกิดซ้ำ — หยุด reconnect ชั่วคราว {delay:.0f}s "
-                            f"(attempt={attempt}, retry_after={retry_after:.1f}s)"
-                        )
-                    else:
-                        delay = max(retry_after, backoff)
-                        print(
-                            f"🛑 Discord 429 — หยุด reconnect ชั่วคราว {delay:.0f}s "
-                            f"(attempt={attempt}, retry_after={retry_after:.1f}s)"
-                        )
+    except discord.HTTPException as e:
+        is_bot_ready = False
+        status = getattr(e, "status", None)
+        retry_after = 0.0
+        try:
+            retry_after = float(getattr(e, "retry_after", 0) or 0)
+        except (TypeError, ValueError):
+            retry_after = 0.0
 
-                # Do not call bot.start() from another task; this runner owns the only session.
-                try:
-                    await bot.close()
-                except Exception as close_error:
-                    print(f"⚠️ ปิด Discord client หลัง Gateway error ไม่สำเร็จ: {close_error}")
-                await asyncio.sleep(delay)
-                backoff = min(max(backoff * 2, 30.0), max_backoff)
-                continue
+        if status == 429:
+            print(
+                f"🛑 Discord Gateway 429 — HARD STOP | retry_after={retry_after:.1f}s",
+                flush=True,
+            )
+            print(
+                "⛔ ไม่ reconnect อัตโนมัติ และไม่เรียก bot.close() ซ้ำ "
+                "เพื่อป้องกัน IDENTIFY storm",
+                flush=True,
+            )
+            return
 
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                attempt += 1
-                is_bot_ready = False
-                delay = min(backoff, max_backoff)
-                print(f"⚠️ Discord connection error: {e}")
-                print(f"⏳ Gateway retry {attempt} in {delay:.0f}s")
-                try:
-                    await bot.close()
-                except Exception as close_error:
-                    print(f"⚠️ ปิด Discord client ไม่สำเร็จ: {close_error}")
-                await asyncio.sleep(delay)
-                backoff = min(backoff * 2, max_backoff)
-                continue
+        print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
+        return
 
-            except RuntimeError as e:
-                message = str(e)
-                if "Session is closed" in message or "Client is closed" in message:
-                    attempt += 1
-                    is_bot_ready = False
-                    delay = min(backoff, max_backoff)
-                    print(f"⚠️ Discord session ถูกปิด — พัก {delay:.0f}s ก่อนสร้าง session ใหม่ (attempt={attempt})")
-                    try:
-                        await bot.close()
-                    except Exception:
-                        pass
-                    await asyncio.sleep(delay)
-                    backoff = min(backoff * 2, max_backoff)
-                    continue
-                raise
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        is_bot_ready = False
+        print(f"⚠️ Discord connection error: {e}", flush=True)
+        print("⛔ HARD STOP: ไม่สร้าง Gateway session ซ้ำอัตโนมัติจาก startup controller", flush=True)
+        return
 
-            except Exception as e:
-                attempt += 1
-                is_bot_ready = False
-                delay = min(backoff, max_backoff)
-                print(f"❌ Discord startup error: {e}")
-                print(f"⏳ Gateway retry {attempt} in {delay:.0f}s")
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
-                await asyncio.sleep(delay)
-                backoff = min(backoff * 2, max_backoff)
-                continue
+    except RuntimeError as e:
+        is_bot_ready = False
+        message = str(e)
+        if "Session is closed" in message or "Client is closed" in message:
+            print(
+                "⚠️ Discord session ถูกปิดระหว่าง startup — HARD STOP "
+                "เพื่อไม่สร้าง IDENTIFY ซ้ำ",
+                flush=True,
+            )
+            return
+        raise
 
-            else:
-                # Reaching READY is handled by on_ready; keep startup backoff conservative.
-                backoff = 30.0
-                attempt = 0
+    except Exception as e:
+        is_bot_ready = False
+        print(f"❌ Discord startup error: {e}", flush=True)
+        print("⛔ HARD STOP: ตรวจสาเหตุก่อน restart/deploy ใหม่", flush=True)
+        return
     finally:
         run_bot_with_backoff._active = False
 
