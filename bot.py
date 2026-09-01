@@ -2228,6 +2228,12 @@ vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
 last_bf_notified_hour = -1
 last_bf_text_notified_hour = -1
 last_bf_voice_success_hour = -1
+# Prevent repeated BF text API calls while Discord is rate-limiting.
+bf_text_retry_after_ts = {}
+
+# Serialize manual /notice commands to avoid bursty Discord API traffic.
+NOTICE_COMMAND_LOCK = asyncio.Lock()
+NOTICE_LAST_RUN_TS = 0.0
 last_lib_notified_key = ""
 
 cached_live_message = None
@@ -3345,6 +3351,52 @@ async def on_ready():
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
 # ==========================================
+async def _get_retry_after_seconds(exc, default=30.0):
+    """Best-effort extraction of Discord rate-limit retry delay."""
+    for attr in ("retry_after",):
+        try:
+            value = float(getattr(exc, attr))
+            if value >= 0:
+                return min(max(value, 1.0), 900.0)
+        except Exception:
+            pass
+    try:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers:
+            for key in ("Retry-After", "retry-after"):
+                raw = headers.get(key)
+                if raw is not None:
+                    value = float(raw)
+                    return min(max(value, 1.0), 900.0)
+        data = getattr(exc, "response", None)
+        payload = getattr(data, "data", None)
+        if isinstance(payload, dict) and payload.get("retry_after") is not None:
+            value = float(payload["retry_after"])
+            return min(max(value, 1.0), 900.0)
+    except Exception:
+        pass
+    return float(default)
+
+async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=True):
+    """Acknowledge an interaction with very short retries to survive transient 429s."""
+    delays = (0.0, 0.2, 0.45)
+    last_exc = None
+    for delay in delays:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            await interaction.response.defer(ephemeral=ephemeral)
+            return True
+        except discord.HTTPException as exc:
+            last_exc = exc
+            if getattr(exc, "status", None) != 429:
+                raise
+    # The interaction response endpoint is still rate-limited. The caller should
+    # abort rather than continue making more Discord API calls blindly.
+    print(f"❌ Interaction acknowledgement failed after retries: {last_exc}")
+    return False
+
 @tasks.loop(seconds=15)
 async def check_bf_notifications():
     global last_bf_notified_hour, last_bf_text_notified_hour, last_bf_voice_success_hour, bf_notify_enabled
@@ -3371,7 +3423,10 @@ async def check_bf_notifications():
         for guild in bot.guilds:
             # Text notification is one-shot, but Voice is independently retried
             # until at least one configured occupied room succeeds.
-            if last_bf_text_notified_hour != trigger_key:
+            # Text warning is independently rate-limited. A failed API call must not
+            # be retried every 15 seconds because that can worsen a global 429.
+            retry_at = bf_text_retry_after_ts.get(trigger_key, 0.0)
+            if last_bf_text_notified_hour != trigger_key and time.monotonic() >= retry_at:
                 print(f"⏰ BF WARNING TRIGGER | guild={guild.name} | now={now.strftime('%H:%M:%S')} | next={next_bf_time}")
                 mentions = []
                 for role_id in BF_ROLE_IDS:
@@ -3388,11 +3443,23 @@ async def check_bf_notifications():
                         description=f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
                         color=discord.Color.red()
                     )
+                    # Reserve one attempt first. On 429, allow at most one later retry.
+                    bf_text_retry_after_ts[trigger_key] = time.monotonic() + 30.0
                     try:
                         await text_channel.send(content=mention_target or None, embed=embed)
                         last_bf_text_notified_hour = trigger_key
+                        bf_text_retry_after_ts.pop(trigger_key, None)
                         print(f"✅ BF text notification sent | guild={guild.name}")
+                    except discord.HTTPException as exc:
+                        if getattr(exc, "status", None) == 429:
+                            wait_for = await _get_retry_after_seconds(exc, default=30.0)
+                            bf_text_retry_after_ts[trigger_key] = time.monotonic() + min(wait_for, 120.0)
+                            print(f"⚠️ BF text rate-limited | guild={guild.name} | retry in ~{wait_for:.1f}s")
+                        else:
+                            bf_text_retry_after_ts[trigger_key] = time.monotonic() + 60.0
+                            print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {guild.name}: {exc}")
                     except Exception as exc:
+                        bf_text_retry_after_ts[trigger_key] = time.monotonic() + 60.0
                         print(f"❌ ส่งข้อความเตือน BF ไม่สำเร็จ: {guild.name}: {exc}")
 
             spoken_text_th = "Battlefield กำลังจะเริ่มในอีก 3 นาทีค่ะ"
@@ -3977,6 +4044,10 @@ async def send_quick_panel(interaction: discord.Interaction):
     if tts_text_th and interaction.guild:
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
+# 🧩 Patch: V14_429_BF_NOTICE_STABLE
+NOTICE_BF_PATCH_VERSION = "V14_429_BF_NOTICE_STABLE"
+print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
+
 # ==========================================
 # 🔊 9. Voice & Notify Commands
 # ==========================================
@@ -4220,7 +4291,25 @@ async def disconnect_voice(interaction: discord.Interaction):
 @app_commands.describe(message="ข้อความที่ต้องการให้บอทประกาศ")
 @has_allowed_role()
 async def notice_command(interaction: discord.Interaction, message: str):
-    await interaction.response.defer(ephemeral=True)
+    global NOTICE_LAST_RUN_TS
+    # Prevent accidental double-clicks from creating a burst of API calls.
+    if NOTICE_COMMAND_LOCK.locked():
+        try:
+            await interaction.response.send_message("⏳ /notice กำลังทำงานอยู่ กรุณารอสักครู่", ephemeral=True)
+        except discord.HTTPException as exc:
+            print(f"⚠️ /notice busy response failed: {exc}")
+        return
+    if time.monotonic() - NOTICE_LAST_RUN_TS < 2.0:
+        try:
+            await interaction.response.send_message("⏳ /notice เพิ่งถูกเรียกไป กรุณารอสักครู่", ephemeral=True)
+        except discord.HTTPException as exc:
+            print(f"⚠️ /notice cooldown response failed: {exc}")
+        return
+    async with NOTICE_COMMAND_LOCK:
+        NOTICE_LAST_RUN_TS = time.monotonic()
+        if not await _safe_interaction_ack(interaction, ephemeral=True):
+            print("❌ /notice aborted: Discord interaction acknowledgement was rate-limited")
+            return
     if not message.strip():
         await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
         return
@@ -4237,11 +4326,12 @@ async def notice_command(interaction: discord.Interaction, message: str):
         return
 
     names = ", ".join(f"**{vc.name}**" for vc in occupied)
-    await interaction.followup.send(
-        f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\n"
-        "บอทจะเข้า → พูด → ออกทีละห้อง",
-        ephemeral=True
-    )
+    try:
+        await interaction.edit_original_response(
+            content=f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\nบอทจะเข้า → พูด → ออกทีละห้อง"
+        )
+    except discord.HTTPException as exc:
+        print(f"⚠️ /notice progress update failed: {exc}")
 
     results = []
     for vc in occupied:
@@ -4262,16 +4352,17 @@ async def notice_command(interaction: discord.Interaction, message: str):
     print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
     failed = [name for name, ok in results if not ok]
     if failed:
-        await interaction.followup.send(
-            f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n" +
-            f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}",
-            ephemeral=True
-        )
+        try:
+            await interaction.edit_original_response(
+                content=f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}"
+            )
+        except discord.HTTPException as exc:
+            print(f"⚠️ /notice final update failed: {exc}")
     else:
-        await interaction.followup.send(
-            f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง",
-            ephemeral=True
-        )
+        try:
+            await interaction.edit_original_response(content=f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง")
+        except discord.HTTPException as exc:
+            print(f"⚠️ /notice final update failed: {exc}")
 
 # ==========================================
 # ⚔️ 10. Boss Slash Commands
