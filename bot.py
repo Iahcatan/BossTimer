@@ -2321,6 +2321,22 @@ def _clear_discord_rest_backoff_after_success():
     discord_rest_backoff_seconds = 60.0
 
 
+discord_rest_last_skip_logs = {}
+
+
+def _log_rest_skip(context: str, remaining: float):
+    """Log REST suppression at most once per context per 60 seconds."""
+    now_mono = time.monotonic()
+    last = float(discord_rest_last_skip_logs.get(context, 0.0))
+    if now_mono - last >= 60.0:
+        discord_rest_last_skip_logs[context] = now_mono
+        print(
+            f"⏭️ Discord REST skipped during global cooldown | context={context} | "
+            f"remaining={remaining:.1f}s",
+            flush=True,
+        )
+
+
 async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown: bool = False):
     """Run a Discord REST call through one process-wide guard.
 
@@ -2332,11 +2348,7 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
     remaining = _discord_rest_rate_limit_remaining()
     if remaining > 0:
         if not wait_for_cooldown:
-            print(
-                f"⏭️ Discord REST skipped during global cooldown | context={context} | "
-                f"remaining={remaining:.1f}s",
-                flush=True,
-            )
+            _log_rest_skip(context, remaining)
             return None
         # Only command code that explicitly asks to wait may sleep here.
         await asyncio.sleep(remaining)
@@ -3631,24 +3643,23 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
     except Exception:
         pass
 
-    # If the process already knows Discord REST is globally blocked, do not send
-    # another request to the same blocked endpoint.  This avoids contributing
-    # unnecessary traffic to an active restriction.  The Discord client may still
-    # display "The application did not respond" because no interaction callback
-    # can be accepted while Discord rejects the callback endpoint.
+    # Interaction ACK is a critical, time-sensitive Discord callback.  It is NOT
+    # suppressed by the non-essential REST circuit breaker: skipping it merely
+    # guarantees the Discord client will show "The application did not respond".
+    # We still allow only bounded, immediate attempts and record any 429 in the
+    # shared REST cooldown so every *other* REST path backs off.
     preexisting_block = _discord_rest_rate_limit_remaining()
     if preexisting_block > 0:
         print(
-            f"⚠️ Interaction ACK skipped: global Discord REST cooldown active "
-            f"({preexisting_block:.1f}s remaining)",
+            f"⚠️ Interaction ACK priority lane: global REST cooldown already active "
+            f"({preexisting_block:.1f}s), attempting bounded ACK anyway",
             flush=True,
         )
-        return False
 
     started = time.monotonic()
     # Keep total acknowledgement attempts below the Discord interaction response deadline.
-    max_window = 2.4
-    attempt_delays = (0.0, 0.15, 0.35, 0.60, 0.90)
+    max_window = 1.8
+    attempt_delays = (0.0, 0.10, 0.20)
     last_exc = None
 
     for base_delay in attempt_delays:
@@ -4373,7 +4384,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V23_GLOBAL_REST_GUARD_ACK_SAFE"
+NOTICE_BF_PATCH_VERSION = "V24_GLOBAL_REST_GUARD_CRITICAL_ACK"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
