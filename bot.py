@@ -2057,6 +2057,7 @@ def record_boss_api():
             'confirmationRequestId': request_id,
             'confirmationRequestedAt': requested_at,
             'confirmationStatus': 'pending',
+            'confirmationSource': 'dashboard',
             'notifiedNotice': already_passed,
             'notifiedSpawn': already_passed,
             'voiceNoticeSent': already_passed,
@@ -2084,23 +2085,30 @@ def record_boss_api():
                 'recordedByUserId': uid,
                 'confirmationRequestId': request_id,
                 'confirmationRequestedAt': requested_at,
-                'confirmationStatus': 'pending'
+                'confirmationStatus': 'pending',
+                'confirmationSource': 'dashboard'
             }
 
         # Queue confirmation immediately from the Bot process. The Firebase listener
         # remains as a safety net but this removes timing dependence on the listener.
-        confirmation_success = False
+        confirmation_result = False
+        confirmation_pending = False
         try:
-            # This endpoint is intentionally synchronous for the confirmation step:
-            # the Dashboard should not report a successful save until the Bot has
-            # actually attempted the configured Voice confirmation.
-            confirmation_success = queue_voice_confirmation(
+            confirmation_result = queue_voice_confirmation(
                 canonical_name, dict(boss_schedule[canonical_name]), source='dashboard', wait=True, timeout=180
             )
+            # None means the save is valid but Discord is not READY yet. Keep the
+            # request pending and let on_ready drain it instead of showing a false failure.
+            if confirmation_result is None:
+                confirmation_pending = True
+                confirmation_result = True  # UI compatibility: save accepted, Voice pending.
         except Exception as exc:
             print(f"⚠️ Dashboard confirmation queue failed: {exc}")
 
-        print(f"📣 Dashboard voice confirmation result | boss={canonical_name} | success={confirmation_success}")
+        print(
+            f"📣 Dashboard voice confirmation result | boss={canonical_name} "
+            f"| success={bool(confirmation_result)} | pending={confirmation_pending}"
+        )
 
         return _api_json({
             'success': True,
@@ -2112,7 +2120,9 @@ def record_boss_api():
             'spawnTimeMs': spawn_ms,
             'spawnTime': next_spawn.isoformat(),
             'confirmationRequestId': request_id,
-            'confirmationSuccess': bool(confirmation_success),
+            'confirmationSuccess': bool(confirmation_result),
+            'confirmationPending': confirmation_pending,
+            'confirmationStatus': 'pending' if confirmation_pending else ('sent' if confirmation_result else 'failed'),
             'alreadyPassed': already_passed
         })
     except Exception as exc:
@@ -2403,6 +2413,9 @@ live_message_config = {}
 # One-shot Voice confirmation for newly recorded boss times.
 _confirmation_seen_ids = set()
 _confirmation_claim_lock = asyncio.Lock()
+# Dashboard confirmations submitted while Discord is not READY are held here and
+# drained automatically after on_ready completes.
+_pending_voice_confirmations = {}
 
 # ==========================================
 # 📝 3. ระบบ Audit Log
@@ -2569,8 +2582,9 @@ _confirmation_queue_ids = set()
 
 def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown', wait: bool = False, timeout: float = 180.0):
     """Queue one voice confirmation on the Discord event loop.
-    When wait=True, block the calling non-async thread until the Discord coroutine
-    finishes and return the actual Voice success result."""
+    When the bot is not READY yet, retain the request as pending instead of
+    falsely reporting Voice failure. The pending request is drained after on_ready.
+    """
     request_id = str(data.get("confirmationRequestId") or "").strip()
     if not request_id:
         print(f"⚠️ Voice confirmation skipped: missing requestId | boss={boss_name} | source={source}")
@@ -2581,10 +2595,16 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
         return False
     if request_id in _confirmation_queue_ids:
         print(f"⏭️ Voice confirmation already queued: boss={boss_name} | request={request_id}")
-        return False
-    if bot_event_loop is None or bot_event_loop.is_closed():
-        print(f"⚠️ Voice confirmation queue unavailable: bot event loop not ready | boss={boss_name}")
-        return False
+        return True if not wait else False
+
+    if bot_event_loop is None or bot_event_loop.is_closed() or not is_bot_ready:
+        _pending_voice_confirmations[request_id] = (boss_name, dict(data), source)
+        print(
+            f"⏳ Voice confirmation pending: bot event loop not READY | boss={boss_name} "
+            f"| source={source} | request={request_id}"
+        )
+        return None
+
     _confirmation_queue_ids.add(request_id)
     print(f"📢 Queue voice confirmation | source={source} | boss={boss_name} | request={request_id} | wait={wait}")
     future = asyncio.run_coroutine_threadsafe(_voice_confirm_boss_recording(boss_name, dict(data)), bot_event_loop)
@@ -2596,7 +2616,13 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
         return bool(result)
     except Exception as exc:
         print(f"❌ Voice confirmation wait failed | boss={boss_name} | source={source} | {exc}")
+        try:
+            future.cancel()
+        except Exception:
+            pass
         return False
+    finally:
+        _confirmation_queue_ids.discard(request_id)
 
 async def _voice_confirm_boss_recording(boss_name: str, data: dict):
     """Speak one-shot confirmation for a newly recorded boss time in occupied Voice rooms only."""
@@ -2604,11 +2630,11 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
     requested_at = data.get("confirmationRequestedAt")
     status = str(data.get("confirmationStatus") or "").strip()
     if not request_id or status not in ("", "pending"):
-        return
+        return False
     try:
         requested_ms = float(requested_at) if isinstance(requested_at, (int, float)) else datetime.fromisoformat(str(requested_at).replace("Z", "+00:00")).timestamp() * 1000
-        if (time.time() * 1000 - requested_ms) > 5 * 60 * 1000:
-            return
+        if (time.time() * 1000 - requested_ms) > 30 * 60 * 1000:
+            return False
     except Exception:
         pass
 
@@ -2658,6 +2684,8 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
             )
         except Exception as exc:
             print(f"⚠️ Could not persist confirmation status for {boss_name}: {exc}")
+        _confirmation_queue_ids.discard(request_id)
+    return bool(success)
 
 def start_firebase_listener(loop):
     """Safe listener: always read the boss_schedule root, never trust event.data as the full tree."""
@@ -3314,7 +3342,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 @bot.event
 async def on_ready():
-    global is_bot_ready
+    global is_bot_ready, bot_event_loop
+    bot_event_loop = asyncio.get_running_loop()
     if is_bot_ready:
         print("🔄 บอท Reconnect สำเร็จ (ข้ามการโหลดข้อมูลซ้ำ)")
         return
@@ -3342,11 +3371,20 @@ async def on_ready():
     if not update_live_embed.is_running(): update_live_embed.start()
     if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
 
-    global bot_event_loop
-    bot_event_loop = asyncio.get_running_loop()
     is_bot_ready = True
     loop = bot_event_loop
     threading.Thread(target=start_firebase_listener, args=(loop,), daemon=True).start()
+
+    # Drain Dashboard confirmations that arrived while Gateway was unavailable.
+    if _pending_voice_confirmations:
+        pending = list(_pending_voice_confirmations.values())
+        _pending_voice_confirmations.clear()
+        print(f"🔁 Draining pending Voice confirmations after READY: {len(pending)}")
+        for boss_name, item, source in pending:
+            req_id = str(item.get("confirmationRequestId") or "").strip()
+            if req_id:
+                _confirmation_queue_ids.add(req_id)
+            asyncio.create_task(_voice_confirm_boss_recording(boss_name, dict(item)))
 
 # ==========================================
 # ⏰ 7. Tasks เช็กเวลาเตือน + BF + Library Boss + Live Embed + Auto-Disconnect
@@ -4045,7 +4083,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V18_GATEWAY_429_PROCESS_HOLD"
+NOTICE_BF_PATCH_VERSION = "V19_GATEWAY_RATE_LIMIT_AND_DASHBOARD_CONFIRM"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
@@ -4774,9 +4812,10 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
 # 🚀 11. Run Bot Entry Point
 # ==========================================
 async def _probe_gateway_session_start_limit(token: str):
-    """Query Discord's Get Gateway Bot endpoint before a new IDENTIFY.
-    This is a REST preflight used only by the Gateway startup controller.
-    It helps distinguish temporary HTTP 429 from exhausted session-start quota.
+    """Query Discord Gateway session-start metadata and preserve 429 details.
+
+    Discord recommends honoring Retry-After and rate-limit headers rather than hard-coding
+    retry timings. This preflight never performs IDENTIFY when the endpoint itself is limited.
     """
     url = "https://discord.com/api/v10/gateway/bot"
     headers = {"Authorization": f"Bot {token}", "User-Agent": "SKYNET/1.0"}
@@ -4785,9 +4824,33 @@ async def _probe_gateway_session_start_limit(token: str):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers) as resp:
                 data = await resp.json(content_type=None)
+                response_headers = {str(k): str(v) for k, v in resp.headers.items()}
+                if resp.status == 429:
+                    retry_after = 0.0
+                    raw_retry = response_headers.get("Retry-After") or response_headers.get("retry-after")
+                    if raw_retry is None and isinstance(data, dict):
+                        raw_retry = data.get("retry_after")
+                    try:
+                        retry_after = max(0.0, float(raw_retry or 0))
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                    scope = response_headers.get("X-RateLimit-Scope", "")
+                    is_global = str(response_headers.get("X-RateLimit-Global", "")).lower() == "true"
+                    print(
+                        f"⚠️ Gateway preflight HTTP 429 | retry_after={retry_after:.1f}s "
+                        f"| global={is_global} | scope={scope or '-'} | data={data}",
+                        flush=True,
+                    )
+                    return {
+                        "status": 429,
+                        "retry_after": retry_after,
+                        "global": is_global,
+                        "scope": scope,
+                    }
                 if resp.status != 200:
                     print(f"⚠️ Gateway preflight HTTP {resp.status}: {data}", flush=True)
-                    return None
+                    return {"status": resp.status, "retry_after": 0.0, "global": False, "scope": ""}
+
                 limit = data.get("session_start_limit") or {}
                 remaining = int(limit.get("remaining", -1))
                 total = int(limit.get("total", -1))
@@ -4799,6 +4862,7 @@ async def _probe_gateway_session_start_limit(token: str):
                     flush=True,
                 )
                 return {
+                    "status": 200,
                     "remaining": remaining,
                     "total": total,
                     "reset_after_ms": reset_after_ms,
@@ -4806,120 +4870,115 @@ async def _probe_gateway_session_start_limit(token: str):
                 }
     except Exception as e:
         print(f"⚠️ Gateway preflight failed: {e}", flush=True)
-        return None
+        return {"status": None, "error": str(e), "retry_after": 0.0}
 
 
-async def _gateway_hard_stop_hold(reason: str, hold_seconds: float = 900.0):
-    """Keep the Render process/web server alive while refusing Gateway IDENTIFY retries.
-
-    This is intentionally an indefinite process hold for the current event loop (implemented
-    as repeated 60s sleeps so shutdown signals remain responsive). It prevents start.py from
-    receiving control back and immediately creating another Gateway session while Discord is
-    rate-limiting the application.
-    """
-    global is_bot_ready
-    is_bot_ready = False
-    hold_seconds = max(60.0, float(hold_seconds or 900.0))
-    print(f"🛑 GATEWAY HARD STOP: {reason}", flush=True)
+async def _gateway_rate_limit_sleep(reason: str, seconds: float, attempt: int):
+    delay = min(max(float(seconds or 0), 15.0), 3600.0)
     print(
-        f"⏸️ คง Web Server/Render process ไว้ แต่ไม่สร้าง Gateway session ใหม่เป็นเวลา {hold_seconds:.0f}s",
+        f"⏸️ Gateway rate-limit cooldown | {reason} | sleep={delay:.0f}s | attempt={attempt}",
         flush=True,
     )
-    deadline = time.monotonic() + hold_seconds
+    deadline = time.monotonic() + delay
     while time.monotonic() < deadline:
         await asyncio.sleep(min(60.0, max(1.0, deadline - time.monotonic())))
-    print("🔓 Gateway hard-stop window จบแล้ว — ยังไม่ reconnect อัตโนมัติ; รอ operator restart/deploy", flush=True)
-    while True:
-        await asyncio.sleep(3600)
-
 
 
 async def run_bot_with_backoff(token: str):
-    """Own exactly one Discord Gateway startup controller.
+    """Single Gateway controller with rate-limit-aware recovery.
 
-    - Preflight the Gateway endpoint once before IDENTIFY.
-    - Any Gateway/HTTP 429 is a HARD STOP.
-    - Never call bot.close() as part of the 429 path.
-    - Never return control to a caller that may immediately start another session.
-    - Keep the Render process/web server alive while the Discord client is intentionally stopped.
-    - Normal reconnect/resume remains inside discord.py via reconnect=True.
+    - Exactly one controller in this process.
+    - Never IDENTIFY while Gateway preflight is rate-limited.
+    - Honor Retry-After when Discord provides it.
+    - Use bounded exponential cooldown when Discord omits a usable retry delay.
+    - Keep Render's Web Server alive while Discord is unavailable.
+    - Once the cooldown passes, re-check the Gateway and recover automatically.
     """
     global is_bot_ready
     if getattr(run_bot_with_backoff, "_active", False):
         print("⚠️ Discord runner already active — skip duplicate session start", flush=True)
-        await _gateway_hard_stop_hold("duplicate Gateway controller detected")
         return
 
     run_bot_with_backoff._active = True
+    failure_attempt = 0
     try:
-        print("🔎 ตรวจ Discord Gateway session-start limit ก่อนเชื่อมต่อ...", flush=True)
-        limit_info = await _probe_gateway_session_start_limit(token)
+        while True:
+            limit_info = await _probe_gateway_session_start_limit(token)
 
-        if limit_info is None:
-            # The preflight itself may be globally rate-limited. Do not immediately IDENTIFY;
-            # that would turn one REST 429 into a Gateway IDENTIFY storm.
-            await _gateway_hard_stop_hold(
-                "Gateway preflight ถูกบล็อก/429 — งด IDENTIFY เพื่อป้องกัน rate-limit storm",
-                900,
-            )
-            return
+            if limit_info.get("status") == 429:
+                failure_attempt += 1
+                retry_after = float(limit_info.get("retry_after") or 0)
+                # If Discord did not provide a usable Retry-After, start conservatively at
+                # 15 minutes and back off up to one hour. This avoids a reconnect storm.
+                fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
+                delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
+                await _gateway_rate_limit_sleep("preflight HTTP 429", delay, failure_attempt)
+                continue
 
-        if limit_info.get("remaining", -1) == 0:
-            reset_after = max(0, int(limit_info.get("reset_after_ms", 0)))
-            hold_seconds = max(900.0, reset_after / 1000.0)
-            await _gateway_hard_stop_hold(
-                f"Discord IDENTIFY quota exhausted | remaining=0 | reset_after={reset_after}ms",
-                hold_seconds,
-            )
-            return
+            if limit_info.get("status") != 200:
+                failure_attempt += 1
+                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
+                await _gateway_rate_limit_sleep("preflight unavailable", delay, failure_attempt)
+                continue
 
-        print("🔌 กำลังเชื่อมต่อ Discord Gateway...", flush=True)
-        is_bot_ready = False
-        await bot.start(token, reconnect=True)
-        # If discord.py returns normally, do not spin another session from our controller.
-        print("🛑 Discord bot stopped normally — no automatic second session", flush=True)
-        await _gateway_hard_stop_hold("Discord client stopped normally; operator restart required", 900)
+            remaining = int(limit_info.get("remaining", -1))
+            if remaining == 0:
+                failure_attempt += 1
+                reset_after = max(0.0, float(limit_info.get("reset_after_ms", 0)) / 1000.0)
+                delay = max(60.0, reset_after + 2.0)
+                await _gateway_rate_limit_sleep("IDENTIFY quota exhausted", delay, failure_attempt)
+                continue
 
-    except discord.HTTPException as e:
-        is_bot_ready = False
-        status = getattr(e, "status", None)
-        retry_after = 0.0
-        try:
-            retry_after = float(getattr(e, "retry_after", 0) or 0)
-        except (TypeError, ValueError):
-            retry_after = 0.0
+            failure_attempt = 0
+            print("🔌 กำลังเชื่อมต่อ Discord Gateway...", flush=True)
+            is_bot_ready = False
+            try:
+                await bot.start(token, reconnect=True)
+            except discord.HTTPException as e:
+                is_bot_ready = False
+                status = getattr(e, "status", None)
+                if status == 429:
+                    failure_attempt += 1
+                    retry_after = 0.0
+                    try:
+                        retry_after = float(getattr(e, "retry_after", 0) or 0)
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                    fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
+                    delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
+                    print(
+                        f"🛑 Discord Gateway 429 | retry_after={retry_after:.1f}s | next_retry={delay:.0f}s",
+                        flush=True,
+                    )
+                    await _gateway_rate_limit_sleep("Gateway start 429", delay, failure_attempt)
+                    continue
+                print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
+                failure_attempt += 1
+                await _gateway_rate_limit_sleep("Gateway HTTP error", min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0), failure_attempt)
+                continue
+            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                is_bot_ready = False
+                failure_attempt += 1
+                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
+                print(f"⚠️ Discord connection error: {e}", flush=True)
+                await _gateway_rate_limit_sleep("Gateway connection error", delay, failure_attempt)
+                continue
+            except RuntimeError as e:
+                is_bot_ready = False
+                if "Session is closed" in str(e) or "Client is closed" in str(e):
+                    failure_attempt += 1
+                    delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
+                    print(f"⚠️ Discord session/client closed: {e}", flush=True)
+                    await _gateway_rate_limit_sleep("closed Gateway session", delay, failure_attempt)
+                    continue
+                raise
 
-        if status == 429:
-            hold_seconds = max(900.0, retry_after)
-            await _gateway_hard_stop_hold(
-                f"Discord Gateway 429 | retry_after={retry_after:.1f}s",
-                hold_seconds,
-            )
-            return
-
-        print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
-        await _gateway_hard_stop_hold(f"Discord HTTP error status={status}; operator restart required", 900)
-        return
-
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        is_bot_ready = False
-        await _gateway_hard_stop_hold(f"Discord connection error: {e}", 900)
-        return
-
-    except RuntimeError as e:
-        is_bot_ready = False
-        message = str(e)
-        if "Session is closed" in message or "Client is closed" in message:
-            await _gateway_hard_stop_hold("Discord session/client closed during startup", 900)
-            return
-        raise
-
-    except Exception as e:
-        is_bot_ready = False
-        print(f"❌ Discord startup error: {e}", flush=True)
-        traceback.print_exc()
-        await _gateway_hard_stop_hold("unexpected Discord startup error; operator restart required", 900)
-        return
+            # start() returning means the current Gateway session ended. Do not create a
+            # second session immediately; apply a small cooldown and re-check preflight.
+            is_bot_ready = False
+            failure_attempt = 0
+            print("⚠️ Discord Gateway session ended — re-checking Gateway after 15s", flush=True)
+            await asyncio.sleep(15)
     finally:
         run_bot_with_backoff._active = False
 
