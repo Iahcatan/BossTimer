@@ -3631,6 +3631,20 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
     except Exception:
         pass
 
+    # If the process already knows Discord REST is globally blocked, do not send
+    # another request to the same blocked endpoint.  This avoids contributing
+    # unnecessary traffic to an active restriction.  The Discord client may still
+    # display "The application did not respond" because no interaction callback
+    # can be accepted while Discord rejects the callback endpoint.
+    preexisting_block = _discord_rest_rate_limit_remaining()
+    if preexisting_block > 0:
+        print(
+            f"⚠️ Interaction ACK skipped: global Discord REST cooldown active "
+            f"({preexisting_block:.1f}s remaining)",
+            flush=True,
+        )
+        return False
+
     started = time.monotonic()
     # Keep total acknowledgement attempts below the Discord interaction response deadline.
     max_window = 2.4
@@ -4359,7 +4373,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V22_GLOBAL_REST_GUARD"
+NOTICE_BF_PATCH_VERSION = "V23_GLOBAL_REST_GUARD_ACK_SAFE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
