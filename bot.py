@@ -4384,7 +4384,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V24_GLOBAL_REST_GUARD_CRITICAL_ACK"
+NOTICE_BF_PATCH_VERSION = "V25_GATEWAY_PREFLIGHT_DISABLED_REST_STABLE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
@@ -5084,6 +5084,9 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
 # ==========================================
 # 🚀 11. Run Bot Entry Point
 # ==========================================
+GATEWAY_PREFLIGHT_ENABLED = os.environ.get("ENABLE_GATEWAY_PREFLIGHT", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def _probe_gateway_session_start_limit(token: str):
     """Query Discord Gateway session-start metadata and preserve 429 details.
 
@@ -5168,11 +5171,12 @@ async def run_bot_with_backoff(token: str):
     """Single Gateway controller with rate-limit-aware recovery.
 
     - Exactly one controller in this process.
-    - Never IDENTIFY while Gateway preflight is rate-limited.
+    - By default, avoid an extra authenticated Gateway preflight REST request on startup.
+    - If preflight is explicitly enabled, never IDENTIFY while it is rate-limited.
     - Honor Retry-After when Discord provides it.
     - Use bounded exponential cooldown when Discord omits a usable retry delay.
     - Keep Render's Web Server alive while Discord is unavailable.
-    - Once the cooldown passes, re-check the Gateway and recover automatically.
+    - Recover through the discord.py Gateway controller; optional preflight is diagnostic only.
     """
     global is_bot_ready
     if getattr(run_bot_with_backoff, "_active", False):
@@ -5183,31 +5187,35 @@ async def run_bot_with_backoff(token: str):
     failure_attempt = 0
     try:
         while True:
-            limit_info = await _probe_gateway_session_start_limit(token)
+            if GATEWAY_PREFLIGHT_ENABLED:
+                limit_info = await _probe_gateway_session_start_limit(token)
 
-            if limit_info.get("status") == 429:
-                failure_attempt += 1
-                retry_after = float(limit_info.get("retry_after") or 0)
-                # If Discord did not provide a usable Retry-After, start conservatively at
-                # 15 minutes and back off up to one hour. This avoids a reconnect storm.
-                fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
-                delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
-                await _gateway_rate_limit_sleep("preflight HTTP 429", delay, failure_attempt)
-                continue
+                if limit_info.get("status") == 429:
+                    failure_attempt += 1
+                    retry_after = float(limit_info.get("retry_after") or 0)
+                    fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
+                    delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
+                    await _gateway_rate_limit_sleep("preflight HTTP 429", delay, failure_attempt)
+                    continue
 
-            if limit_info.get("status") != 200:
-                failure_attempt += 1
-                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
-                await _gateway_rate_limit_sleep("preflight unavailable", delay, failure_attempt)
-                continue
+                if limit_info.get("status") != 200:
+                    failure_attempt += 1
+                    delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
+                    await _gateway_rate_limit_sleep("preflight unavailable", delay, failure_attempt)
+                    continue
 
-            remaining = int(limit_info.get("remaining", -1))
-            if remaining == 0:
-                failure_attempt += 1
-                reset_after = max(0.0, float(limit_info.get("reset_after_ms", 0)) / 1000.0)
-                delay = max(60.0, reset_after + 2.0)
-                await _gateway_rate_limit_sleep("IDENTIFY quota exhausted", delay, failure_attempt)
-                continue
+                remaining = int(limit_info.get("remaining", -1))
+                if remaining == 0:
+                    failure_attempt += 1
+                    reset_after = max(0.0, float(limit_info.get("reset_after_ms", 0)) / 1000.0)
+                    delay = max(60.0, reset_after + 2.0)
+                    await _gateway_rate_limit_sleep("IDENTIFY quota exhausted", delay, failure_attempt)
+                    continue
+            else:
+                print(
+                    "ℹ️ Gateway preflight disabled (default) — starting discord.py Gateway directly",
+                    flush=True,
+                )
 
             failure_attempt = 0
             print("🔌 กำลังเชื่อมต่อ Discord Gateway...", flush=True)
