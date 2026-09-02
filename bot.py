@@ -3417,12 +3417,31 @@ async def _get_retry_after_seconds(exc, default=30.0):
     return float(default)
 
 async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=True):
-    """Acknowledge an interaction with very short retries to survive transient 429s."""
-    delays = (0.0, 0.2, 0.45)
+    """Acknowledge a slash interaction without turning a transient 429 into a command crash.
+
+    Discord interactions have a very short initial-response window.  We therefore honor
+    Retry-After only when it still fits inside that window; otherwise we stop retrying
+    instead of sleeping for tens of seconds and guaranteeing "The application did not respond".
+    """
+    # A response can only be acknowledged once.  Keep this helper idempotent for callers.
+    try:
+        if interaction.response.is_done():
+            return True
+    except Exception:
+        pass
+
+    started = time.monotonic()
+    # Keep total acknowledgement attempts below the Discord interaction response deadline.
+    max_window = 2.4
+    attempt_delays = (0.0, 0.15, 0.35, 0.60, 0.90)
     last_exc = None
-    for delay in delays:
-        if delay:
-            await asyncio.sleep(delay)
+
+    for base_delay in attempt_delays:
+        elapsed = time.monotonic() - started
+        if elapsed >= max_window:
+            break
+        if base_delay:
+            await asyncio.sleep(min(base_delay, max(0.0, max_window - elapsed)))
         try:
             await interaction.response.defer(ephemeral=ephemeral)
             return True
@@ -3430,9 +3449,32 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
             last_exc = exc
             if getattr(exc, "status", None) != 429:
                 raise
-    # The interaction response endpoint is still rate-limited. The caller should
-    # abort rather than continue making more Discord API calls blindly.
-    print(f"❌ Interaction acknowledgement failed after retries: {last_exc}")
+
+            retry_after = 0.0
+            try:
+                retry_after = float(getattr(exc, "retry_after", 0) or 0)
+            except (TypeError, ValueError):
+                retry_after = 0.0
+            if retry_after <= 0:
+                try:
+                    response = getattr(exc, "response", None)
+                    headers = getattr(response, "headers", None) or {}
+                    retry_after = float(headers.get("Retry-After") or headers.get("retry-after") or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+
+            remaining = max_window - (time.monotonic() - started)
+            if retry_after > 0:
+                if retry_after >= remaining:
+                    print(
+                        f"⚠️ Interaction ACK 429 retry_after={retry_after:.2f}s exceeds response window; "
+                        "stop retrying and continue command work safely",
+                        flush=True,
+                    )
+                    break
+                await asyncio.sleep(max(0.01, retry_after + 0.05))
+
+    print(f"❌ Interaction acknowledgement failed after bounded retries: {last_exc}", flush=True)
     return False
 
 @tasks.loop(seconds=15)
@@ -4083,7 +4125,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V19_GATEWAY_RATE_LIMIT_AND_DASHBOARD_CONFIRM"
+NOTICE_BF_PATCH_VERSION = "V20_NOTICE_ACK_429_BOUNDED"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
@@ -4330,141 +4372,110 @@ async def disconnect_voice(interaction: discord.Interaction):
 @has_allowed_role()
 async def notice_command(interaction: discord.Interaction, message: str):
     global NOTICE_LAST_RUN_TS
-    # Prevent accidental double-clicks from creating a burst of API calls.
+    # Serialize /notice calls so one operator cannot create a REST/Voice burst.
     if NOTICE_COMMAND_LOCK.locked():
         try:
             await interaction.response.send_message("⏳ /notice กำลังทำงานอยู่ กรุณารอสักครู่", ephemeral=True)
         except discord.HTTPException as exc:
-            print(f"⚠️ /notice busy response failed: {exc}")
+            print(f"⚠️ /notice busy response failed: {exc}", flush=True)
         return
+
     if time.monotonic() - NOTICE_LAST_RUN_TS < 2.0:
         try:
             await interaction.response.send_message("⏳ /notice เพิ่งถูกเรียกไป กรุณารอสักครู่", ephemeral=True)
         except discord.HTTPException as exc:
-            print(f"⚠️ /notice cooldown response failed: {exc}")
+            print(f"⚠️ /notice cooldown response failed: {exc}", flush=True)
         return
+
     async with NOTICE_COMMAND_LOCK:
         NOTICE_LAST_RUN_TS = time.monotonic()
-        if not await _safe_interaction_ack(interaction, ephemeral=True):
-            print("❌ /notice aborted: Discord interaction acknowledgement was rate-limited")
+        ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
+        if not ack_ok:
+            # Do NOT discard the actual work merely because the initial interaction callback
+            # hit a transient/global 429.  Run the notice anyway; if Discord REST is available
+            # the Voice path can still complete.  The command UI may still show a timeout when
+            # Discord blocks the acknowledgement endpoint itself, which cannot be fixed client-side.
+            print("⚠️ /notice ACK unavailable due to Discord 429; continuing Voice notice attempt", flush=True)
+
+        if not message.strip():
+            if ack_ok:
+                try:
+                    await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
+                except discord.HTTPException as exc:
+                    print(f"⚠️ /notice empty-message response failed: {exc}", flush=True)
             return
-    if not message.strip():
-        await interaction.followup.send("❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
-        return
 
-    # Global notice: visit every occupied voice channel in this guild.
-    occupied = []
-    for vc in interaction.guild.voice_channels:
-        humans = [m for m in vc.members if not m.bot]
-        if humans:
-            occupied.append(vc)
+        # Global notice: every occupied Voice channel in the current guild.
+        occupied = []
+        for vc in interaction.guild.voice_channels:
+            humans = [m for m in vc.members if not m.bot]
+            if humans:
+                occupied.append(vc)
 
-    if not occupied:
-        await interaction.followup.send("⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย", ephemeral=True)
-        return
+        if not occupied:
+            if ack_ok:
+                try:
+                    await interaction.followup.send("⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย", ephemeral=True)
+                except discord.HTTPException as exc:
+                    print(f"⚠️ /notice empty-room response failed: {exc}", flush=True)
+            else:
+                print(f"⚠️ /notice no occupied Voice rooms | guild={interaction.guild.name}", flush=True)
+            return
 
-    names = ", ".join(f"**{vc.name}**" for vc in occupied)
-    try:
-        await interaction.edit_original_response(
-            content=f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\nบอทจะเข้า → พูด → ออกทีละห้อง"
-        )
-    except discord.HTTPException as exc:
-        print(f"⚠️ /notice progress update failed: {exc}")
+        names = ", ".join(f"**{vc.name}**" for vc in occupied)
+        if ack_ok:
+            try:
+                await interaction.edit_original_response(
+                    content=f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\nบอทจะเข้า → พูด → ออกทีละห้อง"
+                )
+            except discord.HTTPException as exc:
+                print(f"⚠️ /notice progress update failed: {exc}", flush=True)
 
-    results = []
-    for vc in occupied:
-        try:
-            ok = await asyncio.wait_for(
-                speak_in_guild(
-                    interaction.guild,
-                    text_th=message, text_en=message, text_ko=message,
-                    target_channel=vc
-                ),
-                timeout=180
-            )
-            results.append((vc.name, ok))
-        except Exception as e:
-            print(f"❌ /notice TTS failed in {vc.name}: {e}")
-            results.append((vc.name, False))
-    ok_count = sum(1 for _, ok in results if ok)
-    print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms")
-    failed = [name for name, ok in results if not ok]
-    if failed:
-        try:
-            await interaction.edit_original_response(
-                content=f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}"
-            )
-        except discord.HTTPException as exc:
-            print(f"⚠️ /notice final update failed: {exc}")
-    else:
-        try:
-            await interaction.edit_original_response(content=f"✅ ประกาศเสียงสำเร็จครบ {ok_count}/{len(results)} ห้อง")
-        except discord.HTTPException as exc:
-            print(f"⚠️ /notice final update failed: {exc}")
+        results = []
+        for vc in occupied:
+            try:
+                ok = await asyncio.wait_for(
+                    speak_in_guild(
+                        interaction.guild,
+                        text_th=message,
+                        text_en=message,
+                        text_ko=message,
+                        target_channel=vc,
+                    ),
+                    timeout=180,
+                )
+                results.append((vc.name, bool(ok)))
+            except Exception as exc:
+                print(f"❌ /notice TTS failed in {vc.name}: {exc}", flush=True)
+                results.append((vc.name, False))
 
-# ==========================================
-# ⚔️ 10. Boss Slash Commands
-# ==========================================
-def generate_boss_time_summary():
-    now = datetime.now(TZ_THAI)
-    with schedule_lock: schedule_copy = boss_schedule.copy()
-    if not schedule_copy: return None, "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ", None, None
+        ok_count = sum(1 for _, ok in results if ok)
+        print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms", flush=True)
 
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
-    embed = discord.Embed(title="⌛ สรุปเวลาที่เหลือของบอสทุกตัว (เรียงจากน้อยไปมาก)", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.purple())
-    
-    tts_lines_th = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
-    tts_lines_en = ["Boss time summary from earliest to latest."]
-    tts_lines_ko = ["보스 스폰 시간 요약입니다."]
-
-    display_bosses = sorted_bosses[:20]
-    for boss, data in display_bosses:
-        spawn_time = parse_to_thai_datetime(data["spawn_time"])
-        if not spawn_time: continue
-        time_left_sec = (spawn_time - now).total_seconds()
-        spoken_name = get_boss_pronunciation(boss)
-        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-
-        if time_left_sec <= 0:
-            time_left_str = "เกิดแล้ว!"
-            tts_lines_th.append(f"บอส {spoken_name} เกิดแล้วค่ะ")
-            tts_lines_en.append(f"Boss {boss} has spawned.")
-            tts_lines_ko.append(f"보스 {boss}가 나타났습니다.")
+        if ack_ok:
+            failed = [name for name, ok in results if not ok]
+            try:
+                if failed:
+                    await interaction.edit_original_response(
+                        content=(
+                            f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n"
+                            f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}"
+                        )
+                    )
+                else:
+                    await interaction.edit_original_response(
+                        content=f"✅ /notice ประกาศสำเร็จ {ok_count}/{len(results)} ห้อง"
+                    )
+            except discord.HTTPException as exc:
+                print(f"⚠️ /notice final response update failed: {exc}", flush=True)
         else:
-            m, s = divmod(int(time_left_sec), 60)
-            h, m = divmod(m, 60)
-            parts = []
-            if h > 0: parts.append(f"{h} ชม.")
-            if m > 0 or h > 0: parts.append(f"{m} นาที")
-            parts.append(f"{s} วินาที")
-            time_left_str = f"อีก {' '.join(parts)}"
-
-            if h > 0: 
-                tts_time_th = f"{h} ชั่วโมง {m} นาที"
-                tts_time_en = f"{h} hours and {m} minutes"
-                tts_time_ko = f"{h}시간 {m}분" if m > 0 else f"{h}시간"
-            elif m > 0: 
-                tts_time_th = f"{m} นาที"
-                tts_time_en = f"{m} minutes"
-                tts_time_ko = f"{m}분"
-            else: 
-                tts_time_th = f"{s} วินาที"
-                tts_time_en = f"{s} seconds"
-                tts_time_ko = f"{s}초"
-                
-            tts_lines_th.append(f"บอส {spoken_name} เหลืออีก {tts_time_th}")
-            tts_lines_en.append(f"Boss {boss} in {tts_time_en}.")
-            tts_lines_ko.append(f"보스 {boss}가 {tts_time_ko} 남았습니다.")
-
-        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(บันทึกโดย: {rec_by})*", inline=False)
-
-    if len(sorted_bosses) > 20:
-        embed.add_field(name="📌 หมายเหตุ", value=f"*ยังมีบอสอีก {len(sorted_bosses) - 20} ตัว สามารถดูเพิ่มเติมได้บน Dashboard*", inline=False)
-    
-    tts_text_th = " ".join(tts_lines_th)
-    tts_text_en = " ".join(tts_lines_en)
-    tts_text_ko = " ".join(tts_lines_ko)
-    return embed, tts_text_th, tts_text_en, tts_text_ko
+            # Best-effort text audit only.  This does not fix a Discord interaction callback 429,
+            # but gives Render logs a deterministic completion result.
+            print(
+                f"📣 /notice completed without interaction ACK | success={ok_count}/{len(results)} | "
+                f"guild={interaction.guild.name}",
+                flush=True,
+            )
 
 @bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
 async def boss_time_slash(interaction: discord.Interaction):
