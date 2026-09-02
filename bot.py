@@ -4384,7 +4384,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V25_GATEWAY_PREFLIGHT_DISABLED_REST_STABLE"
+NOTICE_BF_PATCH_VERSION = "V26_GATEWAY_429_SESSION_CLEANUP"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
@@ -5235,30 +5235,57 @@ async def run_bot_with_backoff(token: str):
                     fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
                     delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
                     print(
-                        f"🛑 Discord Gateway 429 | retry_after={retry_after:.1f}s | next_retry={delay:.0f}s",
+                        f"🛑 Discord Gateway/REST startup 429 | retry_after={retry_after:.1f}s | next_retry={delay:.0f}s",
                         flush=True,
                     )
-                    await _gateway_rate_limit_sleep("Gateway start 429", delay, failure_attempt)
+                    # A failed bot.start() can leave discord.py's aiohttp session open.
+                    # Always close it before the retry so repeated 429s do not leak sessions.
+                    try:
+                        await bot.close()
+                        print("🧹 Closed Discord client session after startup 429", flush=True)
+                    except Exception as close_exc:
+                        print(f"⚠️ Failed to close Discord client after startup 429: {close_exc!r}", flush=True)
+                    await _gateway_rate_limit_sleep("Gateway startup 429", delay, failure_attempt)
                     continue
                 print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
                 failure_attempt += 1
-                await _gateway_rate_limit_sleep("Gateway HTTP error", min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0), failure_attempt)
+                try:
+                    await bot.close()
+                    print("🧹 Closed Discord client session after startup HTTP error", flush=True)
+                except Exception as close_exc:
+                    print(f"⚠️ Failed to close Discord client after startup HTTP error: {close_exc!r}", flush=True)
+                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
+                await _gateway_rate_limit_sleep("Gateway HTTP error", delay, failure_attempt)
                 continue
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 is_bot_ready = False
                 failure_attempt += 1
-                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                 print(f"⚠️ Discord connection error: {e}", flush=True)
+                try:
+                    await bot.close()
+                    print("🧹 Closed Discord client session after connection error", flush=True)
+                except Exception as close_exc:
+                    print(f"⚠️ Failed to close Discord client after connection error: {close_exc!r}", flush=True)
+                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                 await _gateway_rate_limit_sleep("Gateway connection error", delay, failure_attempt)
                 continue
             except RuntimeError as e:
                 is_bot_ready = False
                 if "Session is closed" in str(e) or "Client is closed" in str(e):
                     failure_attempt += 1
-                    delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                     print(f"⚠️ Discord session/client closed: {e}", flush=True)
+                    try:
+                        await bot.close()
+                        print("🧹 Closed Discord client session after closed-session error", flush=True)
+                    except Exception as close_exc:
+                        print(f"⚠️ Failed to close Discord client after closed-session error: {close_exc!r}", flush=True)
+                    delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                     await _gateway_rate_limit_sleep("closed Gateway session", delay, failure_attempt)
                     continue
+                try:
+                    await bot.close()
+                except Exception:
+                    pass
                 raise
 
             # start() returning means the current Gateway session ended. Do not create a
