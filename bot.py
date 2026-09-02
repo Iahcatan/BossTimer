@@ -2225,6 +2225,56 @@ last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
 # Prevent overlapping boss notification passes (e.g. scheduled loop + manual /kill check).
 boss_notification_pass_lock = asyncio.Lock()
+
+# Shared Discord REST cooldown for global/rate-limit responses.
+# This prevents one failed text notification from being retried every scheduler tick
+# while Discord is blocking the API. Voice/TTS is intentionally not blocked by this.
+discord_rest_rate_limited_until = 0.0
+discord_rest_backoff_seconds = 60.0
+discord_rest_last_429_log = 0.0
+
+def _discord_rest_rate_limit_remaining() -> float:
+    return max(0.0, discord_rest_rate_limited_until - time.monotonic())
+
+def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
+    global discord_rest_rate_limited_until, discord_rest_backoff_seconds, discord_rest_last_429_log
+    retry_after = 0.0
+    try:
+        retry_after = float(getattr(exc, "retry_after", 0) or 0)
+    except (TypeError, ValueError):
+        retry_after = 0.0
+    if retry_after <= 0:
+        try:
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", None) or {}
+            raw = headers.get("Retry-After") or headers.get("retry-after")
+            retry_after = float(raw or 0)
+        except (TypeError, ValueError):
+            retry_after = 0.0
+
+    if retry_after <= 0:
+        retry_after = discord_rest_backoff_seconds
+        discord_rest_backoff_seconds = min(discord_rest_backoff_seconds * 2.0, 900.0)
+    else:
+        discord_rest_backoff_seconds = min(max(60.0, retry_after * 2.0), 900.0)
+
+    until = time.monotonic() + max(1.0, retry_after)
+    discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, until)
+
+    now_mono = time.monotonic()
+    if now_mono - discord_rest_last_429_log >= 5.0:
+        discord_rest_last_429_log = now_mono
+        print(
+            f"⏸️ Discord REST 429 cooldown | context={context} | wait={retry_after:.1f}s | "
+            f"no retry until cooldown expires",
+            flush=True,
+        )
+    return retry_after
+
+def _clear_discord_rest_backoff_after_success():
+    global discord_rest_backoff_seconds
+    discord_rest_backoff_seconds = 60.0
+
 bot_event_loop = None
 
 bf_notify_enabled = True
@@ -3694,7 +3744,7 @@ async def save_boss_notification_flags(boss_name: str, **flags):
         print(f"⚠️ Firebase notification flag update failed: {boss_name}: {e}")
 
 
-@tasks.loop(seconds=5)
+@tasks.loop(seconds=15)
 async def check_boss_notifications():
     try:
         now = datetime.now(TZ_THAI)
@@ -3733,15 +3783,15 @@ async def check_boss_notifications():
                     print(f"⏭️ Stale boss suppressed: {boss_name} | left={time_left:.1f}s")
                 continue
 
-            # Do not spam Render logs every 5 seconds while nothing is changing.
-            # Log only when a real notification action is due.
+            # Do not spam Render logs every scheduler tick while Discord REST is rate-limited.
+            rest_cooldown = _discord_rest_rate_limit_remaining()
             notification_action_due = (
                 (0 < time_left <= notice_seconds and not notified_advance)
                 or (0 < time_left <= notice_seconds and not voice_advance)
                 or (time_left <= 0 and not notified_spawn)
                 or (-60 <= time_left <= 0 and not voice_spawn)
             )
-            if notification_action_due:
+            if notification_action_due and rest_cooldown <= 0:
                 print(
                     f"🔎 Boss notification action due: {boss_name} | spawn={spawn_time.isoformat()} | "
                     f"left={time_left:.1f}s | notice={notice_minutes}m | advance={notified_advance} | "
@@ -3773,24 +3823,38 @@ async def check_boss_notifications():
                 target_guilds = set(bot.guilds)
 
             # Advance: text and voice are independent one-shot states.
-            if 0 < time_left <= notice_seconds and not notified_advance:
+            # On REST 429, do NOT retry on the next 5/15-second tick. A shared cooldown
+            # blocks further text sends until Discord's Retry-After (or backoff) expires.
+            if 0 < time_left <= notice_seconds and not notified_advance and _discord_rest_rate_limit_remaining() <= 0:
                 embed = discord.Embed(
                     title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
                     description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_minutes} นาที**!\nเวลาเกิด: **{spawn_time.strftime('%H:%M:%S น.')}**",
                     color=discord.Color.gold()
                 )
                 text_sent = False
+                rate_limited = False
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
                         await ch.send(content=mentions or None, embed=embed)
                         text_sent = True
+                        _clear_discord_rest_backoff_after_success()
+                    except discord.HTTPException as e:
+                        if getattr(e, "status", None) == 429:
+                            rate_limited = True
+                            _apply_discord_rest_429(e, context=f"advance:{boss_name}")
+                            break
+                        print(f"❌ ส่งข้อความ advance ไม่สำเร็จ ({boss_name}): {e}")
                     except Exception as e:
                         print(f"❌ ส่งข้อความ advance ไม่สำเร็จ ({boss_name}): {e}")
                 if text_sent:
                     await save_boss_notification_flags(boss_name, notified_advance=True)
                     notified_advance = True
                     print(f"🟢 Advance notification sent: {boss_name}")
+                elif rate_limited:
+                    # Keep the persistent success flag false, but prevent immediate retries
+                    # through the shared cooldown. Voice notification continues independently.
+                    pass
 
             if 0 < time_left <= notice_seconds and not voice_advance:
                 spoken_name = get_boss_pronunciation(boss_name)
@@ -3823,24 +3887,34 @@ async def check_boss_notifications():
 
             # Spawn: only notify at the actual crossing. Old schedules >60s late
             # are marked complete instead of replaying after every deploy/reload.
-            if time_left <= 0 and not notified_spawn:
+            if time_left <= 0 and not notified_spawn and _discord_rest_rate_limit_remaining() <= 0:
                 embed = discord.Embed(
                     title="⚔️ บอสเกิดแล้ว!",
                     description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
                     color=discord.Color.green()
                 )
                 text_sent = False
+                rate_limited = False
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
                         await ch.send(content=mentions or None, embed=embed)
                         text_sent = True
+                        _clear_discord_rest_backoff_after_success()
+                    except discord.HTTPException as e:
+                        if getattr(e, "status", None) == 429:
+                            rate_limited = True
+                            _apply_discord_rest_429(e, context=f"spawn:{boss_name}")
+                            break
+                        print(f"❌ ส่งข้อความ spawn ไม่สำเร็จ ({boss_name}): {e}")
                     except Exception as e:
                         print(f"❌ ส่งข้อความ spawn ไม่สำเร็จ ({boss_name}): {e}")
                 if text_sent:
                     await save_boss_notification_flags(boss_name, notified_spawn=True)
                     notified_spawn = True
                     print(f"🟢 Spawn notification sent: {boss_name}")
+                elif rate_limited:
+                    pass
 
             if -60 <= time_left <= 0 and not voice_spawn:
                 spoken_name = get_boss_pronunciation(boss_name)
@@ -4125,7 +4199,7 @@ async def send_quick_panel(interaction: discord.Interaction):
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
 
 # 🧩 Patch: V14_429_BF_NOTICE_STABLE
-NOTICE_BF_PATCH_VERSION = "V20_NOTICE_ACK_429_BOUNDED"
+NOTICE_BF_PATCH_VERSION = "V21_NOTIFICATION_429_BACKOFF_15S"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 # ==========================================
