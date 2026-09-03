@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V44_ADD_BOSS_INTERACTION_SAFE"
+NOTICE_BF_PATCH_VERSION = "V45_ADD_BOSS_DIRECT_INITIAL_RESPONSE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4908,7 +4908,15 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
     # background REST cooldown.  If Discord rejects it (for example during a
     # temporary API restriction), we still complete the Firebase write but do
     # not generate additional followup/audit REST traffic that is known to fail.
-    ack_ok = await _safe_interaction_ack(interaction, ephemeral=False)
+    # Critical initial response: use a direct message rather than defer(), then
+    # update the original response after Firebase persistence. This is still
+    # subject to Discord's interaction callback rate limits; no retry storm is
+    # attempted when Discord returns HTTP 429.
+    ack_ok = await _safe_interaction_send_message(
+        interaction,
+        "⏳ กำลังเพิ่มบอสเข้า Boss Definition...",
+        ephemeral=False,
+    )
     name = (name or "").strip()
     if not name:
         await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ กรุณาระบุชื่อบอส", ephemeral=True)
