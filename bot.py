@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V34_GATEWAY_CONNECTOR_RESET_SAFE"
+NOTICE_BF_PATCH_VERSION = "V35_GATEWAY_429_DIAGNOSTICS_COUNTDOWN"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4231,14 +4231,115 @@ async def _probe_gateway_session_start_limit(token: str):
 
 
 async def _gateway_rate_limit_sleep(reason: str, seconds: float, attempt: int):
+    """Wait without making Discord requests, while exposing a local retry countdown.
+
+    Important: this is the bot's next-retry timer, not a guaranteed Discord unblock timer.
+    An exact remote unblock ETA exists only when Discord provides Retry-After/retry_after.
+    """
     delay = min(max(float(seconds or 0), 15.0), 3600.0)
+    deadline = time.monotonic() + delay
     print(
-        f"⏸️ Gateway rate-limit cooldown | {reason} | sleep={delay:.0f}s | attempt={attempt}",
+        f"⏸️ Gateway rate-limit cooldown | {reason} | next_retry_in={delay:.0f}s "
+        f"({delay/60:.1f}m) | attempt={attempt}",
         flush=True,
     )
-    deadline = time.monotonic() + delay
-    while time.monotonic() < deadline:
-        await asyncio.sleep(min(60.0, max(1.0, deadline - time.monotonic())))
+    last_reported = None
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0:
+            print("✅ Gateway retry timer reached; attempting Discord connection again", flush=True)
+            return
+        bucket = int(remaining // 60) if remaining >= 60 else int(remaining)
+        if bucket != last_reported:
+            if remaining >= 60:
+                print(f"⏳ Gateway retry countdown: ~{remaining/60:.1f}m remaining", flush=True)
+            else:
+                print(f"⏳ Gateway retry countdown: ~{remaining:.0f}s remaining", flush=True)
+            last_reported = bucket
+        await asyncio.sleep(min(60.0, remaining))
+
+
+def _gateway_429_diagnostics(exc: Exception) -> dict:
+    """Extract safe diagnostics from discord.py HTTPException without making a new request."""
+    info = {
+        "retry_after": 0.0,
+        "header_retry_after": 0.0,
+        "body_retry_after": 0.0,
+        "scope": "",
+        "global": False,
+        "reset_after": 0.0,
+        "reset": "",
+        "via": "",
+        "content_type": "",
+        "server": "",
+        "cf_ray": "",
+        "date": "",
+        "body_preview": "",
+    }
+
+    try:
+        value = float(getattr(exc, "retry_after", 0) or 0)
+        if value > 0:
+            info["retry_after"] = value
+    except (TypeError, ValueError):
+        pass
+
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        def _header(*names):
+            for name in names:
+                try:
+                    value = headers.get(name)
+                except Exception:
+                    value = None
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+            return ""
+
+        raw = _header("Retry-After", "retry-after")
+        try:
+            info["header_retry_after"] = max(0.0, float(raw)) if raw else 0.0
+        except (TypeError, ValueError):
+            pass
+        if info["retry_after"] <= 0 and info["header_retry_after"] > 0:
+            info["retry_after"] = info["header_retry_after"]
+
+        raw = _header("X-RateLimit-Reset-After", "X-Ratelimit-Reset-After")
+        try:
+            info["reset_after"] = max(0.0, float(raw)) if raw else 0.0
+        except (TypeError, ValueError):
+            pass
+        info["reset"] = _header("X-RateLimit-Reset", "X-Ratelimit-Reset")
+        info["scope"] = _header("X-RateLimit-Scope", "X-Ratelimit-Scope")
+        info["global"] = _header("X-RateLimit-Global", "X-Ratelimit-Global").lower() == "true"
+        info["via"] = _header("Via")
+        info["content_type"] = _header("Content-Type", "content-type")
+        info["server"] = _header("Server", "server")
+        info["cf_ray"] = _header("CF-RAY", "cf-ray")
+        info["date"] = _header("Date", "date")
+
+    data = getattr(exc, "text", None)
+    if data is None:
+        # discord.py's HTTPException exposes response/data, but attribute names vary by version.
+        data = getattr(exc, "data", None)
+    if isinstance(data, dict):
+        raw = data.get("retry_after")
+        try:
+            info["body_retry_after"] = max(0.0, float(raw)) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            pass
+        if info["retry_after"] <= 0 and info["body_retry_after"] > 0:
+            info["retry_after"] = info["body_retry_after"]
+        preview = data.get("message") or data
+    else:
+        preview = data
+    if preview is not None:
+        try:
+            info["body_preview"] = str(preview).replace("\n", " ")[:180]
+        except Exception:
+            info["body_preview"] = ""
+    return info
 
 
 async def _prepare_gateway_http_transport():
@@ -4316,58 +4417,42 @@ async def _cleanup_failed_gateway_transport(reason: str):
 
 
 async def run_bot_with_backoff(token: str):
-    """Single Gateway controller with safe HTTP/session lifecycle recovery.
-
-    The controller intentionally does NOT perform an extra authenticated Gateway
-    preflight by default. Discord's normal discord.py login path is used directly.
-    429 responses are respected with Retry-After when available; when Discord does not
-    provide a usable delay, a conservative exponential backoff is used. Local closed
-    session/connector errors are repaired before retrying without creating a second
-    Bot/Client instance or sending extra Discord requests.
-    """
+    """Single Gateway controller with safe HTTP/session lifecycle recovery and 429 diagnostics."""
     global is_bot_ready
     if getattr(run_bot_with_backoff, "_active", False):
         print("⚠️ Discord runner already active — skip duplicate session start", flush=True)
         return
 
     run_bot_with_backoff._active = True
-    failure_attempt = 0
+    gateway_failure_attempt = 0
     try:
         while True:
-            # Always make sure a closed local HTTP transport cannot be reused.
             await _prepare_gateway_http_transport()
 
             if GATEWAY_PREFLIGHT_ENABLED:
                 limit_info = await _probe_gateway_session_start_limit(token)
-
                 if limit_info.get("status") == 429:
-                    failure_attempt += 1
+                    gateway_failure_attempt += 1
                     retry_after = float(limit_info.get("retry_after") or 0)
-                    fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
+                    fallback = min(900.0 * (2 ** max(0, gateway_failure_attempt - 1)), 3600.0)
                     delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
-                    await _gateway_rate_limit_sleep("preflight HTTP 429", delay, failure_attempt)
+                    await _gateway_rate_limit_sleep("preflight HTTP 429", delay, gateway_failure_attempt)
                     continue
-
                 if limit_info.get("status") != 200:
-                    failure_attempt += 1
-                    delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
-                    await _gateway_rate_limit_sleep("preflight unavailable", delay, failure_attempt)
+                    gateway_failure_attempt += 1
+                    delay = min(30.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                    await _gateway_rate_limit_sleep("preflight unavailable", delay, gateway_failure_attempt)
                     continue
-
                 remaining = int(limit_info.get("remaining", -1))
                 if remaining == 0:
-                    failure_attempt += 1
+                    gateway_failure_attempt += 1
                     reset_after = max(0.0, float(limit_info.get("reset_after_ms", 0)) / 1000.0)
                     delay = max(60.0, reset_after + 2.0)
-                    await _gateway_rate_limit_sleep("IDENTIFY quota exhausted", delay, failure_attempt)
+                    await _gateway_rate_limit_sleep("IDENTIFY quota exhausted", delay, gateway_failure_attempt)
                     continue
             else:
-                print(
-                    "ℹ️ Gateway preflight disabled (default) — starting discord.py Gateway directly",
-                    flush=True,
-                )
+                print("ℹ️ Gateway preflight disabled (default) — starting discord.py Gateway directly", flush=True)
 
-            failure_attempt = 0
             print("🔌 กำลังเชื่อมต่อ Discord Gateway...", flush=True)
             is_bot_ready = False
 
@@ -4378,63 +4463,85 @@ async def run_bot_with_backoff(token: str):
                 is_bot_ready = False
                 status = getattr(e, "status", None)
                 if status == 429:
-                    failure_attempt += 1
-                    retry_after = 0.0
-                    try:
-                        retry_after = float(getattr(e, "retry_after", 0) or 0)
-                    except (TypeError, ValueError):
-                        retry_after = 0.0
+                    gateway_failure_attempt += 1
+                    diag = _gateway_429_diagnostics(e)
+                    retry_after = float(diag.get("retry_after") or 0)
 
-                    # A missing/zero retry_after on a startup 429 is not permission to
-                    # retry immediately. Use a conservative 15-minute fallback, then
-                    # exponential backoff up to 1 hour on repeated failures.
-                    fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
-                    delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
+                    # If Discord exposes a concrete Retry-After, honor it. If it exposes
+                    # only Cloudflare-style 429 text/headers, no public endpoint exists
+                    # that can reveal the exact remaining ban duration without another
+                    # request, and making probe requests would worsen the restriction.
+                    if retry_after > 0:
+                        delay = retry_after + 2.0
+                        timing_source = "Discord Retry-After"
+                    elif diag.get("reset_after", 0) > 0:
+                        delay = float(diag["reset_after"]) + 2.0
+                        timing_source = "X-RateLimit-Reset-After"
+                    else:
+                        delay = min(900.0 * (2 ** max(0, gateway_failure_attempt - 1)), 3600.0)
+                        timing_source = "local fallback (Discord gave no usable timer)"
 
                     print(
-                        f"🛑 Discord Gateway/REST startup 429 | retry_after={retry_after:.1f}s | next_retry={delay:.0f}s",
+                        "🛑 Discord Gateway startup HTTP 429 | "
+                        f"retry_after={retry_after:.3f}s | "
+                        f"scope={diag.get('scope') or '-'} | "
+                        f"global={bool(diag.get('global'))} | "
+                        f"reset_after={float(diag.get('reset_after') or 0):.3f}s | "
+                        f"timing_source={timing_source}",
                         flush=True,
                     )
+                    header_bits = []
+                    for key in ("via", "server", "cf_ray", "date", "content_type"):
+                        value = diag.get(key)
+                        if value:
+                            header_bits.append(f"{key}={value}")
+                    if header_bits:
+                        print("🔎 Discord 429 headers | " + " | ".join(header_bits), flush=True)
+                    if diag.get("body_preview"):
+                        print(f"🔎 Discord 429 body | {diag['body_preview']}", flush=True)
+
                     await _cleanup_failed_gateway_transport("startup 429")
-                    await _gateway_rate_limit_sleep("Gateway startup 429", delay, failure_attempt)
+                    await _gateway_rate_limit_sleep(
+                        f"Gateway startup 429 ({timing_source})",
+                        delay,
+                        gateway_failure_attempt,
+                    )
                     continue
 
                 print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
-                failure_attempt += 1
+                gateway_failure_attempt += 1
                 await _cleanup_failed_gateway_transport("startup HTTP error")
-                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
-                await _gateway_rate_limit_sleep("Gateway HTTP error", delay, failure_attempt)
+                delay = min(30.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                await _gateway_rate_limit_sleep("Gateway HTTP error", delay, gateway_failure_attempt)
                 continue
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 is_bot_ready = False
-                failure_attempt += 1
+                gateway_failure_attempt += 1
                 print(f"⚠️ Discord connection error: {e}", flush=True)
                 await _cleanup_failed_gateway_transport("connection error")
-                delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
-                await _gateway_rate_limit_sleep("Gateway connection error", delay, failure_attempt)
+                delay = min(30.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                await _gateway_rate_limit_sleep("Gateway connection error", delay, gateway_failure_attempt)
                 continue
 
             except RuntimeError as e:
                 is_bot_ready = False
                 text = str(e)
                 if "Session is closed" in text or "Client is closed" in text:
-                    failure_attempt += 1
+                    gateway_failure_attempt += 1
                     print(f"⚠️ Discord local session state invalid: {e}", flush=True)
                     await _cleanup_failed_gateway_transport("closed-session error")
-                    # Local lifecycle failures are not Discord permission to spam
-                    # reconnect attempts. Give the process a real recovery interval.
-                    delay = min(60.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
-                    await _gateway_rate_limit_sleep("local Gateway session recovered", delay, failure_attempt)
+                    delay = min(60.0 * (2 ** max(0, gateway_failure_attempt - 1)), 900.0)
+                    await _gateway_rate_limit_sleep("local Gateway session recovered", delay, gateway_failure_attempt)
                     continue
-
                 await _cleanup_failed_gateway_transport("unhandled runtime error")
                 raise
 
-            # start() returning means the current Gateway session ended. Do not create
-            # a tight reconnect loop; allow discord.py/Discord state to settle first.
+            # If start() returns after a real connected session ended, allow discord.py
+            # to settle before reconnecting. A successful session clears the startup
+            # failure counter so a later independent outage starts at the base backoff.
             is_bot_ready = False
-            failure_attempt = 0
+            gateway_failure_attempt = 0
             print("⚠️ Discord Gateway session ended — re-checking Gateway after 15s", flush=True)
             await asyncio.sleep(15)
 
