@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V38_FULL_FEATURE_INTEGRITY_RESTORE"
+NOTICE_BF_PATCH_VERSION = "V39_TIME_ACK_429_SAFE_FIREBASE_RULES"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4550,14 +4550,65 @@ async def notice_command(interaction: discord.Interaction, message: str):
 
 @bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
 async def boss_time_slash(interaction: discord.Interaction):
-    await interaction.response.defer()
-    embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
-    if embed is None:
-        await guarded_interaction_followup_send(interaction, "interaction-followup", tts_text_th)
-        return
-    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
-    asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
-    await send_audit_log(interaction.guild, interaction.user, "เช็กเวลาบอสพร้อม TTS (/time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
+    # Initial interaction ACK is time-critical and must remain isolated from the
+    # background REST circuit breaker.  A Discord 429 must not crash the command.
+    ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
+    if not ack_ok:
+        print("⚠️ /time ACK unavailable; continuing summary/TTS work safely", flush=True)
+
+    try:
+        embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
+        if embed is None:
+            if ack_ok:
+                try:
+                    await guarded_interaction_followup_send(
+                        interaction, "interaction-followup", tts_text_th
+                    )
+                except discord.HTTPException as exc:
+                    print(f"⚠️ /time result response failed: {exc}", flush=True)
+            else:
+                print("ℹ️ /time summary generated without interaction ACK", flush=True)
+            return
+
+        if ack_ok:
+            try:
+                await guarded_interaction_followup_send(
+                    interaction, "interaction-followup", embed=embed
+                )
+            except discord.HTTPException as exc:
+                print(f"⚠️ /time embed response failed: {exc}", flush=True)
+        else:
+            print("ℹ️ /time embed generated without interaction ACK", flush=True)
+
+        # Keep the original Voice/TTS behavior unchanged.
+        asyncio.create_task(
+            speak_in_guild(
+                interaction.guild,
+                text_th=tts_text_th,
+                text_en=tts_text_en,
+                text_ko=tts_text_ko,
+            )
+        )
+        await send_audit_log(
+            interaction.guild,
+            interaction.user,
+            "เช็กเวลาบอสพร้อม TTS (/time)",
+            "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย",
+            discord.Color.purple(),
+        )
+    except Exception as exc:
+        # Never let a REST/interaction error escape the slash-command callback.
+        print(f"❌ /time command failed safely: {exc!r}", flush=True)
+        if ack_ok:
+            try:
+                await guarded_interaction_followup_send(
+                    interaction,
+                    "interaction-followup",
+                    "⚠️ ไม่สามารถส่งผลลัพธ์ /time กลับไปใน Discord ได้ในขณะนี้",
+                    ephemeral=True,
+                )
+            except Exception as response_exc:
+                print(f"⚠️ /time error response failed: {response_exc!r}", flush=True)
 
 @bot.command(name="time")
 async def boss_time_prefix(ctx: commands.Context):
