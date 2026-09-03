@@ -4376,12 +4376,20 @@ async def run_bot_with_backoff(token: str):
             except RuntimeError as e:
                 is_bot_ready = False
                 if "Session is closed" in str(e) or "Client is closed" in str(e):
-                    failure_attempt += 1
-                    print(f"⚠️ Discord session/client closed: {e}", flush=True)
-                    await _cleanup_failed_gateway_transport("closed-session error")
-                    delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
-                    await _gateway_rate_limit_sleep("closed Gateway session recovered", min(delay, 5.0), failure_attempt)
-                    continue
+                    # A closed aiohttp/discord.py lifecycle is not a transient Gateway
+                    # error. Re-entering bot.start() on this same process can trigger
+                    # repeated IDENTIFY attempts and amplify Discord 429 responses.
+                    # Clean the transport once, then stop this process so Render can
+                    # create a completely fresh Python/client lifecycle.
+                    print(
+                        f"🛑 Discord session/client lifecycle is closed; stopping current process: {e}",
+                        flush=True,
+                    )
+                    await _cleanup_failed_gateway_transport("closed-session lifecycle")
+                    raise RuntimeError(
+                        "Discord Gateway client lifecycle is closed; process restart required "
+                        "instead of reusing the closed client"
+                    ) from e
                 await _cleanup_failed_gateway_transport("unhandled runtime error")
                 raise
 
