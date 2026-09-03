@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V39_TIME_ACK_429_SAFE_FIREBASE_RULES"
+NOTICE_BF_PATCH_VERSION = "V40_ALL_COMMANDS_ACK_REST_GUARD_SAFE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2429,17 +2429,25 @@ async def guarded_context_send(ctx, *args, context: str, **kwargs):
 
 
 async def guarded_interaction_followup_send(interaction: discord.Interaction, context: str, *args, **kwargs):
-    return await guarded_discord_call(
-        lambda: interaction.followup.send(*args, **kwargs),
-        context=context,
-    )
+    try:
+        return await guarded_discord_call(
+            lambda: interaction.followup.send(*args, **kwargs),
+            context=context,
+        )
+    except discord.HTTPException as exc:
+        print(f"⚠️ Interaction followup failed safely | context={context} | status={getattr(exc, 'status', None)} | {exc}", flush=True)
+        return None
 
 
 async def guarded_interaction_edit_original(interaction: discord.Interaction, context: str, *args, **kwargs):
-    return await guarded_discord_call(
-        lambda: interaction.edit_original_response(*args, **kwargs),
-        context=context,
-    )
+    try:
+        return await guarded_discord_call(
+            lambda: interaction.edit_original_response(*args, **kwargs),
+            context=context,
+        )
+    except discord.HTTPException as exc:
+        print(f"⚠️ Interaction edit failed safely | context={context} | status={getattr(exc, 'status', None)} | {exc}", flush=True)
+        return None
 
 
 bot_event_loop = None
@@ -3680,6 +3688,42 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
         return False
 
 
+async def _safe_interaction_send_message(interaction: discord.Interaction, content=None, *, ephemeral=True, **kwargs):
+    """Best-effort initial interaction response for short-lived acknowledgement lanes."""
+    try:
+        if interaction.response.is_done():
+            return False
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(
+            interaction.response.send_message(content, ephemeral=ephemeral, **kwargs),
+            timeout=1.75,
+        )
+        return True
+    except asyncio.TimeoutError:
+        print("⚠️ Interaction initial response timed out before Discord accepted the callback", flush=True)
+        return False
+    except discord.HTTPException as exc:
+        retry_after = 0.0
+        try:
+            retry_after = float(getattr(exc, "retry_after", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        if getattr(exc, "status", None) == 429:
+            print(
+                f"⚠️ Interaction initial response rejected by Discord 429 | retry_after={retry_after:.2f}s | "
+                "shared REST cooldown unchanged",
+                flush=True,
+            )
+        else:
+            print(f"⚠️ Interaction initial response failed: {exc}", flush=True)
+        return False
+    except Exception as exc:
+        print(f"⚠️ Interaction initial response failed unexpectedly: {exc!r}", flush=True)
+        return False
+
+
 # ==========================================
 # V36 RESTORED DEFINITIONS
 # ==========================================
@@ -3687,7 +3731,7 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
 @bot.tree.command(name="panel", description="ส่งข้อความ Interactive Embed พร้อมปุ่มกด Quick Actions ในช่องนี้")
 @has_allowed_role()
 async def send_quick_panel(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     embed = discord.Embed(
         title="⚡ Quick Actions - แผงควบคุมเวลาบอส",
         description="เลือกชื่อบอสจากเมนูด้านล่าง แล้วกดปุ่มสั่งการได้ทันที:\n\n"
@@ -3698,7 +3742,7 @@ async def send_quick_panel(interaction: discord.Interaction):
     )
     embed.set_footer(text="ระบบปุ่มกดอัตโนมัติ 24/7 • Boss Control Panel")
     view = QuickActionsView()
-    await interaction.followup.send(embed=embed, view=view)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed, view=view)
     embed_summary, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
     if tts_text_th and interaction.guild:
         asyncio.create_task(speak_in_guild(interaction.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
@@ -3719,7 +3763,7 @@ async def send_quick_panel(interaction: discord.Interaction):
 )
 @has_allowed_role()
 async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Choice[str], status: app_commands.Choice[str]):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     global tts_th_enabled, tts_en_enabled, tts_ko_enabled
     is_on = (status.value == "on")
     lang_name = ""
@@ -3742,7 +3786,7 @@ async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Ch
         description=f"{status_text} การแจ้งเตือนเสียง {lang_name} เรียบร้อยแล้ว!\n*(ข้อมูลซิงค์กับ Dashboard และ Firebase)*",
         color=color
     )
-    await interaction.followup.send(embed=embed)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
     await send_audit_log(interaction.guild, interaction.user, "ตั้งค่า TTS เสียง (/tts)", f"ภาษา: `{lang.value.upper()}` | สถานะ: `{status.value.upper()}`", color)
 
 
@@ -3751,7 +3795,7 @@ async def toggle_tts_cmd(interaction: discord.Interaction, lang: app_commands.Ch
 @app_commands.choices(status=[app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"), app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")])
 @has_allowed_role()
 async def toggle_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     global bf_notify_enabled
     if status.value == "on":
         bf_notify_enabled = True
@@ -3763,7 +3807,7 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
         color = discord.Color.red()
     await save_bot_settings()
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือน BF", description=msg, color=color)
-    await interaction.followup.send(embed=embed)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
     await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือน BF (/notify)", f"เปลี่ยนสถานะเป็น: `{status.value.upper()}`", color)
 
 
@@ -3772,7 +3816,7 @@ async def toggle_notify(interaction: discord.Interaction, status: app_commands.C
 @app_commands.choices(status=[app_commands.Choice(name="เปิดการแจ้งเตือน (on)", value="on"), app_commands.Choice(name="ปิดการแจ้งเตือน (off)", value="off")])
 @has_allowed_role()
 async def toggle_ppl_notify(interaction: discord.Interaction, status: app_commands.Choice[str]):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     global ppl_notify_enabled
     if status.value == "on":
         ppl_notify_enabled = True
@@ -3784,7 +3828,7 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
         color = discord.Color.red()
     await save_bot_settings()
     embed = discord.Embed(title="⚙️ ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้องเสียง", description=msg, color=color)
-    await interaction.followup.send(embed=embed)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
     await send_audit_log(interaction.guild, interaction.user, "ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)", f"เปลี่ยนสถานะเป็น: `{status.value.upper()}`", color)
 
 
@@ -3793,22 +3837,22 @@ async def toggle_ppl_notify(interaction: discord.Interaction, status: app_comman
 @app_commands.choices(status=[app_commands.Choice(name="เปิดระบบทักทายคนพิเศษ (on)", value="on"), app_commands.Choice(name="ปิดระบบทักทายคนพิเศษ (off)", value="off")])
 @app_commands.checks.has_permissions(administrator=True)
 async def toggle_vip_greet(interaction: discord.Interaction, status: app_commands.Choice[str], user: discord.Member = None, message: str = None):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     global vip_config
     if status.value == "on":
         if not user or not message:
-            await interaction.followup.send("❌ **ข้อมูลไม่ครบถ้วน!** กรุณาระบุทั้ง **user** และ **message**", ephemeral=True)
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ **ข้อมูลไม่ครบถ้วน!** กรุณาระบุทั้ง **user** และ **message**", ephemeral=True)
             return
         vip_config = {"enabled": True, "user_id": user.id, "user_name": user.display_name, "message": message}
         await save_vip_config()
         embed = discord.Embed(title="🌟 เปิดใช้งานระบบทักทายคนพิเศษ (VIP)", description=f"🟢 **สถานะ:** เปิดใช้งาน\n👤 **คนพิเศษ:** {user.mention}\n💬 **คำทักทาย:** \"{message}\"", color=discord.Color.gold())
-        await interaction.followup.send(embed=embed)
+        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "เปิดระบบทักทายคนพิเศษ (/vip)", f"👤 คนพิเศษ: `{user.display_name}`\n💬 ข้อความ: {message}", discord.Color.gold())
     else:
         vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
         await save_vip_config()
         embed = discord.Embed(title="⚙️ ปิดระบบทักทายคนพิเศษ (VIP)", description="🔴 **สถานะ:** ปิดใช้งานเรียบร้อยแล้ว", color=discord.Color.red())
-        await interaction.followup.send(embed=embed)
+        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "ปิดระบบทักทายคนพิเศษ (/vip)", "ยกเลิกข้อมูลคนพิเศษเรียบร้อยแล้ว", discord.Color.red())
 
 
@@ -3818,7 +3862,7 @@ async def toggle_vip_greet(interaction: discord.Interaction, status: app_command
 async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChannel = None):
     """Add one Voice channel to the guild's persistent /setvoice targets."""
     try:
-        await interaction.response.defer(ephemeral=True)
+        await _safe_interaction_ack(interaction, ephemeral=True)
     except Exception as e:
         print(f"❌ /setvoice defer failed: {e}")
         return
@@ -3827,7 +3871,7 @@ async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChan
         target = channel
         if target is None:
             if not interaction.user.voice or not interaction.user.voice.channel:
-                await interaction.followup.send(
+                await guarded_interaction_followup_send(interaction, "interaction-followup", 
                     "❌ กรุณาเข้าห้อง Voice ก่อน หรือเลือกห้อง Voice ในคำสั่ง /setvoice",
                     ephemeral=True
                 )
@@ -3889,7 +3933,7 @@ async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChan
             configured_names.append(f"• **{c.name}** (`{c.id}`)")
         targets_text = "\n".join(configured_names) if configured_names else "-"
 
-        await interaction.followup.send(
+        await guarded_interaction_followup_send(interaction, "interaction-followup", 
             f"🔊 เพิ่มห้อง Voice **{target.name}** สำเร็จ\n"
             f"\n📋 ห้องที่ตั้ง /setvoice ไว้ทั้งหมด ({len(configured_names)} ห้อง):\n{targets_text}\n"
             f"\n🟢 โหมด: **ON-DEMAND** — บอทจะเข้าเฉพาะห้องที่มีสมาชิกอยู่ตอนแจ้งเตือน แล้วออกหลังพูดจบ",
@@ -3900,52 +3944,52 @@ async def set_voice(interaction: discord.Interaction, channel: discord.VoiceChan
         print(f"❌ /setvoice error: {e}")
         traceback.print_exc()
         try:
-            await interaction.followup.send(f"❌ ตั้งค่าห้อง Voice ไม่สำเร็จ: `{e}`", ephemeral=True)
+            await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ ตั้งค่าห้อง Voice ไม่สำเร็จ: `{e}`", ephemeral=True)
         except Exception:
             pass
 
 
 @bot.tree.command(name="join", description="ดึงบอทเข้าห้องเสียงที่คุณกำลังใช้งาน")
 async def join_voice(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.followup.send("❌ คุณต้องเชื่อมต่ออยู่ในห้องเสียงก่อนใช้คำสั่งนี้!", ephemeral=True)
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ คุณต้องเชื่อมต่ออยู่ในห้องเสียงก่อนใช้คำสั่งนี้!", ephemeral=True)
         return
     voice_channel = interaction.user.voice.channel
     guild = interaction.guild
     if guild.voice_client is not None: await guild.voice_client.move_to(voice_channel)
     else: await voice_channel.connect()
     embed = discord.Embed(title="🔊 เชื่อมต่อห้องเสียงสำเร็จ", description=f"บอทเข้าสู่ห้องเสียง **{voice_channel.name}** เรียบร้อยแล้ว!", color=discord.Color.green())
-    await interaction.followup.send(embed=embed)
+    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
 
 
 @bot.tree.command(name="leave", description="สั่งให้บอทออกจากห้องเสียง")
 async def leave_voice(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     guild = interaction.guild
     if guild.voice_client:
         await guild.voice_client.disconnect()
     if str(guild.id) in voice_config:
         voice_config[str(guild.id)]["enabled"] = False
         await save_voice_config()
-        await interaction.followup.send("👋 ออกจากห้องเสียงแล้ว และปิดการเชื่อมต่อถาวรของ /setvoice ชั่วคราวแล้วครับ")
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "👋 ออกจากห้องเสียงแล้ว และปิดการเชื่อมต่อถาวรของ /setvoice ชั่วคราวแล้วครับ")
     else:
-        await interaction.followup.send("❌ บอทไม่ได้อยู่ในห้องเสียงใดๆ ในขณะนี้", ephemeral=True)
+        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ บอทไม่ได้อยู่ในห้องเสียงใดๆ ในขณะนี้", ephemeral=True)
 
 
 @bot.tree.command(name="disconnect", description="ตัดการเชื่อมต่อเสียงและหยุดการเล่นเสียงของบอททันที")
 async def disconnect_voice(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     try:
         vc = interaction.guild.voice_client
         if vc and vc.is_connected():
             if vc.is_playing(): vc.stop()
             await vc.disconnect()
-            await interaction.followup.send("⏹️ บอทหยุดการทำงานและออกจากห้องเสียงเรียบร้อยแล้ว!")
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "⏹️ บอทหยุดการทำงานและออกจากห้องเสียงเรียบร้อยแล้ว!")
         else:
-            await interaction.followup.send("❌ บอทไม่ได้อยู่ในห้องเสียงครับ", ephemeral=True)
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ บอทไม่ได้อยู่ในห้องเสียงครับ", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"⚠️ เกิดข้อผิดพลาด: `{e}`")
+        await guarded_interaction_followup_send(interaction, "interaction-followup", f"⚠️ เกิดข้อผิดพลาด: `{e}`")
 
 
 @tasks.loop(seconds=15)
@@ -3997,10 +4041,17 @@ async def check_bf_notifications():
                     # Reserve one attempt first. On 429, allow at most one later retry.
                     bf_text_retry_after_ts[trigger_key] = time.monotonic() + 30.0
                     try:
-                        await text_channel.send(content=mention_target or None, embed=embed)
-                        last_bf_text_notified_hour = trigger_key
-                        bf_text_retry_after_ts.pop(trigger_key, None)
-                        print(f"✅ BF text notification sent | guild={guild.name}")
+                        send_result = await guarded_channel_send(text_channel, context=f"bf:{guild.name}", content=mention_target or None, embed=embed)
+                        if send_result is not None:
+                            last_bf_text_notified_hour = trigger_key
+                            bf_text_retry_after_ts.pop(trigger_key, None)
+                            print(f"✅ BF text notification sent | guild={guild.name}")
+                        else:
+                            bf_text_retry_after_ts[trigger_key] = max(
+                                bf_text_retry_after_ts.get(trigger_key, 0.0),
+                                time.monotonic() + 60.0,
+                            )
+                            print(f"⏭️ BF text skipped by Global REST Guard | guild={guild.name}", flush=True)
                     except discord.HTTPException as exc:
                         if getattr(exc, "status", None) == 429:
                             wait_for = await _get_retry_after_seconds(exc, default=30.0)
@@ -4112,7 +4163,7 @@ async def check_library_boss_notifications():
                         )
                         try:
                             send_content = mention_target if mention_target.strip() else None
-                            await channel.send(content=send_content, embed=embed)
+                            await guarded_channel_send(channel, context="library-boss", content=send_content, embed=embed)
                         except Exception as e: print(f"❌ ส่งข้อความเตือน Library Boss ไม่สำเร็จ: {e}")
 
                     spoken_text_th = "Library Boss ถึงเวลาเตรียมตัวแล้วค่ะ"
@@ -4255,8 +4306,9 @@ async def check_boss_notifications():
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
-                        await ch.send(content=mentions or None, embed=embed)
-                        text_sent = True
+                        send_result = await guarded_channel_send(ch, context=f"boss-notify:{boss_name}", content=mentions or None, embed=embed)
+                        if send_result is not None:
+                            text_sent = True
                     except Exception as e:
                         print(f"❌ ส่งข้อความ advance ไม่สำเร็จ ({boss_name}): {e}")
                 if text_sent:
@@ -4305,8 +4357,9 @@ async def check_boss_notifications():
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
-                        await ch.send(content=mentions or None, embed=embed)
-                        text_sent = True
+                        send_result = await guarded_channel_send(ch, context=f"boss-notify:{boss_name}", content=mentions or None, embed=embed)
+                        if send_result is not None:
+                            text_sent = True
                     except Exception as e:
                         print(f"❌ ส่งข้อความ spawn ไม่สำเร็จ ({boss_name}): {e}")
                 if text_sent:
@@ -4362,9 +4415,9 @@ async def update_live_embed():
         if cached_live_message is None or cached_live_message.id != message_id:
             channel = bot.get_channel(channel_id)
             if not channel:
-                try: channel = await bot.fetch_channel(channel_id)
+                try: channel = await guarded_fetch_channel(channel_id, context="live:fetch-channel")
                 except Exception: return
-            try: cached_live_message = await channel.fetch_message(message_id)
+            try: cached_live_message = await guarded_fetch_message(channel, message_id, context="live:fetch-message")
             except Exception: return
 
         now = datetime.now(TZ_THAI)
@@ -4406,7 +4459,7 @@ async def update_live_embed():
                 embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
 
         embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
-        try: await cached_live_message.edit(embed=embed)
+        try: await guarded_message_edit(cached_live_message, context="live:edit", embed=embed)
         except Exception as e: print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดใน Task 'update_live_embed': {e}")
@@ -4446,14 +4499,14 @@ async def notice_command(interaction: discord.Interaction, message: str):
     # Serialize /notice calls so one operator cannot create a REST/Voice burst.
     if NOTICE_COMMAND_LOCK.locked():
         try:
-            await interaction.response.send_message("⏳ /notice กำลังทำงานอยู่ กรุณารอสักครู่", ephemeral=True)
+            await _safe_interaction_send_message(interaction, "⏳ /notice กำลังทำงานอยู่ กรุณารอสักครู่", ephemeral=True)
         except discord.HTTPException as exc:
             print(f"⚠️ /notice busy response failed: {exc}", flush=True)
         return
 
     if time.monotonic() - NOTICE_LAST_RUN_TS < 2.0:
         try:
-            await interaction.response.send_message("⏳ /notice เพิ่งถูกเรียกไป กรุณารอสักครู่", ephemeral=True)
+            await _safe_interaction_send_message(interaction, "⏳ /notice เพิ่งถูกเรียกไป กรุณารอสักครู่", ephemeral=True)
         except discord.HTTPException as exc:
             print(f"⚠️ /notice cooldown response failed: {exc}", flush=True)
         return
@@ -4652,7 +4705,7 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None, kill_date: str = None):
     # Acknowledge immediately.
     try:
-        await interaction.response.defer()
+        await _safe_interaction_ack(interaction, ephemeral=False)
     except Exception as e:
         print(f"❌ /kill defer failed: {e}")
         return
@@ -4786,7 +4839,7 @@ bot.tree.add_command(add_group)
 )
 @has_allowed_role()
 async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, minutes: int = 30, seconds: int = 0, notice_minutes: int = 5):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     name = (name or "").strip()
     if not name:
         await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ กรุณาระบุชื่อบอส", ephemeral=True)
@@ -4843,7 +4896,7 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
 async def del_boss(interaction: discord.Interaction, boss_name: str):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     matched_key = None
     with schedule_lock:
         for k in list(boss_schedule.keys()):
@@ -4865,7 +4918,7 @@ async def del_boss(interaction: discord.Interaction, boss_name: str):
 
 @bot.tree.command(name="status", description="เช็กสถานะเวลาบอสทั้งหมดที่กำลังนับถอยหลัง")
 async def boss_status(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     with schedule_lock: schedule_copy = boss_schedule.copy()
     if not schedule_copy:
         embed = discord.Embed(title="📜 ตารางเวลาบอส", description="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ\nใช้คำสั่ง `/kill [ชื่อบอส]` เพื่อเริ่มบันทึกเวลาได้เลยครับ", color=discord.Color.blue())
@@ -4900,7 +4953,7 @@ async def boss_status(interaction: discord.Interaction):
 @bot.tree.command(name="setlive", description="ตั้งค่าป้ายไฟนับถอยหลังเวลาบอสเกิด Real-time ในช่องนี้")
 @has_allowed_role()
 async def set_live(interaction: discord.Interaction):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     now = datetime.now(TZ_THAI)
     embed = discord.Embed(title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time", description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.teal())
     embed.add_field(name="📌 สถานะ", value="กำลังเริ่มต้นระบบ...", inline=False)
@@ -4924,7 +4977,7 @@ async def set_live(interaction: discord.Interaction):
 )
 @has_allowed_role()
 async def attendance_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
-    await interaction.response.defer()
+    await _safe_interaction_ack(interaction, ephemeral=False)
     
     embed = discord.Embed(
         title="📢 แจ้งเตือนเช็คชื่อบอส (Attendance)",
@@ -5224,6 +5277,25 @@ async def _cleanup_failed_gateway_transport(reason: str):
         f"🧹 Cleaned Discord HTTP session + connector after {reason}; client lifecycle reusable",
         flush=True,
     )
+
+
+def validate_runtime_integrity():
+    """Fail fast before Gateway startup if critical functions/commands were accidentally dropped."""
+    required_funcs = [
+        "boss_autocomplete", "get_notification_mentions", "save_boss_notification_flags",
+        "check_bf_notifications", "check_library_boss_notifications", "check_boss_notifications",
+        "update_live_embed", "check_auto_disconnect", "boss_time_slash",
+    ]
+    missing = [name for name in required_funcs if not callable(globals().get(name))]
+    if missing:
+        raise RuntimeError("V40 integrity check failed; missing functions: " + ", ".join(missing))
+    direct = [cmd.name for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Command)]
+    if len(direct) != 16:
+        raise RuntimeError(f"V40 integrity check failed; expected 16 direct slash commands, found {len(direct)}")
+    group = next((cmd for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Group) and cmd.name == "add"), None)
+    if group is None or not any(sub.name == "boss" for sub in group.commands):
+        raise RuntimeError("V40 integrity check failed; /add boss subcommand missing")
+    print("✅ V40 integrity check passed | 16 direct + /add boss = 17 command paths", flush=True)
 
 
 async def run_bot_with_backoff(token: str):
