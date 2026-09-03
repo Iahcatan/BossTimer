@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V29_AUTOCOMPLETE_PLACEMENT_FIX"
+NOTICE_BF_PATCH_VERSION = "V30_GATEWAY_SESSION_CLEANUP"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4241,6 +4241,46 @@ async def _gateway_rate_limit_sleep(reason: str, seconds: float, attempt: int):
         await asyncio.sleep(min(60.0, max(1.0, deadline - time.monotonic())))
 
 
+async def _cleanup_failed_gateway_transport(reason: str):
+    """Close only discord.py's HTTP transport after a failed startup attempt.
+
+    IMPORTANT: do not call Client.close() here.  Client.close() marks the discord.py
+    client as permanently closed for this lifecycle, which makes reusing the same Bot
+    object for the next retry unsafe.  HTTPClient.close()/clear() releases the aiohttp
+    session while leaving the Bot itself reusable.
+    """
+    http_client = getattr(bot, "http", None)
+    if http_client is None:
+        return
+
+    try:
+        close_http = getattr(http_client, "close", None)
+        if close_http is not None:
+            await close_http()
+    except Exception as close_exc:
+        print(f"⚠️ Failed to close Discord HTTP transport after {reason}: {close_exc!r}", flush=True)
+
+    try:
+        clear_http = getattr(http_client, "clear", None)
+        if clear_http is not None:
+            clear_http()
+    except Exception as clear_exc:
+        print(f"⚠️ Failed to clear Discord HTTP transport after {reason}: {clear_exc!r}", flush=True)
+
+    # Never leave the Bot lifecycle in Client.close() state during a retry.
+    # The retry controller owns the same Bot instance for the process lifetime.
+    if getattr(bot, "_closed", False):
+        try:
+            bot._closed = False
+        except Exception:
+            pass
+
+    print(
+        f"🧹 Cleaned Discord HTTP transport after {reason}; bot lifecycle remains reusable",
+        flush=True,
+    )
+
+
 async def run_bot_with_backoff(token: str):
     """Single Gateway controller with rate-limit-aware recovery.
 
@@ -4313,21 +4353,13 @@ async def run_bot_with_backoff(token: str):
                         flush=True,
                     )
                     # A failed bot.start() can leave discord.py's aiohttp session open.
-                    # Always close it before the retry so repeated 429s do not leak sessions.
-                    try:
-                        await bot.close()
-                        print("🧹 Closed Discord client session after startup 429", flush=True)
-                    except Exception as close_exc:
-                        print(f"⚠️ Failed to close Discord client after startup 429: {close_exc!r}", flush=True)
+                    # Close only the HTTP transport so the Bot object itself remains reusable.
+                    await _cleanup_failed_gateway_transport("startup 429")
                     await _gateway_rate_limit_sleep("Gateway startup 429", delay, failure_attempt)
                     continue
                 print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
                 failure_attempt += 1
-                try:
-                    await bot.close()
-                    print("🧹 Closed Discord client session after startup HTTP error", flush=True)
-                except Exception as close_exc:
-                    print(f"⚠️ Failed to close Discord client after startup HTTP error: {close_exc!r}", flush=True)
+                await _cleanup_failed_gateway_transport("startup HTTP error")
                 delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                 await _gateway_rate_limit_sleep("Gateway HTTP error", delay, failure_attempt)
                 continue
@@ -4335,11 +4367,7 @@ async def run_bot_with_backoff(token: str):
                 is_bot_ready = False
                 failure_attempt += 1
                 print(f"⚠️ Discord connection error: {e}", flush=True)
-                try:
-                    await bot.close()
-                    print("🧹 Closed Discord client session after connection error", flush=True)
-                except Exception as close_exc:
-                    print(f"⚠️ Failed to close Discord client after connection error: {close_exc!r}", flush=True)
+                await _cleanup_failed_gateway_transport("connection error")
                 delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                 await _gateway_rate_limit_sleep("Gateway connection error", delay, failure_attempt)
                 continue
@@ -4348,18 +4376,11 @@ async def run_bot_with_backoff(token: str):
                 if "Session is closed" in str(e) or "Client is closed" in str(e):
                     failure_attempt += 1
                     print(f"⚠️ Discord session/client closed: {e}", flush=True)
-                    try:
-                        await bot.close()
-                        print("🧹 Closed Discord client session after closed-session error", flush=True)
-                    except Exception as close_exc:
-                        print(f"⚠️ Failed to close Discord client after closed-session error: {close_exc!r}", flush=True)
+                    await _cleanup_failed_gateway_transport("closed-session error")
                     delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                     await _gateway_rate_limit_sleep("closed Gateway session", delay, failure_attempt)
                     continue
-                try:
-                    await bot.close()
-                except Exception:
-                    pass
+                await _cleanup_failed_gateway_transport("unhandled runtime error")
                 raise
 
             # start() returning means the current Gateway session ended. Do not create a
@@ -4381,8 +4402,7 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("🛑 หยุดบอทแล้ว")
         finally:
-            # Do not call bot.close() here for Gateway hard-stop paths; those paths keep the
-            # process alive intentionally. A real OS shutdown will close resources naturally.
+            # Retry paths close only the HTTP transport; keep the Bot lifecycle reusable.
             pass
     else:
         print("⚠️ กรุณาตั้งค่า DISCORD_TOKEN ใน Environment Variable หรือระบุ Token สำหรับรันบอท")
