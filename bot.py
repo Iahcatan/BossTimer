@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V36_TASKS_COMMANDS_RESTORE_IMPORT_SAFE"
+NOTICE_BF_PATCH_VERSION = "V37_NOTIFICATION_FLAGS_HELPERS_RESTORE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4123,7 +4123,50 @@ async def check_library_boss_notifications():
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_library_boss_notifications': {e}")
 
 
-@tasks.loop(seconds=5)
+def get_notification_mentions(guild: discord.Guild) -> str:
+    if not guild:
+        return ""
+    roles = []
+    seen = set()
+    for role_id in TARGET_ROLE_IDS:
+        try:
+            role = guild.get_role(int(role_id))
+        except (TypeError, ValueError):
+            role = None
+        if role and role.id not in seen:
+            roles.append(role)
+            seen.add(role.id)
+    for role_name in TARGET_ROLE_NAMES:
+        role = discord.utils.find(lambda r: r.name.casefold() == role_name.casefold(), guild.roles)
+        if role and role.id not in seen:
+            roles.append(role)
+            seen.add(role.id)
+    return " ".join(role.mention for role in roles)
+
+
+async def save_boss_notification_flags(boss_name: str, **flags):
+    clean = {k: bool(v) for k, v in flags.items()}
+    if not clean:
+        return
+    with schedule_lock:
+        if boss_name in boss_schedule:
+            boss_schedule[boss_name].update(clean)
+    mapping = {
+        "notified_advance": "notifiedNotice",
+        "notified_spawn": "notifiedSpawn",
+        "voice_notice_sent": "voiceNoticeSent",
+        "voice_spawn_sent": "voiceSpawnSent",
+    }
+    try:
+        await asyncio.to_thread(
+            db.reference(f"boss_schedule/{boss_name}").update,
+            {mapping.get(k, k): v for k, v in clean.items()}
+        )
+    except Exception as e:
+        print(f"⚠️ Firebase notification flag update failed: {boss_name}: {e}")
+
+
+@tasks.loop(seconds=15)
 async def check_boss_notifications():
     try:
         now = datetime.now(TZ_THAI)
