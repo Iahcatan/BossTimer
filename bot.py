@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V40_ALL_COMMANDS_ACK_REST_GUARD_SAFE"
+NOTICE_BF_PATCH_VERSION = "V41_BOSS_VOICE_NOTIFICATION_RELIABILITY"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4244,7 +4244,7 @@ async def check_boss_notifications():
             # Never replay an old boss after a Render restart/deploy.
             # A schedule more than 60 seconds past spawn is considered stale.
             # Mark every notification flag complete before continuing.
-            if time_left < -60:
+            if time_left < -120:
                 if not (notified_advance and notified_spawn and voice_advance and voice_spawn):
                     await save_boss_notification_flags(
                         boss_name,
@@ -4262,7 +4262,7 @@ async def check_boss_notifications():
                 (0 < time_left <= notice_seconds and not notified_advance)
                 or (0 < time_left <= notice_seconds and not voice_advance)
                 or (time_left <= 0 and not notified_spawn)
-                or (-60 <= time_left <= 0 and not voice_spawn)
+                or (-120 <= time_left <= 0 and not voice_spawn)
             )
             if notification_action_due:
                 print(
@@ -4290,10 +4290,9 @@ async def check_boss_notifications():
                     if fb_channel:
                         channels_to_notify.append(fb_channel)
 
-            target_guilds = {getattr(ch, "guild", None) for ch in channels_to_notify}
-            target_guilds.discard(None)
-            if not target_guilds:
-                target_guilds = set(bot.guilds)
+            # Voice notifications must not depend on text-channel resolution or REST availability.
+            # Always evaluate configured /setvoice targets directly from the READY guild cache.
+            target_guilds = set(bot.guilds)
 
             # Advance: text and voice are independent one-shot states.
             if 0 < time_left <= notice_seconds and not notified_advance:
@@ -4321,7 +4320,10 @@ async def check_boss_notifications():
                 all_ok = True
                 spoken_rooms = 0
                 for guild in target_guilds:
-                    rooms = [r for r in get_configured_voice_channels(guild) if any(not m.bot for m in r.members)]
+                    configured_rooms = get_configured_voice_channels(guild)
+                    rooms = [r for r in configured_rooms if any(not m.bot for m in r.members)]
+                    if not rooms:
+                        print(f"⏭️ Boss VOICE WAIT | guild={guild.name} | configured={len(configured_rooms)} | occupied=0 | stage=advance")
                     for room in rooms:
                         try:
                             result = await asyncio.wait_for(
@@ -4367,12 +4369,15 @@ async def check_boss_notifications():
                     notified_spawn = True
                     print(f"🟢 Spawn notification sent: {boss_name}")
 
-            if -60 <= time_left <= 0 and not voice_spawn:
+            if -120 <= time_left <= 0 and not voice_spawn:
                 spoken_name = get_boss_pronunciation(boss_name)
                 all_ok = True
                 spoken_rooms = 0
                 for guild in target_guilds:
-                    rooms = [r for r in get_configured_voice_channels(guild) if any(not m.bot for m in r.members)]
+                    configured_rooms = get_configured_voice_channels(guild)
+                    rooms = [r for r in configured_rooms if any(not m.bot for m in r.members)]
+                    if not rooms:
+                        print(f"⏭️ Boss VOICE WAIT | guild={guild.name} | configured={len(configured_rooms)} | occupied=0 | stage=spawn")
                     for room in rooms:
                         try:
                             result = await asyncio.wait_for(
@@ -4395,7 +4400,7 @@ async def check_boss_notifications():
                     await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
                     voice_spawn = True
                     print(f"🔊 Spawn TTS sent: {boss_name} -> {spoken_rooms} occupied room(s)")
-            elif time_left < -60 and not voice_spawn:
+            elif time_left < -120 and not voice_spawn:
                 await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
                 print(f"⏭️ Legacy expired boss marked complete: {boss_name} (left={time_left:.1f}s)")
 
