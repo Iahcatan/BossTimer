@@ -4261,19 +4261,21 @@ async def _cleanup_failed_gateway_transport(reason: str):
         print(f"⚠️ Failed to close Discord HTTP transport after {reason}: {close_exc!r}", flush=True)
 
     try:
-        clear_http = getattr(http_client, "clear", None)
-        if clear_http is not None:
-            clear_http()
+        # discord.py exposes Client.clear() specifically to reopen a Client after
+        # Client.close() or a partially-failed startup. It resets the closing state
+        # and delegates to HTTPClient.clear(), which replaces a closed aiohttp
+        # session with the library's MISSING sentinel so the next login can create
+        # a fresh ClientSession. Use the public lifecycle reset instead of mutating
+        # private _closed state.
+        bot_clear = getattr(bot, "clear", None)
+        if bot_clear is not None:
+            bot_clear()
+        else:
+            clear_http = getattr(http_client, "clear", None)
+            if clear_http is not None:
+                clear_http()
     except Exception as clear_exc:
-        print(f"⚠️ Failed to clear Discord HTTP transport after {reason}: {clear_exc!r}", flush=True)
-
-    # Never leave the Bot lifecycle in Client.close() state during a retry.
-    # The retry controller owns the same Bot instance for the process lifetime.
-    if getattr(bot, "_closed", False):
-        try:
-            bot._closed = False
-        except Exception:
-            pass
+        print(f"⚠️ Failed to reset Discord client after {reason}: {clear_exc!r}", flush=True)
 
     print(
         f"🧹 Cleaned Discord HTTP transport after {reason}; bot lifecycle remains reusable",
@@ -4378,7 +4380,7 @@ async def run_bot_with_backoff(token: str):
                     print(f"⚠️ Discord session/client closed: {e}", flush=True)
                     await _cleanup_failed_gateway_transport("closed-session error")
                     delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
-                    await _gateway_rate_limit_sleep("closed Gateway session", delay, failure_attempt)
+                    await _gateway_rate_limit_sleep("closed Gateway session recovered", min(delay, 5.0), failure_attempt)
                     continue
                 await _cleanup_failed_gateway_transport("unhandled runtime error")
                 raise
