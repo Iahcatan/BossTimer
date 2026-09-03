@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V28_INTERACTION_ACK_AUTOCOMPLETE_FIX"
+NOTICE_BF_PATCH_VERSION = "V29_AUTOCOMPLETE_PLACEMENT_FIX"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -3810,12 +3810,6 @@ async def boss_time_prefix(ctx: commands.Context):
     asyncio.create_task(speak_in_guild(ctx.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
     await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
 
-@bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
-@app_commands.describe(
-    boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
-    kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน",
-    kill_date="วันที่บอสตาย DD/MM/YYYY (เว้นว่าง = วันนี้)"
-)
 async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     """Discord autocomplete must finish fast and return <=25 valid choices."""
     try:
@@ -3835,6 +3829,13 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     except Exception as e:
         print(f"⚠️ boss autocomplete error: {e}")
         return []
+
+@bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
+@app_commands.describe(
+    boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
+    kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน",
+    kill_date="วันที่บอสตาย DD/MM/YYYY (เว้นว่าง = วันนี้)"
+)
 
 @app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
