@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V43_INTERACTION_WEBHOOK_ISOLATED"
+NOTICE_BF_PATCH_VERSION = "V44_ADD_BOSS_INTERACTION_SAFE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4904,7 +4904,11 @@ bot.tree.add_command(add_group)
 )
 @has_allowed_role()
 async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, minutes: int = 30, seconds: int = 0, notice_minutes: int = 5):
-    await _safe_interaction_ack(interaction, ephemeral=False)
+    # Initial interaction ACK is time-critical and intentionally isolated from
+    # background REST cooldown.  If Discord rejects it (for example during a
+    # temporary API restriction), we still complete the Firebase write but do
+    # not generate additional followup/audit REST traffic that is known to fail.
+    ack_ok = await _safe_interaction_ack(interaction, ephemeral=False)
     name = (name or "").strip()
     if not name:
         await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ กรุณาระบุชื่อบอส", ephemeral=True)
@@ -4941,19 +4945,38 @@ async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, 
     }
     saved_ok = await save_custom_bosses_to_github()
     if not saved_ok:
-        await guarded_interaction_followup_send(interaction, "interaction-followup", 
-            f"❌ เพิ่มบอส **{canonical}** ไม่สำเร็จในการบันทึก Firebase — ไม่ถือว่าสำเร็จจนกว่าจะบันทึกได้",
-            ephemeral=True
-        )
+        if ack_ok:
+            await guarded_interaction_edit_original(
+                interaction,
+                "interaction-edit",
+                content="❌ เพิ่มบอสไม่สำเร็จในการบันทึก Firebase — ไม่ถือว่าสำเร็จจนกว่าจะบันทึกได้",
+            )
+        else:
+            print(f"⚠️ /add boss Firebase save failed and interaction ACK unavailable | boss={canonical}", flush=True)
         return
     # IMPORTANT: /addboss never writes boss_schedule.
-    await guarded_interaction_followup_send(interaction, "interaction-followup", 
+    success_text = (
         f"✅ เพิ่มบอส **{canonical}** เข้า Boss Definition สำเร็จ\n"
         f"⏳ CD สำหรับ /kill: **{BOSS_CD_TEXT[canonical]}**\n"
         f"🔔 แจ้งเตือนล่วงหน้า: **{notice_minutes} นาที**\n"
-        f"📌 ยังไม่ได้สร้าง Timer — ใช้ `/kill {canonical}` เมื่อบอสตาย",
-        ephemeral=False
+        f"📌 ยังไม่ได้สร้าง Timer — ใช้ `/kill {canonical}` เมื่อบอสตาย"
     )
+    if ack_ok:
+        await guarded_interaction_edit_original(
+            interaction,
+            "interaction-edit",
+            content=success_text,
+        )
+    else:
+        # Firebase persistence is still completed, but do not send followups/audit
+        # while Discord has rejected the interaction callback.  This avoids creating
+        # another guaranteed-failing REST request during the active restriction.
+        print(
+            f"⚠️ /add boss saved successfully but Discord interaction ACK unavailable | "
+            f"boss={canonical} | followup skipped safely",
+            flush=True,
+        )
+        return
     await send_audit_log(interaction.guild, interaction.user, "เพิ่มบอส (/addboss)", f"➕ `{canonical}` | CD {BOSS_CD_TEXT[canonical]} | ไม่มีการสร้าง boss_schedule", discord.Color.green())
 
 @bot.tree.command(name="delboss", description="ลบบอสออกจากตารางนับถอยหลัง")
