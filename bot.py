@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V41_BOSS_VOICE_NOTIFICATION_RELIABILITY"
+NOTICE_BF_PATCH_VERSION = "V43_INTERACTION_WEBHOOK_ISOLATED"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2428,26 +2428,67 @@ async def guarded_context_send(ctx, *args, context: str, **kwargs):
     )
 
 
+# Interaction webhook traffic is intentionally isolated from the background REST
+# circuit breaker.  A valid interaction token has its own webhook lane, and blocking
+# it because a background Discord REST route is cooling down can make otherwise-
+# successful slash commands appear to fail.  This lane still honors short Retry-After
+# values and refuses long sleeps that would outlive the interaction/webhook window.
+interaction_webhook_guard_lock = asyncio.Lock()
+interaction_webhook_next_call_at = 0.0
+
+async def _interaction_webhook_call(call_factory, *, context: str):
+    global interaction_webhook_next_call_at
+    async with interaction_webhook_guard_lock:
+        now = time.monotonic()
+        if interaction_webhook_next_call_at > now:
+            await asyncio.sleep(interaction_webhook_next_call_at - now)
+        try:
+            result = await call_factory()
+            interaction_webhook_next_call_at = time.monotonic() + max(0.1, discord_rest_min_interval)
+            return result
+        except discord.HTTPException as exc:
+            if getattr(exc, "status", None) == 429:
+                retry_after = 0.0
+                try:
+                    retry_after = float(getattr(exc, "retry_after", 0) or 0)
+                except (TypeError, ValueError):
+                    retry_after = 0.0
+                # Only honor a short webhook retry delay.  Waiting for a long
+                # restriction here would exceed the lifetime/usefulness of the interaction.
+                if 0 < retry_after <= 8.0:
+                    interaction_webhook_next_call_at = time.monotonic() + retry_after
+                    await asyncio.sleep(retry_after)
+                    result = await call_factory()
+                    interaction_webhook_next_call_at = time.monotonic() + max(0.1, discord_rest_min_interval)
+                    return result
+                print(
+                    f"⚠️ Interaction webhook 429 | context={context} | retry_after={retry_after:.2f}s | "
+                    "background REST cooldown ignored",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"⚠️ Interaction webhook failed | context={context} | status={getattr(exc, 'status', None)} | {exc}",
+                    flush=True,
+                )
+            return None
+        except Exception as exc:
+            print(f"⚠️ Interaction webhook failed unexpectedly | context={context} | {exc!r}", flush=True)
+            return None
+
+
 async def guarded_interaction_followup_send(interaction: discord.Interaction, context: str, *args, **kwargs):
-    try:
-        return await guarded_discord_call(
-            lambda: interaction.followup.send(*args, **kwargs),
-            context=context,
-        )
-    except discord.HTTPException as exc:
-        print(f"⚠️ Interaction followup failed safely | context={context} | status={getattr(exc, 'status', None)} | {exc}", flush=True)
-        return None
+    return await _interaction_webhook_call(
+        lambda: interaction.followup.send(*args, **kwargs),
+        context=context,
+    )
 
 
 async def guarded_interaction_edit_original(interaction: discord.Interaction, context: str, *args, **kwargs):
-    try:
-        return await guarded_discord_call(
-            lambda: interaction.edit_original_response(*args, **kwargs),
-            context=context,
-        )
-    except discord.HTTPException as exc:
-        print(f"⚠️ Interaction edit failed safely | context={context} | status={getattr(exc, 'status', None)} | {exc}", flush=True)
-        return None
+    return await _interaction_webhook_call(
+        lambda: interaction.edit_original_response(*args, **kwargs),
+        context=context,
+    )
 
 
 bot_event_loop = None
@@ -4195,6 +4236,8 @@ def get_notification_mentions(guild: discord.Guild) -> str:
     return " ".join(role.mention for role in roles)
 
 
+boss_notification_diag_last_ts = {}
+
 async def save_boss_notification_flags(boss_name: str, **flags):
     clean = {k: bool(v) for k, v in flags.items()}
     if not clean:
@@ -4242,7 +4285,7 @@ async def check_boss_notifications():
             voice_spawn = parse_bool(data.get("voice_spawn_sent", data.get("voiceSpawnSent", False)))
 
             # Never replay an old boss after a Render restart/deploy.
-            # A schedule more than 60 seconds past spawn is considered stale.
+            # A schedule more than 120 seconds past spawn is considered stale.
             # Mark every notification flag complete before continuing.
             if time_left < -120:
                 if not (notified_advance and notified_spawn and voice_advance and voice_spawn):
@@ -4258,18 +4301,35 @@ async def check_boss_notifications():
 
             # Do not spam Render logs every 5 seconds while nothing is changing.
             # Log only when a real notification action is due.
-            notification_action_due = (
-                (0 < time_left <= notice_seconds and not notified_advance)
-                or (0 < time_left <= notice_seconds and not voice_advance)
-                or (time_left <= 0 and not notified_spawn)
-                or (-120 <= time_left <= 0 and not voice_spawn)
-            )
+            # Report only when a notification state can actually change. During a
+            # global REST cooldown, a pending text notification is expected to remain
+            # false; do not flood logs every scheduler tick while Voice has already
+            # succeeded.
+            rest_blocked = _discord_rest_rate_limit_remaining() > 0
+            advance_text_due = (0 < time_left <= notice_seconds and not notified_advance and not rest_blocked)
+            advance_voice_due = (0 < time_left <= notice_seconds and not voice_advance)
+            spawn_text_due = (time_left <= 0 and not notified_spawn and not rest_blocked)
+            spawn_voice_due = (-120 <= time_left <= 0 and not voice_spawn)
+            notification_action_due = advance_text_due or advance_voice_due or spawn_text_due or spawn_voice_due
+
             if notification_action_due:
-                print(
-                    f"🔎 Boss notification action due: {boss_name} | spawn={spawn_time.isoformat()} | "
-                    f"left={time_left:.1f}s | notice={notice_minutes}m | advance={notified_advance} | "
-                    f"spawn_sent={notified_spawn} | voice_advance={voice_advance} | voice_spawn={voice_spawn}"
+                # Throttle informational "action due" lines to once per boss/stage per
+                # 60 seconds. This does not alter the actual send/retry behavior.
+                stage_key = (
+                    "advance" if advance_voice_due or advance_text_due
+                    else "spawn" if spawn_voice_due or spawn_text_due
+                    else "none"
                 )
+                diag_key = (boss_name, stage_key)
+                now_mono = time.monotonic()
+                last_diag = boss_notification_diag_last_ts.get(diag_key, 0.0)
+                if now_mono - last_diag >= 60.0:
+                    boss_notification_diag_last_ts[diag_key] = now_mono
+                    print(
+                        f"🔎 Boss notification action due: {boss_name} | spawn={spawn_time.isoformat()} | "
+                        f"left={time_left:.1f}s | notice={notice_minutes}m | advance={notified_advance} | "
+                        f"spawn_sent={notified_spawn} | voice_advance={voice_advance} | voice_spawn={voice_spawn}"
+                    )
 
             channel = None
             channel_id = data.get("channel_id") or data.get("channelId")
