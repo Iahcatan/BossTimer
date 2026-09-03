@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V32_GATEWAY_SESSION_LIFECYCLE_FIX"
+NOTICE_BF_PATCH_VERSION = "V34_GATEWAY_CONNECTOR_RESET_SAFE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4241,13 +4241,46 @@ async def _gateway_rate_limit_sleep(reason: str, seconds: float, attempt: int):
         await asyncio.sleep(min(60.0, max(1.0, deadline - time.monotonic())))
 
 
-async def _cleanup_failed_gateway_transport(reason: str):
-    """Close only discord.py's HTTP transport after a failed startup attempt.
+async def _prepare_gateway_http_transport():
+    """Ensure discord.py HTTP transport can create a fresh ClientSession.
 
-    IMPORTANT: do not call Client.close() here.  Client.close() marks the discord.py
-    client as permanently closed for this lifecycle, which makes reusing the same Bot
-    object for the next retry unsafe.  HTTPClient.close()/clear() releases the aiohttp
-    session while leaving the Bot itself reusable.
+    discord.py 2.6.x creates an aiohttp.ClientSession in HTTPClient.static_login().
+    When that session is closed, its owned TCP connector can also be closed. Reusing
+    the closed connector on the next static_login() can surface ``RuntimeError:
+    Session is closed`` even though the Bot itself reports is_closed() == False.
+    This helper only resets local HTTP transport state; it does not issue any Discord
+    request and therefore does not affect Discord rate limits.
+    """
+    http_client = getattr(bot, "http", None)
+    if http_client is None:
+        return
+
+    # Clear a previously closed aiohttp session first.
+    try:
+        clear_http = getattr(http_client, "clear", None)
+        if clear_http is not None:
+            clear_http()
+    except Exception as clear_exc:
+        print(f"⚠️ Failed to clear Discord HTTP session before startup: {clear_exc!r}", flush=True)
+
+    # If the connector was owned by discord.py and has already been closed,
+    # discard it so HTTPClient.static_login() creates a brand-new connector.
+    connector = getattr(http_client, "connector", None)
+    if connector is not None and getattr(connector, "closed", False):
+        try:
+            http_client.connector = discord.utils.MISSING
+            print("🧹 Reset closed Discord HTTP connector before Gateway startup", flush=True)
+        except Exception as connector_exc:
+            print(f"⚠️ Failed to reset Discord HTTP connector: {connector_exc!r}", flush=True)
+
+
+async def _cleanup_failed_gateway_transport(reason: str):
+    """Release a failed Gateway HTTP session and its owned connector safely.
+
+    This is local transport cleanup only. It does not perform any retry request and
+    does not bypass Discord rate limits. The connector is reset to discord.py's
+    MISSING sentinel so the next login gets a fresh TCP connector as well as a fresh
+    ClientSession.
     """
     http_client = getattr(bot, "http", None)
     if http_client is None:
@@ -4260,39 +4293,37 @@ async def _cleanup_failed_gateway_transport(reason: str):
     except Exception as close_exc:
         print(f"⚠️ Failed to close Discord HTTP transport after {reason}: {close_exc!r}", flush=True)
 
+    # The discord.py HTTPClient connector is created lazily by static_login().
+    # After HTTPClient.close(), that connector may itself be closed because it is
+    # owned by the ClientSession. Reset it so the next static_login() does not reuse
+    # a closed connector and immediately raise ``Session is closed``.
     try:
-        # discord.py exposes Client.clear() specifically to reopen a Client after
-        # Client.close() or a partially-failed startup. It resets the closing state
-        # and delegates to HTTPClient.clear(), which replaces a closed aiohttp
-        # session with the library's MISSING sentinel so the next login can create
-        # a fresh ClientSession. Use the public lifecycle reset instead of mutating
-        # private _closed state.
-        bot_clear = getattr(bot, "clear", None)
-        if bot_clear is not None:
-            bot_clear()
-        else:
-            clear_http = getattr(http_client, "clear", None)
-            if clear_http is not None:
-                clear_http()
+        http_client.connector = discord.utils.MISSING
+    except Exception as connector_exc:
+        print(f"⚠️ Failed to reset Discord HTTP connector after {reason}: {connector_exc!r}", flush=True)
+
+    try:
+        clear_http = getattr(http_client, "clear", None)
+        if clear_http is not None:
+            clear_http()
     except Exception as clear_exc:
-        print(f"⚠️ Failed to reset Discord client after {reason}: {clear_exc!r}", flush=True)
+        print(f"⚠️ Failed to clear Discord HTTP session after {reason}: {clear_exc!r}", flush=True)
 
     print(
-        f"🧹 Cleaned Discord HTTP transport after {reason}; bot lifecycle remains reusable",
+        f"🧹 Cleaned Discord HTTP session + connector after {reason}; client lifecycle reusable",
         flush=True,
     )
 
 
 async def run_bot_with_backoff(token: str):
-    """Single Gateway controller with rate-limit-aware recovery.
+    """Single Gateway controller with safe HTTP/session lifecycle recovery.
 
-    - Exactly one controller in this process.
-    - By default, avoid an extra authenticated Gateway preflight REST request on startup.
-    - If preflight is explicitly enabled, never IDENTIFY while it is rate-limited.
-    - Honor Retry-After when Discord provides it.
-    - Use bounded exponential cooldown when Discord omits a usable retry delay.
-    - Keep Render's Web Server alive while Discord is unavailable.
-    - Recover through the discord.py Gateway controller; optional preflight is diagnostic only.
+    The controller intentionally does NOT perform an extra authenticated Gateway
+    preflight by default. Discord's normal discord.py login path is used directly.
+    429 responses are respected with Retry-After when available; when Discord does not
+    provide a usable delay, a conservative exponential backoff is used. Local closed
+    session/connector errors are repaired before retrying without creating a second
+    Bot/Client instance or sending extra Discord requests.
     """
     global is_bot_ready
     if getattr(run_bot_with_backoff, "_active", False):
@@ -4303,6 +4334,9 @@ async def run_bot_with_backoff(token: str):
     failure_attempt = 0
     try:
         while True:
+            # Always make sure a closed local HTTP transport cannot be reused.
+            await _prepare_gateway_http_transport()
+
             if GATEWAY_PREFLIGHT_ENABLED:
                 limit_info = await _probe_gateway_session_start_limit(token)
 
@@ -4336,8 +4370,10 @@ async def run_bot_with_backoff(token: str):
             failure_attempt = 0
             print("🔌 กำลังเชื่อมต่อ Discord Gateway...", flush=True)
             is_bot_ready = False
+
             try:
                 await bot.start(token, reconnect=True)
+
             except discord.HTTPException as e:
                 is_bot_ready = False
                 status = getattr(e, "status", None)
@@ -4348,23 +4384,28 @@ async def run_bot_with_backoff(token: str):
                         retry_after = float(getattr(e, "retry_after", 0) or 0)
                     except (TypeError, ValueError):
                         retry_after = 0.0
+
+                    # A missing/zero retry_after on a startup 429 is not permission to
+                    # retry immediately. Use a conservative 15-minute fallback, then
+                    # exponential backoff up to 1 hour on repeated failures.
                     fallback = min(900.0 * (2 ** max(0, failure_attempt - 1)), 3600.0)
                     delay = max(retry_after + 2.0, fallback if retry_after <= 0 else retry_after + 2.0)
+
                     print(
                         f"🛑 Discord Gateway/REST startup 429 | retry_after={retry_after:.1f}s | next_retry={delay:.0f}s",
                         flush=True,
                     )
-                    # A failed bot.start() can leave discord.py's aiohttp session open.
-                    # Close only the HTTP transport so the Bot object itself remains reusable.
                     await _cleanup_failed_gateway_transport("startup 429")
                     await _gateway_rate_limit_sleep("Gateway startup 429", delay, failure_attempt)
                     continue
+
                 print(f"❌ Discord HTTP error status={status}: {e}", flush=True)
                 failure_attempt += 1
                 await _cleanup_failed_gateway_transport("startup HTTP error")
                 delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                 await _gateway_rate_limit_sleep("Gateway HTTP error", delay, failure_attempt)
                 continue
+
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 is_bot_ready = False
                 failure_attempt += 1
@@ -4373,32 +4414,30 @@ async def run_bot_with_backoff(token: str):
                 delay = min(30.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
                 await _gateway_rate_limit_sleep("Gateway connection error", delay, failure_attempt)
                 continue
+
             except RuntimeError as e:
                 is_bot_ready = False
-                if "Session is closed" in str(e) or "Client is closed" in str(e):
-                    # A closed aiohttp/discord.py lifecycle is not a transient Gateway
-                    # error. Re-entering bot.start() on this same process can trigger
-                    # repeated IDENTIFY attempts and amplify Discord 429 responses.
-                    # Clean the transport once, then stop this process so Render can
-                    # create a completely fresh Python/client lifecycle.
-                    print(
-                        f"🛑 Discord session/client lifecycle is closed; stopping current process: {e}",
-                        flush=True,
-                    )
-                    await _cleanup_failed_gateway_transport("closed-session lifecycle")
-                    raise RuntimeError(
-                        "Discord Gateway client lifecycle is closed; process restart required "
-                        "instead of reusing the closed client"
-                    ) from e
+                text = str(e)
+                if "Session is closed" in text or "Client is closed" in text:
+                    failure_attempt += 1
+                    print(f"⚠️ Discord local session state invalid: {e}", flush=True)
+                    await _cleanup_failed_gateway_transport("closed-session error")
+                    # Local lifecycle failures are not Discord permission to spam
+                    # reconnect attempts. Give the process a real recovery interval.
+                    delay = min(60.0 * (2 ** max(0, failure_attempt - 1)), 900.0)
+                    await _gateway_rate_limit_sleep("local Gateway session recovered", delay, failure_attempt)
+                    continue
+
                 await _cleanup_failed_gateway_transport("unhandled runtime error")
                 raise
 
-            # start() returning means the current Gateway session ended. Do not create a
-            # second session immediately; apply a small cooldown and re-check preflight.
+            # start() returning means the current Gateway session ended. Do not create
+            # a tight reconnect loop; allow discord.py/Discord state to settle first.
             is_bot_ready = False
             failure_attempt = 0
             print("⚠️ Discord Gateway session ended — re-checking Gateway after 15s", flush=True)
             await asyncio.sleep(15)
+
     finally:
         run_bot_with_backoff._active = False
 
