@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V37_NOTIFICATION_FLAGS_HELPERS_RESTORE"
+NOTICE_BF_PATCH_VERSION = "V38_FULL_FEATURE_INTEGRITY_RESTORE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -5306,6 +5306,90 @@ async def run_bot_with_backoff(token: str):
 
     finally:
         run_bot_with_backoff._active = False
+
+
+# -----------------------------------------------------------------------------
+# V38 PATCH INTEGRITY CHECK
+# Keep this check deliberately narrow: it only verifies that the handlers and
+# notification tasks required by the existing bot architecture still exist.
+# It does not modify runtime behavior or feature logic.
+# -----------------------------------------------------------------------------
+REQUIRED_PATCH_FUNCTIONS = (
+    "boss_autocomplete",
+    "get_notification_mentions",
+    "save_boss_notification_flags",
+    "check_bf_notifications",
+    "check_library_boss_notifications",
+    "check_boss_notifications",
+    "update_live_embed",
+    "check_auto_disconnect",
+)
+
+EXPECTED_SLASH_COMMANDS = {
+    "add boss",
+    "attendance",
+    "delboss",
+    "disconnect",
+    "join",
+    "kill",
+    "leave",
+    "notice",
+    "notify",
+    "panel",
+    "ppl",
+    "setlive",
+    "setvoice",
+    "status",
+    "time",
+    "tts",
+    "vip",
+}
+
+
+def _collect_registered_command_paths():
+    paths = set()
+    try:
+        for command in bot.tree.get_commands():
+            if isinstance(command, app_commands.Group):
+                children = getattr(command, "commands", []) or []
+                if children:
+                    for child in children:
+                        paths.add(f"{command.name} {child.name}")
+                else:
+                    paths.add(command.name)
+            else:
+                paths.add(command.name)
+    except Exception as exc:
+        print(f"⚠️ V38 command integrity check skipped: {exc!r}")
+    return paths
+
+
+def _run_v38_integrity_check():
+    missing = [name for name in REQUIRED_PATCH_FUNCTIONS if name not in globals()]
+    if missing:
+        raise RuntimeError(
+            "V38 integrity failure: required functions missing: " + ", ".join(missing)
+        )
+
+    command_paths = _collect_registered_command_paths()
+    if command_paths:
+        missing_commands = sorted(EXPECTED_SLASH_COMMANDS - command_paths)
+        unexpected_commands = sorted(command_paths - EXPECTED_SLASH_COMMANDS)
+        if missing_commands or unexpected_commands:
+            raise RuntimeError(
+                "V38 integrity failure: command set mismatch | "
+                f"missing={missing_commands} unexpected={unexpected_commands} "
+                f"actual={sorted(command_paths)}"
+            )
+        print(
+            f"✅ V38 integrity check passed | functions={len(REQUIRED_PATCH_FUNCTIONS)} "
+            f"slash_commands={len(command_paths)}"
+        , flush=True)
+    else:
+        raise RuntimeError("V38 integrity failure: no slash commands registered")
+
+
+_run_v38_integrity_check()
 
 if __name__ == "__main__":
     # Render needs the HTTP listener immediately; start it exactly once.
