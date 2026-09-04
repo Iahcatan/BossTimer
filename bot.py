@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V45_ADD_BOSS_DIRECT_INITIAL_RESPONSE"
+NOTICE_BF_PATCH_VERSION = "V46_TIME_SUMMARY_RESTORE_COMMANDS_SAFE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4666,6 +4666,102 @@ async def notice_command(interaction: discord.Interaction, message: str):
                 flush=True,
             )
 
+def generate_boss_time_summary():
+    """Build the /time embed and the multilingual TTS summary from current boss_schedule."""
+    now = datetime.now(TZ_THAI)
+    with schedule_lock:
+        schedule_copy = boss_schedule.copy()
+
+    if not schedule_copy:
+        return (
+            None,
+            "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ",
+            None,
+            None,
+        )
+
+    sorted_bosses = sorted(
+        schedule_copy.items(),
+        key=lambda x: parse_to_thai_datetime(x[1].get("spawn_time")) or now,
+    )
+    embed = discord.Embed(
+        title="⌛ สรุปเวลาที่เหลือของบอสทุกตัว (เรียงจากน้อยไปมาก)",
+        description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`",
+        color=discord.Color.purple(),
+    )
+
+    tts_lines_th = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
+    tts_lines_en = ["Boss time summary from earliest to latest."]
+    tts_lines_ko = ["보스 스폰 시간 요약입니다."]
+
+    for boss, data in sorted_bosses[:20]:
+        spawn_time = parse_to_thai_datetime(data.get("spawn_time"))
+        if not spawn_time:
+            continue
+
+        time_left_sec = (spawn_time - now).total_seconds()
+        spoken_name = get_boss_pronunciation(boss)
+        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
+
+        if time_left_sec <= 0:
+            time_left_str = "เกิดแล้ว!"
+            tts_lines_th.append(f"บอส {spoken_name} เกิดแล้วค่ะ")
+            tts_lines_en.append(f"Boss {boss} has spawned.")
+            tts_lines_ko.append(f"보스 {boss}가 나타났습니다.")
+        else:
+            total_seconds = max(0, int(time_left_sec))
+            m, s = divmod(total_seconds, 60)
+            h, m = divmod(m, 60)
+
+            parts = []
+            if h > 0:
+                parts.append(f"{h} ชม.")
+            if m > 0 or h > 0:
+                parts.append(f"{m} นาที")
+            parts.append(f"{s} วินาที")
+            time_left_str = f"อีก {' '.join(parts)}"
+
+            if h > 0:
+                tts_time_th = f"{h} ชั่วโมง {m} นาที"
+                tts_time_en = f"{h} hours and {m} minutes"
+                tts_time_ko = f"{h}시간 {m}분" if m > 0 else f"{h}시간"
+            elif m > 0:
+                tts_time_th = f"{m} นาที"
+                tts_time_en = f"{m} minutes"
+                tts_time_ko = f"{m}분"
+            else:
+                tts_time_th = f"{s} วินาที"
+                tts_time_en = f"{s} seconds"
+                tts_time_ko = f"{s}초"
+
+            tts_lines_th.append(f"บอส {spoken_name} เหลืออีก {tts_time_th}")
+            tts_lines_en.append(f"Boss {boss} in {tts_time_en}.")
+            tts_lines_ko.append(f"보스 {boss}가 {tts_time_ko} 남았습니다.")
+
+        embed.add_field(
+            name=f"👾 {boss}",
+            value=(
+                f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | "
+                f"นับถอยหลัง: **{time_left_str}**\n"
+                f"*(บันทึกโดย: {rec_by})*"
+            ),
+            inline=False,
+        )
+
+    if len(sorted_bosses) > 20:
+        embed.add_field(
+            name="📌 หมายเหตุ",
+            value=f"*ยังมีบอสอีก {len(sorted_bosses) - 20} ตัว สามารถดูเพิ่มเติมได้บน Dashboard*",
+            inline=False,
+        )
+
+    return (
+        embed,
+        " ".join(tts_lines_th),
+        " ".join(tts_lines_en),
+        " ".join(tts_lines_ko),
+    )
+
 @bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
 async def boss_time_slash(interaction: discord.Interaction):
     # Initial interaction ACK is time-critical and must remain isolated from the
@@ -5380,18 +5476,18 @@ def validate_runtime_integrity():
     required_funcs = [
         "boss_autocomplete", "get_notification_mentions", "save_boss_notification_flags",
         "check_bf_notifications", "check_library_boss_notifications", "check_boss_notifications",
-        "update_live_embed", "check_auto_disconnect", "boss_time_slash",
+        "update_live_embed", "check_auto_disconnect", "boss_time_slash", "generate_boss_time_summary",
     ]
     missing = [name for name in required_funcs if not callable(globals().get(name))]
     if missing:
-        raise RuntimeError("V40 integrity check failed; missing functions: " + ", ".join(missing))
+        raise RuntimeError("V46 integrity check failed; missing functions: " + ", ".join(missing))
     direct = [cmd.name for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Command)]
     if len(direct) != 16:
-        raise RuntimeError(f"V40 integrity check failed; expected 16 direct slash commands, found {len(direct)}")
+        raise RuntimeError(f"V46 integrity check failed; expected 16 direct slash commands, found {len(direct)}")
     group = next((cmd for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Group) and cmd.name == "add"), None)
     if group is None or not any(sub.name == "boss" for sub in group.commands):
-        raise RuntimeError("V40 integrity check failed; /add boss subcommand missing")
-    print("✅ V40 integrity check passed | 16 direct + /add boss = 17 command paths", flush=True)
+        raise RuntimeError("V46 integrity check failed; /add boss subcommand missing")
+    print("✅ V46 integrity check passed | 16 direct + /add boss = 17 command paths", flush=True)
 
 
 async def run_bot_with_backoff(token: str):
