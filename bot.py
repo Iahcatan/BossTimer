@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V48_TIME_ACK_SAFE_KILL_NO_AUTOCOMPLETE"
+NOTICE_BF_PATCH_VERSION = "V49_TIME_CHANNEL_FALLBACK_AUDIT_SAFE_2026-09-04"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4792,22 +4792,78 @@ def generate_boss_time_summary():
         " ".join(tts_lines_ko),
     )
 
+async def _time_channel_fallback(interaction: discord.Interaction, *, embed=None, content=None):
+    """Fallback for /time when Discord rejects the interaction callback.
+
+    This is a normal channel message, not an interaction response, so it is only
+    used after the one allowed initial interaction callback has already failed.
+    It is bounded to a few seconds and goes through the existing REST guard so
+    we never create a retry storm during a Discord restriction.
+    """
+    channel = getattr(interaction, "channel", None)
+    if channel is None:
+        print("⚠️ /time channel fallback unavailable: interaction.channel is None", flush=True)
+        return False
+
+    try:
+        message = await asyncio.wait_for(
+            guarded_discord_call(
+                lambda: channel.send(
+                    content=content,
+                    embed=embed,
+                ),
+                context="time-channel-fallback",
+                wait_for_cooldown=True,
+            ),
+            timeout=4.0,
+        )
+        if message is not None:
+            print("✅ /time channel fallback sent successfully", flush=True)
+            return True
+        print("⚠️ /time channel fallback was skipped by Discord REST guard", flush=True)
+        return False
+    except asyncio.TimeoutError:
+        print("⚠️ /time channel fallback timed out safely", flush=True)
+        return False
+    except discord.HTTPException as exc:
+        print(
+            f"⚠️ /time channel fallback failed | status={getattr(exc, 'status', None)} | {exc}",
+            flush=True,
+        )
+        return False
+    except Exception as exc:
+        print(f"⚠️ /time channel fallback failed unexpectedly: {exc!r}", flush=True)
+        return False
+
+
 @bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
 async def boss_time_slash(interaction: discord.Interaction):
     # Build the result locally first, then use ONE initial interaction response.
-    # This avoids the defer -> followup chain when Discord is healthy and avoids
-    # unnecessary webhook traffic after a 429.
+    # If Discord rejects that callback with 429, fall back to ONE ordinary channel
+    # message instead of retrying the interaction webhook.
     ack_ok = False
+    fallback_sent = False
     try:
         embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
+        response_content = None if embed is not None else tts_text_th
+        response_embed = embed if embed is not None else None
+
         ack_ok = await _safe_interaction_send_message(
             interaction,
-            content=None if embed is not None else tts_text_th,
-            embed=embed if embed is not None else None,
+            content=response_content,
+            embed=response_embed,
             ephemeral=True,
         )
         if not ack_ok:
-            print("⚠️ /time ACK unavailable; continuing summary/TTS work safely", flush=True)
+            print(
+                "⚠️ /time ACK unavailable; using one bounded normal-channel fallback safely",
+                flush=True,
+            )
+            fallback_sent = await _time_channel_fallback(
+                interaction,
+                content=response_content,
+                embed=response_embed,
+            )
 
         if embed is not None:
             print("✅ /time summary prepared and initial response attempted", flush=True)
@@ -4815,26 +4871,33 @@ async def boss_time_slash(interaction: discord.Interaction):
             print("ℹ️ /time summary generated without embed", flush=True)
 
         # Keep the original Voice/TTS behavior unchanged.
-        asyncio.create_task(
-            speak_in_guild(
-                interaction.guild,
-                text_th=tts_text_th,
-                text_en=tts_text_en,
-                text_ko=tts_text_ko,
+        if interaction.guild is not None:
+            asyncio.create_task(
+                speak_in_guild(
+                    interaction.guild,
+                    text_th=tts_text_th,
+                    text_en=tts_text_en,
+                    text_ko=tts_text_ko,
+                )
             )
-        )
 
-        # Do not create an additional REST request for audit while Discord is restricted.
-        if ack_ok:
-            await send_audit_log(
-                interaction.guild,
-                interaction.user,
-                "เช็กเวลาบอสพร้อม TTS (/time)",
-                "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย",
-                discord.Color.purple(),
-            )
-        else:
-            print("ℹ️ /time audit skipped because interaction ACK was unavailable", flush=True)
+        # Audit is independent from the interaction callback.  When the callback
+        # is rejected, still attempt exactly one normal REST audit request through
+        # the existing guard.  The guard will skip it safely during a long 429.
+        await send_audit_log(
+            interaction.guild,
+            interaction.user,
+            "เช็กเวลาบอสพร้อม TTS (/time)",
+            (
+                "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย"
+                if ack_ok
+                else "คำนวณสรุปเวลาบอสสำเร็จ แต่ Discord ปฏิเสธ interaction callback; "
+                     f"ส่งผลลัพธ์ผ่านข้อความในห้อง = {'สำเร็จ' if fallback_sent else 'ไม่สำเร็จ'}"
+            ),
+            discord.Color.purple(),
+        )
+        if not ack_ok and not fallback_sent:
+            print("⚠️ /time result could not be posted to Discord; audit attempt completed safely", flush=True)
     except Exception as exc:
         print(f"❌ /time command failed safely: {exc!r}", flush=True)
         if ack_ok:
