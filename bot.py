@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V47_INTERACTION_ACK_DIAGNOSTICS_COMMAND_SAFE"
+NOTICE_BF_PATCH_VERSION = "V48_TIME_ACK_SAFE_KILL_NO_AUTOCOMPLETE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4885,14 +4885,15 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
     kill_date="วันที่บอสตาย DD/MM/YYYY (เว้นว่าง = วันนี้)"
 )
 
-@app_commands.autocomplete(boss_name=boss_autocomplete)
 @has_allowed_role()
 async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None, kill_date: str = None):
-    # Acknowledge immediately.
+    # Acknowledge immediately.  /kill intentionally has NO autocomplete callback
+    # so typing the boss name cannot trigger a separate autocomplete interaction.
+    ack_ok = False
     try:
-        await _safe_interaction_ack(interaction, ephemeral=False)
+        ack_ok = await _safe_interaction_ack(interaction, ephemeral=False)
     except Exception as e:
-        print(f"❌ /kill defer failed: {e}")
+        print(f"❌ /kill initial ACK failed: {e}", flush=True)
         return
 
     try:
@@ -4907,10 +4908,13 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
             else:
                 boss_died_at = datetime(selected_date.year, selected_date.month, selected_date.day, now.hour, now.minute, now.second, tzinfo=TZ_THAI)
         except ValueError:
-            await guarded_interaction_followup_send(interaction, "interaction-followup", 
-                "❌ วันที่/เวลาไม่ถูกต้อง! วันที่ใช้รูปแบบ **DD/MM/YYYY** เช่น **29/08/2026** และเวลาใช้ **17:30** หรือ **1730**",
-                ephemeral=True
-            )
+            if ack_ok:
+                await guarded_interaction_followup_send(interaction, "interaction-followup",
+                    "❌ วันที่/เวลาไม่ถูกต้อง! วันที่ใช้รูปแบบ **DD/MM/YYYY** เช่น **29/08/2026** และเวลาใช้ **17:30** หรือ **1730**",
+                    ephemeral=True
+                )
+            else:
+                print("⚠️ /kill input validation failed but interaction ACK was unavailable; followup skipped safely", flush=True)
             return
 
         respawn_time = get_boss_respawn_time(canonical_name)
@@ -4965,8 +4969,17 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
         embed.set_footer(text=f"บันทึกโดย {user_name}")
 
-        # Send Discord response before any Firebase/local I/O.
-        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+        # Only send a followup when the initial interaction ACK succeeded.
+        # If Discord rejected the initial callback (for example HTTP 429), a followup
+        # would be invalid and would create avoidable REST traffic during the restriction.
+        if ack_ok:
+            await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
+        else:
+            print(
+                f"⚠️ /kill saved locally but initial interaction ACK was unavailable | "
+                f"boss={canonical_name} | followup skipped safely",
+                flush=True,
+            )
 
         async def persist_kill():
             try:
@@ -5004,12 +5017,15 @@ async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time:
         asyncio.create_task(persist_kill())
 
     except Exception as e:
-        print(f"❌ /kill unexpected error: {e}")
+        print(f"❌ /kill unexpected error: {e}", flush=True)
         traceback.print_exc()
-        try:
-            await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ /kill เกิดข้อผิดพลาด: `{e}`", ephemeral=True)
-        except Exception:
-            pass
+        if ack_ok:
+            try:
+                await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ /kill เกิดข้อผิดพลาด: `{e}`", ephemeral=True)
+            except Exception:
+                pass
+        else:
+            print("⚠️ /kill error response skipped because initial interaction ACK was unavailable", flush=True)
 
 add_group = app_commands.Group(name="add", description="คำสั่งจัดการข้อมูลบอส")
 bot.tree.add_command(add_group)
