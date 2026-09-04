@@ -67,7 +67,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V46_TIME_SUMMARY_RESTORE_COMMANDS_SAFE"
+NOTICE_BF_PATCH_VERSION = "V47_INTERACTION_ACK_DIAGNOSTICS_COMMAND_SAFE"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2478,6 +2478,21 @@ async def _interaction_webhook_call(call_factory, *, context: str):
 
 
 async def guarded_interaction_followup_send(interaction: discord.Interaction, context: str, *args, **kwargs):
+    """Send a follow-up only after a successful initial interaction response.
+
+    A follow-up before the initial callback has been accepted is guaranteed to be
+    unsafe for an interaction that Discord has already rejected with 429.  Skip it
+    locally so a failed ACK cannot create an unnecessary second request.
+    """
+    try:
+        if not interaction.response.is_done():
+            print(
+                f"⏭️ Interaction followup skipped because initial response was not accepted | context={context}",
+                flush=True,
+            )
+            return None
+    except Exception:
+        pass
     return await _interaction_webhook_call(
         lambda: interaction.followup.send(*args, **kwargs),
         context=context,
@@ -2485,6 +2500,16 @@ async def guarded_interaction_followup_send(interaction: discord.Interaction, co
 
 
 async def guarded_interaction_edit_original(interaction: discord.Interaction, context: str, *args, **kwargs):
+    """Edit the original interaction response only when the initial callback succeeded."""
+    try:
+        if not interaction.response.is_done():
+            print(
+                f"⏭️ Interaction edit skipped because initial response was not accepted | context={context}",
+                flush=True,
+            )
+            return None
+    except Exception:
+        pass
     return await _interaction_webhook_call(
         lambda: interaction.edit_original_response(*args, **kwargs),
         context=context,
@@ -3716,9 +3741,14 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
                 retry_after = float(getattr(exc, "retry_after", 0) or 0)
             except (TypeError, ValueError):
                 retry_after = 0.0
+            response = getattr(exc, "response", None)
+            headers = getattr(response, "headers", None) or {}
+            cf_ray = headers.get("CF-RAY") or headers.get("cf-ray") or "-"
+            via = headers.get("Via") or headers.get("via") or "-"
+            date_header = headers.get("Date") or headers.get("date") or "-"
             print(
                 f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
-                "shared REST cooldown unchanged",
+                f"cf_ray={cf_ray} | via={via} | date={date_header} | shared REST cooldown unchanged",
                 flush=True,
             )
             return False
@@ -4764,35 +4794,25 @@ def generate_boss_time_summary():
 
 @bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
 async def boss_time_slash(interaction: discord.Interaction):
-    # Initial interaction ACK is time-critical and must remain isolated from the
-    # background REST circuit breaker.  A Discord 429 must not crash the command.
-    ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
-    if not ack_ok:
-        print("⚠️ /time ACK unavailable; continuing summary/TTS work safely", flush=True)
-
+    # Build the result locally first, then use ONE initial interaction response.
+    # This avoids the defer -> followup chain when Discord is healthy and avoids
+    # unnecessary webhook traffic after a 429.
+    ack_ok = False
     try:
         embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
-        if embed is None:
-            if ack_ok:
-                try:
-                    await guarded_interaction_followup_send(
-                        interaction, "interaction-followup", tts_text_th
-                    )
-                except discord.HTTPException as exc:
-                    print(f"⚠️ /time result response failed: {exc}", flush=True)
-            else:
-                print("ℹ️ /time summary generated without interaction ACK", flush=True)
-            return
+        ack_ok = await _safe_interaction_send_message(
+            interaction,
+            content=None if embed is not None else tts_text_th,
+            embed=embed if embed is not None else None,
+            ephemeral=True,
+        )
+        if not ack_ok:
+            print("⚠️ /time ACK unavailable; continuing summary/TTS work safely", flush=True)
 
-        if ack_ok:
-            try:
-                await guarded_interaction_followup_send(
-                    interaction, "interaction-followup", embed=embed
-                )
-            except discord.HTTPException as exc:
-                print(f"⚠️ /time embed response failed: {exc}", flush=True)
+        if embed is not None:
+            print("✅ /time summary prepared and initial response attempted", flush=True)
         else:
-            print("ℹ️ /time embed generated without interaction ACK", flush=True)
+            print("ℹ️ /time summary generated without embed", flush=True)
 
         # Keep the original Voice/TTS behavior unchanged.
         asyncio.create_task(
@@ -4803,15 +4823,19 @@ async def boss_time_slash(interaction: discord.Interaction):
                 text_ko=tts_text_ko,
             )
         )
-        await send_audit_log(
-            interaction.guild,
-            interaction.user,
-            "เช็กเวลาบอสพร้อม TTS (/time)",
-            "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย",
-            discord.Color.purple(),
-        )
+
+        # Do not create an additional REST request for audit while Discord is restricted.
+        if ack_ok:
+            await send_audit_log(
+                interaction.guild,
+                interaction.user,
+                "เช็กเวลาบอสพร้อม TTS (/time)",
+                "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย",
+                discord.Color.purple(),
+            )
+        else:
+            print("ℹ️ /time audit skipped because interaction ACK was unavailable", flush=True)
     except Exception as exc:
-        # Never let a REST/interaction error escape the slash-command callback.
         print(f"❌ /time command failed safely: {exc!r}", flush=True)
         if ack_ok:
             try:
@@ -5705,6 +5729,46 @@ def _run_v38_integrity_check():
 
 
 _run_v38_integrity_check()
+
+
+
+def _run_v47_command_integrity_check():
+    required = [
+        "boss_autocomplete",
+        "generate_boss_time_summary",
+        "get_notification_mentions",
+        "save_boss_notification_flags",
+        "check_bf_notifications",
+        "check_library_boss_notifications",
+        "check_boss_notifications",
+        "update_live_embed",
+        "check_auto_disconnect",
+        "boss_time_slash",
+        "add_boss",
+    ]
+    missing = [name for name in required if name not in globals()]
+    direct_names = []
+    try:
+        direct_names = sorted(
+            cmd.name for cmd in bot.tree.get_commands()
+            if isinstance(cmd, app_commands.Command)
+        )
+    except Exception:
+        direct_names = []
+    if missing:
+        print(f"❌ V47 integrity failure | missing symbols: {missing}", flush=True)
+        raise RuntimeError(f"V47 integrity failure: {missing}")
+    if len(direct_names) != 16:
+        print(f"⚠️ V47 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
+    else:
+        print(
+            f"✅ V47 integrity check passed | 16 direct + /add boss = 17 command paths | "
+            f"direct={', '.join(direct_names)}",
+            flush=True,
+        )
+
+
+_run_v47_command_integrity_check()
 
 if __name__ == "__main__":
     # Render needs the HTTP listener immediately; start it exactly once.
