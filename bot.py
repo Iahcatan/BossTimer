@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V52_DISCORD_BLOCK_LOOP_BREAKER_RATE_LIMIT_SAFE_2026-09-05"
+NOTICE_BF_PATCH_VERSION = "V53_DISCORD_REST_BLOCK_PERSISTENCE_STARTUP_GATE_2026-09-05"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2268,6 +2268,15 @@ discord_block_next_probe_mono = 0.0
 discord_block_local_retry_seconds = 60.0
 discord_block_recovery_grace_seconds = max(5.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_GRACE", "15")))
 discord_block_recovery_until_mono = 0.0
+
+# V53: Persist the REST restriction state across process/Gateway restarts.
+# Firebase is the durable source on Render; SQLite is kept as a local fallback
+# for same-container restarts. This state is only written on block/clear events,
+# never on the 15-second diagnostics heartbeat.
+DISCORD_REST_BLOCK_FIREBASE_PATH = "app_settings/discord_rest_block"
+discord_block_persist_lock = asyncio.Lock()
+discord_block_persist_task = None
+
 discord_block_lock = threading.Lock()
 
 
@@ -2331,6 +2340,248 @@ def _extract_discord_retry_after(exc: Exception) -> float:
     return float(_extract_discord_rate_limit_metadata(exc).get("retry_after") or 0.0)
 
 
+def _discord_block_state_snapshot() -> dict:
+    """Return a JSON-safe snapshot of the current Discord REST restriction state."""
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        started = float(discord_block_started_at or 0.0)
+        last_seen = float(discord_block_last_seen_at or 0.0)
+        server_until = float(discord_block_server_until or 0.0)
+        server_retry_after = float(discord_block_server_retry_after or 0.0)
+        scope = str(discord_block_scope or "")
+        is_global = bool(discord_block_global)
+        kind = str(discord_block_kind or "")
+        source = str(discord_block_source or "")
+        temp_restriction = bool(discord_block_temp_restriction)
+        next_probe_mono = float(discord_block_next_probe_mono or 0.0)
+        local_retry = float(discord_block_local_retry_seconds or 60.0)
+
+    next_probe_remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
+    # If the 429 evidence already contains an authoritative server expiry but the
+    # local probe deadline has not been computed yet, persist a safe recovery point
+    # derived from that server expiry. This closes the tiny record-before-apply gap.
+    if next_probe_remaining <= 0 and temp_restriction and server_until > now_wall:
+        next_probe_remaining = max(0.0, (server_until - now_wall) + discord_block_recovery_grace_seconds)
+    elif next_probe_remaining <= 0 and temp_restriction and server_until <= 0:
+        # Interaction 429s may provide no usable expiry header. Persist the
+        # current local safety retry so a process restart still keeps the gate closed.
+        next_probe_remaining = max(60.0, local_retry)
+    # Persist wall-clock time, not monotonic time, because monotonic clocks reset
+    # when the Python process restarts.
+    next_probe_at = now_wall + next_probe_remaining if next_probe_remaining > 0 else 0.0
+    return {
+        "version": 1,
+        "updated_at": now_wall,
+        "started_at": started,
+        "last_seen_at": last_seen,
+        "server_until": server_until,
+        "server_retry_after": server_retry_after,
+        "next_probe_at": next_probe_at,
+        "scope": scope,
+        "global": is_global,
+        "kind": kind,
+        "source": source,
+        "temp_restriction": temp_restriction,
+        "local_retry_seconds": local_retry,
+    }
+
+
+def _schedule_persist_discord_block_state(reason: str):
+    """Persist restriction state without blocking the Discord event loop."""
+    global discord_block_persist_task
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if discord_block_persist_task and not discord_block_persist_task.done():
+        return
+    discord_block_persist_task = loop.create_task(
+        _persist_discord_block_state_async(reason=reason),
+        name="discord-rest-block-persist",
+    )
+
+
+async def _persist_discord_block_state_async(*, reason: str):
+    state = _discord_block_state_snapshot()
+    if state.get("started_at", 0.0) <= 0:
+        return
+    try:
+        async with discord_block_persist_lock:
+            # Local fallback first; this is immediate and useful if the process
+            # restarts without a new Render deploy.
+            try:
+                set_db_value("discord_rest_block", state)
+            except Exception as exc:
+                print(f"⚠️ Discord REST block SQLite persist failed: {exc!r}", flush=True)
+
+            # Firebase is durable across Render restarts/deploys. It is an
+            # isolated small state node and does not alter Boss/Firebase schemas.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).set,
+                        state,
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as exc:
+                print(f"⚠️ Discord REST block Firebase persist failed | reason={reason}: {exc!r}", flush=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ Discord REST block persistence failed | reason={reason}: {exc!r}", flush=True)
+
+
+async def _clear_persisted_discord_block_state(*, reason: str):
+    """Remove the persisted restriction only after a confirmed successful REST request."""
+    try:
+        async with discord_block_persist_lock:
+            try:
+                set_db_value("discord_rest_block", None)
+            except Exception as exc:
+                print(f"⚠️ Discord REST block SQLite clear failed: {exc!r}", flush=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).delete,
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as exc:
+                print(f"⚠️ Discord REST block Firebase clear failed | reason={reason}: {exc!r}", flush=True)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"⚠️ Discord REST block persistence clear failed | reason={reason}: {exc!r}", flush=True)
+
+
+async def restore_persisted_discord_block_state():
+    """Restore a still-active Discord REST restriction after a process restart."""
+    global discord_block_started_at, discord_block_last_seen_at
+    global discord_rest_rate_limited_until
+    global discord_block_server_until, discord_block_server_retry_after
+    global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_local_retry_seconds
+    now_wall = time.time()
+    state = None
+
+    # Prefer durable Firebase state. If unavailable, use the local SQLite copy.
+    try:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).get),
+            timeout=5.0,
+        )
+        if isinstance(raw, dict) and raw.get("started_at"):
+            state = raw
+    except Exception as exc:
+        print(f"⚠️ Discord REST block Firebase restore unavailable: {exc!r}", flush=True)
+
+    if state is None:
+        try:
+            raw = get_db_value("discord_rest_block", None)
+            if isinstance(raw, dict) and raw.get("started_at"):
+                state = raw
+        except Exception as exc:
+            print(f"⚠️ Discord REST block SQLite restore unavailable: {exc!r}", flush=True)
+
+    if not isinstance(state, dict):
+        print("🟢 Discord REST startup gate: no persisted restriction found", flush=True)
+        return False
+
+    try:
+        started = float(state.get("started_at") or 0.0)
+        last_seen = float(state.get("last_seen_at") or started)
+        server_until = float(state.get("server_until") or 0.0)
+        server_retry_after = float(state.get("server_retry_after") or 0.0)
+        next_probe_at = float(state.get("next_probe_at") or 0.0)
+        scope = str(state.get("scope") or "")
+        is_global = bool(state.get("global"))
+        kind = str(state.get("kind") or "")
+        source = str(state.get("source") or "")
+        temp_restriction = bool(state.get("temp_restriction"))
+        local_retry = max(60.0, float(state.get("local_retry_seconds") or 60.0))
+    except (TypeError, ValueError) as exc:
+        print(f"⚠️ Discord REST block persisted state invalid; ignoring it: {exc!r}", flush=True)
+        return False
+
+    # An old/stale record must never permanently suppress REST.
+    # For temporary restrictions, Discord's supplied server expiry is authoritative.
+    # When an old record has expired, keep only a short recovery grace window so
+    # the first request after restart is not fired exactly on the boundary.
+    server_remaining = max(0.0, server_until - now_wall) if server_until > 0 else 0.0
+    persisted_probe_remaining = max(0.0, next_probe_at - now_wall) if next_probe_at > 0 else 0.0
+
+    if temp_restriction and server_until > 0:
+        if server_remaining > 0 and persisted_probe_remaining <= 0:
+            # The server expiry is authoritative; add the existing recovery grace.
+            persisted_probe_remaining = server_remaining + discord_block_recovery_grace_seconds
+        elif server_remaining <= 0 and persisted_probe_remaining <= 0:
+            persisted_probe_remaining = discord_block_recovery_grace_seconds
+    elif temp_restriction and persisted_probe_remaining <= 0:
+        # No server timer survived (for example an interaction 429). Use the
+        # persisted local retry as the minimum startup hold instead of probing immediately.
+        persisted_probe_remaining = max(60.0, local_retry)
+
+    if server_until > 0 and server_remaining <= 0 and persisted_probe_remaining <= 0:
+        grace = discord_block_recovery_grace_seconds if temp_restriction else 0.0
+        persisted_probe_remaining = max(0.0, grace)
+
+    if started <= 0 or (server_until <= 0 and persisted_probe_remaining <= 0 and not temp_restriction):
+        print("🟢 Discord REST startup gate: persisted restriction already expired", flush=True)
+        return False
+
+    with discord_block_lock:
+        discord_block_started_at = started
+        discord_block_last_seen_at = last_seen
+        discord_block_server_until = server_until
+        discord_block_server_retry_after = server_retry_after
+        discord_block_scope = scope
+        discord_block_global = is_global
+        discord_block_kind = kind or ("API_TEMPORARY_RESTRICTION" if temp_restriction else "RATE_LIMIT")
+        discord_block_source = source or "PERSISTED"
+        discord_block_temp_restriction = temp_restriction
+        discord_block_local_retry_seconds = local_retry
+        discord_block_next_probe_mono = time.monotonic() + max(0.0, persisted_probe_remaining)
+
+    # Recreate the in-memory REST cooldown as well. Monotonic deadlines cannot be
+    # persisted directly, so they are reconstructed from the wall-clock evidence.
+    restored_pause = max(server_remaining, persisted_probe_remaining)
+    if restored_pause > 0:
+        discord_rest_rate_limited_until = max(
+            discord_rest_rate_limited_until,
+            time.monotonic() + restored_pause,
+        )
+
+    probe_remaining = max(0.0, persisted_probe_remaining)
+    server_remaining = max(0.0, server_until - time.time()) if server_until > 0 else 0.0
+    print(
+        f"🛡️ Discord REST startup recovery gate RESTORED | kind={kind or '-'} | "
+        f"source={source or 'PERSISTED'} | server_remaining={_format_duration(server_remaining) if server_remaining else 'expired/unknown'} | "
+        f"gate_hold={_format_duration(probe_remaining) if probe_remaining > 0 else 'READY'} | "
+        f"expiry={datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if server_until > 0 else 'UNKNOWN'}",
+        flush=True,
+    )
+    return True
+
+
+async def wait_for_discord_rest_startup_gate(*, context: str):
+    """Wait without making HTTP until a persisted REST restriction is safe to probe."""
+    while True:
+        now_mono = time.monotonic()
+        with discord_block_lock:
+            next_probe = discord_block_next_probe_mono
+            block_active = discord_block_started_at > 0
+        remaining = max(0.0, next_probe - now_mono) if block_active and next_probe > 0 else 0.0
+        if remaining <= 0:
+            return True
+        print(
+            f"⏳ Discord REST startup gate waiting | context={context} | remaining={remaining:.1f}s | no HTTP sent",
+            flush=True,
+        )
+        await asyncio.sleep(min(15.0, max(1.0, remaining)))
+
+
 def _record_discord_block_observed(exc: Exception, *, context: str, source: str = "REST") -> dict:
     """Record evidence of an API restriction without inventing an expiry time."""
     global discord_block_started_at, discord_block_last_seen_at
@@ -2366,6 +2617,7 @@ def _record_discord_block_observed(exc: Exception, *, context: str, source: str 
             discord_block_kind = "RATE_LIMIT"
         discord_block_source = source
 
+    _schedule_persist_discord_block_state(reason=f"observed:{context}")
     return meta
 
 
@@ -2444,6 +2696,14 @@ def _clear_discord_block_after_success(*, context: str):
         discord_block_temp_restriction = False
         discord_block_next_probe_mono = 0.0
         discord_block_recovery_until_mono = time.monotonic() + 30.0
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            _clear_persisted_discord_block_state(reason=f"success:{context}"),
+            name="discord-rest-block-clear",
+        )
+    except RuntimeError:
+        pass
 
 
 def _mark_discord_block_log(context: str, *, force: bool = False):
@@ -2491,6 +2751,7 @@ def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
         probe_in = local_pause
     discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, now_mono + max(1.0, local_pause))
     discord_block_next_probe_mono = max(discord_block_next_probe_mono, now_mono + max(1.0, probe_in))
+    _schedule_persist_discord_block_state(reason=f"429:{context}")
     now_log = time.monotonic()
     if now_log - discord_rest_last_429_log >= 5.0:
         discord_rest_last_429_log = now_log
@@ -4011,6 +4272,22 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# V53: start.py owns command sync, so protect that call from a persisted REST block
+# without changing the 17 registered commands or the sync strategy itself.
+_original_tree_sync = bot.tree.sync
+async def _guarded_tree_sync(*args, **kwargs):
+    await wait_for_discord_rest_startup_gate(context="startup:tree-sync")
+    try:
+        result = await _original_tree_sync(*args, **kwargs)
+        _clear_discord_block_after_success(context="startup:tree-sync")
+        return result
+    except discord.HTTPException as exc:
+        if getattr(exc, "status", None) == 429:
+            _apply_discord_rest_429(exc, context="startup:tree-sync")
+        raise
+
+bot.tree.sync = _guarded_tree_sync
+
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     global ppl_notify_enabled, vip_config
@@ -4039,6 +4316,7 @@ async def on_ready():
     print(f"🔊 ใช้ FFmpeg จากตำแหน่ง: {get_ffmpeg_path()}")
 
     init_db()
+    await restore_persisted_discord_block_state()
     await load_bot_settings()
     print(f"🔐 Startup TTS settings: TH={tts_th_enabled} EN={tts_en_enabled} KO={tts_ko_enabled}")
     print(f"🔔 Startup notification settings: BF={bf_notify_enabled} LIB={lib_notify_enabled} PPL={ppl_notify_enabled}")
@@ -4050,6 +4328,14 @@ async def on_ready():
 
     # Voice is ON-DEMAND: do not connect on startup. /setvoice only stores the target channel.
     print("🟢 Voice mode: ON-DEMAND GLOBAL (occupied-room announcements; connect only when speaking, disconnect after TTS)")
+
+    with discord_block_lock:
+        startup_gate_remaining = max(0.0, discord_block_next_probe_mono - time.monotonic()) if discord_block_started_at > 0 else 0.0
+    print(
+        f"🛡️ Discord REST startup gate status: {'BLOCKED' if startup_gate_remaining > 0 else 'READY'} | "
+        f"hold={_format_duration(startup_gate_remaining) if startup_gate_remaining > 0 else '0m 00s'}",
+        flush=True,
+    )
 
     await asyncio.sleep(3)
     
