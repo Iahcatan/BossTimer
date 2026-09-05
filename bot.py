@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V57_RUNTIME_SPLIT_DISCORD_EGRESS_SAFE_2026-09-05"
+NOTICE_BF_PATCH_VERSION = "V58_DISCORD_REST_MINIMAL_NO_REPROBE_BOSS_QUEUE_2026-09-06"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -2260,6 +2260,12 @@ last_channel_fetch_attempt = {}
 # Prevent overlapping boss notification passes (e.g. scheduled loop + manual /kill check).
 boss_notification_pass_lock = asyncio.Lock()
 
+# V58: minimal background text REST queue. Voice/TTS remains independent.
+PENDING_BOSS_REST_MAX = 100
+pending_boss_rest_notifications = deque(maxlen=PENDING_BOSS_REST_MAX)
+pending_boss_rest_lock = threading.Lock()
+pending_boss_rest_keys = set()
+
 # =========================================================
 # 🛡️ V22: GLOBAL DISCORD REST GUARD
 # =========================================================
@@ -2280,6 +2286,25 @@ discord_rest_last_error_log = 0.0
 discord_rest_next_call_at = 0.0
 discord_rest_min_interval = max(0.0, float(os.environ.get("DISCORD_REST_MIN_INTERVAL", "0.20")))
 discord_rest_guard_lock = asyncio.Lock()
+
+# V58: separate non-essential background REST from the foreground command lane.
+# Background boss text notifications and audit logs are queued and rate-limited independently.
+# Voice/TTS never enters this lane.
+discord_background_rest_next_call_at = 0.0
+discord_background_rest_min_interval = max(1.0, float(os.environ.get("DISCORD_BACKGROUND_REST_MIN_INTERVAL", "5.0")))
+discord_background_rest_recovery_grace_seconds = max(
+    60.0, float(os.environ.get("DISCORD_BACKGROUND_REST_RECOVERY_GRACE", "300"))
+)
+discord_background_rest_suppressed_until = 0.0
+discord_background_rest_quarantined = False
+
+discord_background_rest_context_prefixes = (
+    "boss-notify:",
+    "audit:",
+    "bf:",
+    "library-boss",
+    "live:",
+)
 
 # 🔎 V51 diagnostics: distinguish Discord-provided timers from our own local
 # safety backoff. A local backoff is NOT presented as the real Discord block time.
@@ -2833,6 +2858,11 @@ def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
         probe_in = local_pause
     discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, now_mono + max(1.0, local_pause))
     discord_block_next_probe_mono = max(discord_block_next_probe_mono, now_mono + max(1.0, probe_in))
+    if is_temp_restriction:
+        _quarantine_background_rest(
+            reason=f"discord-temp-restriction:{context}",
+            duration=server_retry + discord_background_rest_recovery_grace_seconds,
+        )
     _schedule_persist_discord_block_state(reason=f"429:{context}")
     now_log = time.monotonic()
     if now_log - discord_rest_last_429_log >= 5.0:
@@ -2886,31 +2916,125 @@ def _log_rest_skip(context: str, remaining: float):
         )
 
 
-async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown: bool = False):
-    """Run a Discord REST call through one process-wide guard.
+def _is_background_discord_rest_context(context: str) -> bool:
+    """Classify non-essential Discord REST work without touching interaction/command lanes."""
+    value = str(context or "").strip().lower()
+    return any(value.startswith(prefix) for prefix in discord_background_rest_context_prefixes)
 
-    wait_for_cooldown=False is intentional for background tasks: when Discord is
-    already blocking REST, skipping the request is safer than sleeping inside a
-    scheduler/notification task.  Voice/TTS calls never enter this function.
+
+def _background_rest_remaining() -> float:
+    return max(0.0, discord_background_rest_suppressed_until - time.monotonic())
+
+
+def _log_background_rest_skip(context: str, remaining: float, reason: str = "quarantine"):
+    key = f"bg:{reason}:{context}"
+    now_mono = time.monotonic()
+    last = float(discord_rest_last_skip_logs.get(key, 0.0))
+    if now_mono - last >= 60.0:
+        discord_rest_last_skip_logs[key] = now_mono
+        print(
+            f"⏭️ Background Discord REST skipped | context={context} | reason={reason} | remaining={remaining:.1f}s",
+            flush=True,
+        )
+
+
+def _quarantine_background_rest(*, reason: str, duration: float):
+    global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    hold = max(1.0, float(duration))
+    until = time.monotonic() + hold
+    discord_background_rest_suppressed_until = max(discord_background_rest_suppressed_until, until)
+    discord_background_rest_quarantined = True
+    print(
+        f"🛡️ Background Discord REST quarantine | reason={reason} | hold={hold:.1f}s | no background reprobe",
+        flush=True,
+    )
+
+
+def _arm_background_rest_after_foreground_recovery():
+    global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    hold = discord_background_rest_recovery_grace_seconds
+    discord_background_rest_suppressed_until = max(
+        discord_background_rest_suppressed_until,
+        time.monotonic() + hold,
+    )
+    discord_background_rest_quarantined = True
+    print(
+        f"🛡️ Background Discord REST recovery grace armed | hold={hold:.1f}s | foreground request succeeded",
+        flush=True,
+    )
+
+
+async def guarded_discord_call(
+    call_factory,
+    *,
+    context: str,
+    wait_for_cooldown: bool = False,
+    background: bool | None = None,
+):
+    """Run a Discord REST call through the central guard.
+
+    V58 background policy:
+    - boss/audit/BF/Library/Live REST is non-essential and separately throttled.
+    - once Discord reports an API/IP temporary restriction, background REST is quarantined;
+      it never probes the API just to see whether the block ended.
+    - foreground command REST may still proceed according to Discord's own Retry-After rules.
+    - Voice/TTS calls never enter this function.
     """
+    if background is None:
+        background = _is_background_discord_rest_context(context)
+
     if SKYNET_RUNTIME_ROLE == "web":
-        # Defense in depth: web runtime must never emit Discord REST traffic.
         print(f"⛔ Discord REST disabled in web runtime | context={context}", flush=True)
         return None
-    global discord_rest_next_call_at
+
+    global discord_rest_next_call_at, discord_background_rest_next_call_at
+
+    if background:
+        bg_remaining = _background_rest_remaining()
+        if discord_background_rest_quarantined or bg_remaining > 0:
+            if bg_remaining <= 0 and discord_background_rest_quarantined:
+                # V58 is deliberately no-reprobe: release only after the explicit hold.
+                discord_background_rest_quarantined = False
+            else:
+                _log_background_rest_skip(
+                    context,
+                    max(bg_remaining, 0.0),
+                    reason="recovery-hold" if bg_remaining > 0 else "quarantine",
+                )
+                return None
+
+        with discord_block_lock:
+            temp_restriction = discord_block_temp_restriction
+            next_probe_mono = discord_block_next_probe_mono
+        if temp_restriction and next_probe_mono > time.monotonic():
+            _log_background_rest_skip(
+                context,
+                max(0.0, next_probe_mono - time.monotonic()),
+                reason="discord-block",
+            )
+            return None
+
+        now_bg = time.monotonic()
+        if discord_background_rest_next_call_at > now_bg:
+            await asyncio.sleep(discord_background_rest_next_call_at - now_bg)
+        discord_background_rest_next_call_at = time.monotonic() + discord_background_rest_min_interval
+
     now_mono = time.monotonic()
     with discord_block_lock:
         temp_restriction = discord_block_temp_restriction
         next_probe_mono = discord_block_next_probe_mono
     if temp_restriction and next_probe_mono > now_mono:
-        _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
+        if background:
+            _log_background_rest_skip(context, max(0.0, next_probe_mono - now_mono), reason="discord-block")
+        else:
+            _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
         return None
+
     remaining = _discord_rest_rate_limit_remaining()
     if remaining > 0:
         if not wait_for_cooldown:
             _log_rest_skip(context, remaining)
             return None
-        # Only command code that explicitly asks to wait may sleep here.
         await asyncio.sleep(remaining)
 
     async with discord_rest_guard_lock:
@@ -2919,76 +3043,111 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
             temp_restriction = discord_block_temp_restriction
             next_probe_mono = discord_block_next_probe_mono
         if temp_restriction and next_probe_mono > now_mono:
-            _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
+            if background:
+                _log_background_rest_skip(context, max(0.0, next_probe_mono - now_mono), reason="discord-block")
+            else:
+                _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
             return None
+
+        if background:
+            bg_remaining = _background_rest_remaining()
+            if discord_background_rest_quarantined or bg_remaining > 0:
+                if bg_remaining <= 0 and discord_background_rest_quarantined:
+                    discord_background_rest_quarantined = False
+                else:
+                    _log_background_rest_skip(
+                        context,
+                        max(bg_remaining, 0.0),
+                        reason="recovery-hold" if bg_remaining > 0 else "quarantine",
+                    )
+                    return None
+
         remaining = _discord_rest_rate_limit_remaining()
         if remaining > 0:
             if not wait_for_cooldown:
-                print(
-                    f"⏭️ Discord REST skipped during global cooldown | context={context} | "
-                    f"remaining={remaining:.1f}s",
-                    flush=True,
-                )
+                if background:
+                    _log_background_rest_skip(context, remaining, reason="rate-limit")
+                else:
+                    _log_rest_skip(context, remaining)
                 return None
             await asyncio.sleep(remaining)
 
-        # Small spacing between all guarded REST requests prevents bursts even
-        # after a cooldown expires.  This is intentionally far below Discord's
-        # documented global 50 req/s ceiling.
         now = time.monotonic()
         if discord_rest_next_call_at > now:
             await asyncio.sleep(discord_rest_next_call_at - now)
         if discord_rest_min_interval > 0:
             discord_rest_next_call_at = time.monotonic() + discord_rest_min_interval
 
+        had_active_block = False
+        with discord_block_lock:
+            had_active_block = discord_block_started_at > 0
+
         try:
             result = await call_factory()
             _clear_discord_rest_backoff_after_success()
             _clear_discord_block_after_success(context=context)
+            if not background and had_active_block:
+                _arm_background_rest_after_foreground_recovery()
             return result
         except discord.HTTPException as exc:
             if getattr(exc, "status", None) == 429:
+                if background and discord_block_temp_restriction:
+                    # The Discord-provided Retry-After is authoritative; add the existing
+                    # recovery grace so the next background request cannot be an immediate probe.
+                    server_retry = 0.0
+                    try:
+                        server_retry = float(getattr(exc, "retry_after", 0) or 0)
+                    except (TypeError, ValueError):
+                        server_retry = 0.0
+                    _quarantine_background_rest(
+                        reason=f"429:{context}",
+                        duration=server_retry + discord_background_rest_recovery_grace_seconds,
+                    )
                 _apply_discord_rest_429(exc, context=context)
             else:
                 _apply_discord_rest_error(exc, context=context)
             raise
         except Exception:
-            # Do not turn application exceptions into a fake Discord rate-limit.
             raise
 
 
-async def guarded_channel_send(channel, *, context: str, content=None, embed=None):
+async def guarded_channel_send(channel, *, context: str, content=None, embed=None, background: bool | None = None):
     return await guarded_discord_call(
         lambda: channel.send(content=content, embed=embed),
         context=context,
+        background=background,
     )
 
 
-async def guarded_fetch_channel(channel_id: int, *, context: str):
+async def guarded_fetch_channel(channel_id: int, *, context: str, background: bool | None = None):
     return await guarded_discord_call(
         lambda: bot.fetch_channel(int(channel_id)),
         context=context,
+        background=background,
     )
 
 
-async def guarded_fetch_message(channel, message_id: int, *, context: str):
+async def guarded_fetch_message(channel, message_id: int, *, context: str, background: bool | None = None):
     return await guarded_discord_call(
         lambda: channel.fetch_message(int(message_id)),
         context=context,
+        background=background,
     )
 
 
-async def guarded_message_edit(message, *, context: str, **kwargs):
+async def guarded_message_edit(message, *, context: str, background: bool | None = None, **kwargs):
     return await guarded_discord_call(
         lambda: message.edit(**kwargs),
         context=context,
+        background=background,
     )
 
 
-async def guarded_context_send(ctx, *args, context: str, **kwargs):
+async def guarded_context_send(ctx, *args, context: str, background: bool | None = None, **kwargs):
     return await guarded_discord_call(
         lambda: ctx.send(*args, **kwargs),
         context=context,
+        background=background,
     )
 
 
@@ -3410,6 +3569,7 @@ async def _flush_pending_channel_messages_once():
 
 async def flush_pending_command_outputs_once():
     await _flush_pending_channel_messages_once()
+    await flush_pending_boss_rest_notifications_once()
     await flush_pending_audit_logs_once()
 
 
@@ -3436,7 +3596,7 @@ async def flush_pending_audit_logs_once():
         return
     if _discord_rest_rate_limit_remaining() > 0:
         return
-    for _ in range(3):
+    for _ in range(1):
         with pending_audit_lock:
             if not pending_audit_logs:
                 return
@@ -5118,6 +5278,101 @@ def get_notification_mentions(guild: discord.Guild) -> str:
 
 boss_notification_diag_last_ts = {}
 
+def _queue_boss_rest_notification(
+    boss_name: str,
+    stage: str,
+    channel,
+    *,
+    content=None,
+    embed=None,
+) -> bool:
+    """Queue one non-essential boss text notification without probing Discord."""
+    try:
+        channel_id = int(channel.id)
+    except Exception:
+        return False
+    key = (str(boss_name), str(stage), channel_id)
+    with pending_boss_rest_lock:
+        if key in pending_boss_rest_keys:
+            return False
+        if len(pending_boss_rest_notifications) >= PENDING_BOSS_REST_MAX:
+            print(f"⚠️ Boss REST queue full; dropping newest non-essential text notification | key={key}", flush=True)
+            return False
+        pending_boss_rest_keys.add(key)
+        pending_boss_rest_notifications.append({
+            "key": key,
+            "boss_name": str(boss_name),
+            "stage": str(stage),
+            "channel_id": channel_id,
+            "content": content,
+            "embed": embed,
+            "queued_at": time.time(),
+        })
+    print(f"⏸️ Boss text notification queued | boss={boss_name} | stage={stage} | channel={channel_id}", flush=True)
+    return True
+
+
+async def _flush_one_boss_rest_notification() -> bool:
+    """Send at most one queued boss text notification per worker pass."""
+    with pending_boss_rest_lock:
+        if not pending_boss_rest_notifications:
+            return False
+        item = pending_boss_rest_notifications[0]
+
+    channel = bot.get_channel(int(item["channel_id"]))
+    if channel is None:
+        with pending_boss_rest_lock:
+            if pending_boss_rest_notifications and pending_boss_rest_notifications[0] is item:
+                pending_boss_rest_notifications.popleft()
+                pending_boss_rest_keys.discard(item["key"])
+        print(f"⚠️ Boss REST queue target channel unavailable | boss={item['boss_name']} | stage={item['stage']}", flush=True)
+        return False
+
+    try:
+        result = await guarded_channel_send(
+            channel,
+            context=f"boss-notify:{item['boss_name']}:queue:{item['stage']}",
+            content=item.get("content"),
+            embed=item.get("embed"),
+            background=True,
+        )
+    except discord.HTTPException as exc:
+        # Keep the item queued. The central guard records the 429 and quarantines background REST.
+        print(
+            f"⏸️ Boss REST queue held after Discord HTTP error | boss={item['boss_name']} | "
+            f"stage={item['stage']} | status={getattr(exc, 'status', None)}",
+            flush=True,
+        )
+        return False
+    except Exception as exc:
+        print(f"⚠️ Boss REST queue send failed safely | boss={item['boss_name']} | stage={item['stage']} | {exc!r}", flush=True)
+        return False
+
+    if result is None:
+        return False
+
+    with pending_boss_rest_lock:
+        if pending_boss_rest_notifications and pending_boss_rest_notifications[0] is item:
+            pending_boss_rest_notifications.popleft()
+            pending_boss_rest_keys.discard(item["key"])
+
+    try:
+        if item["stage"] == "advance":
+            await save_boss_notification_flags(item["boss_name"], notified_advance=True)
+        elif item["stage"] == "spawn":
+            await save_boss_notification_flags(item["boss_name"], notified_spawn=True)
+    except Exception as exc:
+        print(f"⚠️ Boss notification flag update after queued send failed: {item['boss_name']}: {exc}", flush=True)
+
+    print(f"🟢 Boss REST queue sent: {item['boss_name']} | stage={item['stage']}", flush=True)
+    return True
+
+
+async def flush_pending_boss_rest_notifications_once():
+    """V58 queue worker: one background REST attempt max per scheduler pass."""
+    await _flush_one_boss_rest_notification()
+
+
 async def save_boss_notification_flags(boss_name: str, **flags):
     clean = {k: bool(v) for k, v in flags.items()}
     if not clean:
@@ -5186,9 +5441,9 @@ async def check_boss_notifications():
             # false; do not flood logs every scheduler tick while Voice has already
             # succeeded.
             rest_blocked = _discord_rest_rate_limit_remaining() > 0
-            advance_text_due = (0 < time_left <= notice_seconds and not notified_advance and not rest_blocked)
+            advance_text_due = (0 < time_left <= notice_seconds and not notified_advance)
             advance_voice_due = (0 < time_left <= notice_seconds and not voice_advance)
-            spawn_text_due = (time_left <= 0 and not notified_spawn and not rest_blocked)
+            spawn_text_due = (time_left <= 0 and not notified_spawn)
             spawn_voice_due = (-120 <= time_left <= 0 and not voice_spawn)
             notification_action_due = advance_text_due or advance_voice_due or spawn_text_due or spawn_voice_due
 
@@ -5235,25 +5490,31 @@ async def check_boss_notifications():
             target_guilds = set(bot.guilds)
 
             # Advance: text and voice are independent one-shot states.
-            if 0 < time_left <= notice_seconds and not notified_advance:
+            advance_stage_queued = False
+            spawn_stage_queued = False
+            with pending_boss_rest_lock:
+                advance_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "advance" for item in pending_boss_rest_notifications)
+                spawn_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "spawn" for item in pending_boss_rest_notifications)
+
+            if 0 < time_left <= notice_seconds and not notified_advance and not advance_stage_queued:
                 embed = discord.Embed(
                     title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
                     description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_minutes} นาที**!\nเวลาเกิด: **{spawn_time.strftime('%H:%M:%S น.')}**",
                     color=discord.Color.gold()
                 )
-                text_sent = False
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
-                        send_result = await guarded_channel_send(ch, context=f"boss-notify:{boss_name}", content=mentions or None, embed=embed)
-                        if send_result is not None:
-                            text_sent = True
+                        _queue_boss_rest_notification(
+                            boss_name,
+                            "advance",
+                            ch,
+                            content=mentions or None,
+                            embed=embed,
+                        )
                     except Exception as e:
-                        print(f"❌ ส่งข้อความ advance ไม่สำเร็จ ({boss_name}): {e}")
-                if text_sent:
-                    await save_boss_notification_flags(boss_name, notified_advance=True)
-                    notified_advance = True
-                    print(f"🟢 Advance notification sent: {boss_name}")
+                        print(f"⚠️ Queue advance notification failed ({boss_name}): {e}", flush=True)
+                # The queue owns the text send and flag update. Do not call Discord REST here.
 
             if 0 < time_left <= notice_seconds and not voice_advance:
                 spoken_name = get_boss_pronunciation(boss_name)
@@ -5289,25 +5550,25 @@ async def check_boss_notifications():
 
             # Spawn: only notify at the actual crossing. Old schedules >60s late
             # are marked complete instead of replaying after every deploy/reload.
-            if time_left <= 0 and not notified_spawn:
+            if time_left <= 0 and not notified_spawn and not spawn_stage_queued:
                 embed = discord.Embed(
                     title="⚔️ บอสเกิดแล้ว!",
                     description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
                     color=discord.Color.green()
                 )
-                text_sent = False
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
-                        send_result = await guarded_channel_send(ch, context=f"boss-notify:{boss_name}", content=mentions or None, embed=embed)
-                        if send_result is not None:
-                            text_sent = True
+                        _queue_boss_rest_notification(
+                            boss_name,
+                            "spawn",
+                            ch,
+                            content=mentions or None,
+                            embed=embed,
+                        )
                     except Exception as e:
-                        print(f"❌ ส่งข้อความ spawn ไม่สำเร็จ ({boss_name}): {e}")
-                if text_sent:
-                    await save_boss_notification_flags(boss_name, notified_spawn=True)
-                    notified_spawn = True
-                    print(f"🟢 Spawn notification sent: {boss_name}")
+                        print(f"⚠️ Queue spawn notification failed ({boss_name}): {e}", flush=True)
+                # The queue owns the text send and flag update. Do not call Discord REST here.
 
             if -120 <= time_left <= 0 and not voice_spawn:
                 spoken_name = get_boss_pronunciation(boss_name)
