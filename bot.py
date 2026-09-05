@@ -12,6 +12,7 @@ import logging
 import re
 import uuid
 import sqlite3
+from collections import deque
 import aiohttp
 from datetime import datetime, timedelta, timezone
 import discord
@@ -67,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V49_TIME_CHANNEL_FALLBACK_AUDIT_SAFE_2026-09-04"
+NOTICE_BF_PATCH_VERSION = "V51_DISCORD_BLOCK_TIMER_DIAGNOSTICS_RATE_LIMIT_SAFE_2026-09-05"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2251,51 +2252,239 @@ discord_rest_next_call_at = 0.0
 discord_rest_min_interval = max(0.0, float(os.environ.get("DISCORD_REST_MIN_INTERVAL", "0.20")))
 discord_rest_guard_lock = asyncio.Lock()
 
+# 🔎 V51 diagnostics: distinguish Discord-provided timers from our own local
+# safety backoff. A local backoff is NOT presented as the real Discord block time.
+discord_block_started_at = 0.0
+discord_block_last_seen_at = 0.0
+discord_block_server_until = 0.0
+discord_block_server_retry_after = 0.0
+discord_block_scope = ""
+discord_block_global = False
+discord_block_kind = ""
+discord_block_source = ""
+discord_block_last_log_at = 0.0
+discord_block_lock = threading.Lock()
+
 
 def _discord_rest_rate_limit_remaining() -> float:
     return max(0.0, discord_rest_rate_limited_until - time.monotonic())
 
 
-def _extract_discord_retry_after(exc: Exception) -> float:
+def _extract_discord_rate_limit_metadata(exc: Exception) -> dict:
+    """Extract only evidence actually returned by Discord."""
     retry_after = 0.0
+    reset_after = 0.0
+    scope = ""
+    is_global = False
+    message = ""
+    headers = {}
+    response = getattr(exc, "response", None)
     try:
-        retry_after = float(getattr(exc, "retry_after", 0) or 0)
+        headers = getattr(response, "headers", None) or {}
+        raw_retry = headers.get("Retry-After") or headers.get("retry-after")
+        if raw_retry is not None:
+            retry_after = max(0.0, float(raw_retry))
     except (TypeError, ValueError):
-        retry_after = 0.0
-    if retry_after <= 0:
+        pass
+    try:
+        raw_reset = headers.get("X-RateLimit-Reset-After") or headers.get("x-ratelimit-reset-after")
+        if raw_reset is not None:
+            reset_after = max(0.0, float(raw_reset))
+    except (TypeError, ValueError):
+        pass
+    try:
+        scope = str(headers.get("X-RateLimit-Scope") or headers.get("x-ratelimit-scope") or "")
+        is_global = str(headers.get("X-RateLimit-Global") or headers.get("x-ratelimit-global") or "").lower() == "true"
+    except Exception:
+        pass
+    try:
+        data = getattr(response, "data", None)
+        if isinstance(data, dict):
+            if retry_after <= 0 and data.get("retry_after") is not None:
+                retry_after = max(0.0, float(data.get("retry_after") or 0))
+            if data.get("message") is not None:
+                message = str(data.get("message"))
+            if bool(data.get("global")):
+                is_global = True
+    except (TypeError, ValueError):
+        pass
+    if not message:
         try:
-            response = getattr(exc, "response", None)
-            headers = getattr(response, "headers", None) or {}
-            raw = headers.get("Retry-After") or headers.get("retry-after")
-            retry_after = float(raw or 0)
-        except (TypeError, ValueError):
-            retry_after = 0.0
-    return max(0.0, retry_after)
+            message = str(exc)
+        except Exception:
+            message = ""
+    return {
+        "retry_after": retry_after,
+        "reset_after": reset_after,
+        "scope": scope,
+        "global": is_global,
+        "message": message,
+    }
+
+
+def _extract_discord_retry_after(exc: Exception) -> float:
+    return float(_extract_discord_rate_limit_metadata(exc).get("retry_after") or 0.0)
+
+
+def _record_discord_block_observed(exc: Exception, *, context: str, source: str = "REST") -> dict:
+    """Record evidence of an API restriction without inventing an expiry time."""
+    global discord_block_started_at, discord_block_last_seen_at
+    global discord_block_server_until, discord_block_server_retry_after
+    global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+
+    meta = _extract_discord_rate_limit_metadata(exc)
+    now_wall = time.time()
+    with discord_block_lock:
+        if discord_block_started_at <= 0:
+            discord_block_started_at = now_wall
+        discord_block_last_seen_at = now_wall
+        if meta["retry_after"] > 0:
+            candidate_until = now_wall + meta["retry_after"]
+            discord_block_server_until = max(discord_block_server_until, candidate_until)
+            discord_block_server_retry_after = meta["retry_after"]
+        elif meta["reset_after"] > 0:
+            candidate_until = now_wall + meta["reset_after"]
+            discord_block_server_until = max(discord_block_server_until, candidate_until)
+            discord_block_server_retry_after = meta["reset_after"]
+        discord_block_scope = meta["scope"] or discord_block_scope
+        discord_block_global = bool(meta["global"] or discord_block_global)
+        text = meta["message"].lower()
+        if "blocked from accessing our api" in text or "temporarily" in text and "api" in text:
+            discord_block_kind = "API_TEMPORARY_RESTRICTION"
+        elif discord_block_global:
+            discord_block_kind = "GLOBAL_RATE_LIMIT"
+        elif meta["scope"]:
+            discord_block_kind = f"RATE_LIMIT_{meta['scope'].upper()}"
+        else:
+            discord_block_kind = "RATE_LIMIT"
+        discord_block_source = source
+
+    return meta
+
+
+def _format_duration(total_seconds: float) -> str:
+    total = max(0, int(round(total_seconds)))
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
+    return f"{minutes}m {seconds:02d}s"
+
+
+def _discord_block_diagnostic_line() -> str:
+    now_wall = time.time()
+    with discord_block_lock:
+        started = discord_block_started_at
+        last_seen = discord_block_last_seen_at
+        server_until = discord_block_server_until
+        scope = discord_block_scope or "-"
+        is_global = discord_block_global
+        kind = discord_block_kind or "-"
+        source = discord_block_source or "-"
+    if started <= 0:
+        return "✅ Discord API restriction: NONE OBSERVED"
+    elapsed = max(0.0, now_wall - started)
+    server_remaining = max(0.0, server_until - now_wall) if server_until > 0 else 0.0
+    if server_until > now_wall:
+        remaining_text = f"server-provided remaining={_format_duration(server_remaining)}"
+        expiry_text = datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime("%d/%m/%Y %H:%M:%S %Z")
+        certainty = "EXACT TIMER FROM DISCORD"
+    elif server_until > 0 and last_seen > 0 and now_wall >= server_until:
+        remaining_text = "server timer expired; waiting for a successful request to confirm clear"
+        expiry_text = datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime("%d/%m/%Y %H:%M:%S %Z")
+        certainty = "SERVER TIMER EXPIRED — CLEAR NOT YET CONFIRMED"
+    else:
+        remaining_text = "exact remaining UNKNOWN (Discord supplied no expiry timer)"
+        expiry_text = "UNKNOWN"
+        certainty = "NO SERVER EXPIRY PROVIDED"
+    return (
+        f"🚨 DISCORD API BLOCK STATUS | kind={kind} | source={source} | scope={scope} | global={is_global} | "
+        f"started={datetime.fromtimestamp(started, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z')} | "
+        f"elapsed={_format_duration(elapsed)} | {remaining_text} | expiry={expiry_text} | {certainty}"
+    )
+
+
+def _clear_discord_block_after_success(*, context: str):
+    global discord_block_started_at, discord_block_last_seen_at
+    global discord_block_server_until, discord_block_server_retry_after
+    global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    now_wall = time.time()
+    with discord_block_lock:
+        started = discord_block_started_at
+        last_seen = discord_block_last_seen_at
+        if started <= 0:
+            return
+        elapsed = max(0.0, now_wall - started)
+        print(
+            f"✅ DISCORD API BLOCK CLEARED | context={context} | duration={_format_duration(elapsed)} | "
+            f"last_429_seen={datetime.fromtimestamp(last_seen, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if last_seen else '-'}",
+            flush=True,
+        )
+        discord_block_started_at = 0.0
+        discord_block_last_seen_at = 0.0
+        discord_block_server_until = 0.0
+        discord_block_server_retry_after = 0.0
+        discord_block_scope = ""
+        discord_block_global = False
+        discord_block_kind = ""
+        discord_block_source = ""
+
+
+def _mark_discord_block_log(context: str, *, force: bool = False):
+    global discord_block_last_log_at
+    now_mono = time.monotonic()
+    if not force and now_mono - discord_block_last_log_at < 15.0:
+        return
+    discord_block_last_log_at = now_mono
+    print(_discord_block_diagnostic_line() + f" | context={context}", flush=True)
+
+
+async def discord_block_diagnostics_loop():
+    """Passive diagnostics only: no HTTP probes are sent."""
+    while True:
+        try:
+            with discord_block_lock:
+                active = discord_block_started_at > 0
+            if active:
+                _mark_discord_block_log("periodic", force=True)
+            await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"⚠️ Discord block diagnostics loop error: {exc!r}", flush=True)
+            await asyncio.sleep(15)
 
 
 def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
     global discord_rest_rate_limited_until, discord_rest_backoff_seconds, discord_rest_last_429_log
-    retry_after = _extract_discord_retry_after(exc)
-    if retry_after <= 0:
-        retry_after = discord_rest_backoff_seconds
+    meta = _record_discord_block_observed(exc, context=context, source="REST")
+    server_retry = float(meta.get("retry_after") or 0.0)
+    if server_retry <= 0:
+        server_retry = float(meta.get("reset_after") or 0.0)
+    if server_retry <= 0:
+        local_pause = discord_rest_backoff_seconds
         discord_rest_backoff_seconds = min(discord_rest_backoff_seconds * 2.0, 900.0)
     else:
-        # Trust Discord's value.  The extra guard backoff is only used when
-        # Discord omits Retry-After.  Never shorten an already-active block.
-        discord_rest_backoff_seconds = min(max(60.0, retry_after * 2.0), 900.0)
+        local_pause = server_retry
+        discord_rest_backoff_seconds = min(max(60.0, server_retry * 2.0), 900.0)
 
-    until = time.monotonic() + max(1.0, retry_after)
+    until = time.monotonic() + max(1.0, local_pause)
     discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, until)
 
     now_mono = time.monotonic()
     if now_mono - discord_rest_last_429_log >= 5.0:
         discord_rest_last_429_log = now_mono
+        timer_note = (
+            f"server_timer={server_retry:.3f}s" if server_retry > 0 else
+            f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
+        )
         print(
-            f"⏸️ GLOBAL Discord REST 429 cooldown | context={context} | "
-            f"wait={retry_after:.1f}s | all non-essential REST paused",
+            f"⏸️ GLOBAL Discord REST 429 | context={context} | {timer_note} | "
+            "all non-essential REST paused",
             flush=True,
         )
-    return retry_after
+    _mark_discord_block_log(context, force=True)
+    return local_pause
 
 
 def _apply_discord_rest_error(exc: Exception, *, context: str) -> float:
@@ -2381,6 +2570,7 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
         try:
             result = await call_factory()
             _clear_discord_rest_backoff_after_success()
+            _clear_discord_block_after_success(context=context)
             return result
         except discord.HTTPException as exc:
             if getattr(exc, "status", None) == 429:
@@ -2711,11 +2901,15 @@ _pending_voice_confirmations = {}
 # ==========================================
 # 📝 3. ระบบ Audit Log
 # ==========================================
-async def send_audit_log(guild: discord.Guild, user: discord.User, action: str, details: str, color: discord.Color):
-    if not guild: return
-    log_channel = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
-    if not log_channel: return
+# 🔐 V50: Keep Audit Log durable while Discord REST is temporarily blocked.
+# This queue never retries in a tight loop; it is drained by a 15-second background task
+# only after the existing REST guard says requests are allowed again.
+PENDING_AUDIT_MAX = 200
+pending_audit_logs = deque(maxlen=PENDING_AUDIT_MAX)
+pending_audit_lock = threading.Lock()
 
+
+def _build_audit_embed(user: discord.User, action: str, details: str, color: discord.Color):
     now = datetime.now(TZ_THAI)
     embed = discord.Embed(
         title=f"📝 Audit Log: {action}",
@@ -2725,9 +2919,185 @@ async def send_audit_log(guild: discord.Guild, user: discord.User, action: str, 
     embed.add_field(name="👤 ผู้ดำเนินการ", value=f"{user.mention} (`{user.name}`)", inline=True)
     embed.add_field(name="📋 รายละเอียด", value=details, inline=False)
     embed.set_footer(text=f"User ID: {user.id}")
+    return embed
 
-    try: await guarded_channel_send(log_channel, context=f"audit:{action}", embed=embed)
-    except Exception as e: print(f"❌ ส่ง Audit Log ไม่สำเร็จ: {e}")
+
+def _queue_audit_log(guild_id: int, channel_id: int, action: str, user_id: int, user_name: str, details: str, color_value: int):
+    item = {
+        "guild_id": int(guild_id),
+        "channel_id": int(channel_id),
+        "action": str(action),
+        "user_id": int(user_id),
+        "user_name": str(user_name),
+        "details": str(details),
+        "color_value": int(color_value),
+        "queued_at": time.time(),
+    }
+    with pending_audit_lock:
+        pending_audit_logs.append(item)
+        size = len(pending_audit_logs)
+    print(
+        f"⏸️ Audit Log queued during Discord REST cooldown | action={action} | queue={size}/{PENDING_AUDIT_MAX}",
+        flush=True,
+    )
+
+
+async def _send_one_audit_log(item: dict) -> bool:
+    guild = bot.get_guild(int(item.get("guild_id", 0)))
+    if guild is None:
+        return False
+    channel = guild.get_channel(int(item.get("channel_id", 0)))
+    if channel is None:
+        channel = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
+    if channel is None:
+        return False
+
+    try:
+        user_id = int(item.get("user_id", 0))
+    except (TypeError, ValueError):
+        user_id = 0
+    display_name = str(item.get("user_name") or "unknown")
+    user_obj = guild.get_member(user_id) or discord.Object(id=user_id)
+    # Preserve the existing audit format. Mention uses the original member when cached;
+    # otherwise fall back to a plain user ID label rather than fetching during a rate limit.
+    if hasattr(user_obj, "mention"):
+        user_mention = getattr(user_obj, "mention", f"<@{user_id}>")
+    else:
+        user_mention = f"<@{user_id}>"
+    embed = discord.Embed(
+        title=f"📝 Audit Log: {item.get('action', '-')}",
+        color=discord.Color(int(item.get("color_value", 0x5865F2))),
+        timestamp=datetime.fromtimestamp(float(item.get("queued_at", time.time())), tz=TZ_THAI),
+    )
+    embed.add_field(name="👤 ผู้ดำเนินการ", value=f"{user_mention} (`{display_name}`)", inline=True)
+    embed.add_field(name="📋 รายละเอียด", value=str(item.get("details") or "-"), inline=False)
+    embed.set_footer(text=f"User ID: {user_id}")
+    try:
+        result = await guarded_channel_send(channel, context=f"audit:{item.get('action', '-')}", embed=embed)
+        return result is not None
+    except Exception as exc:
+        print(f"⚠️ ส่ง queued Audit Log ไม่สำเร็จ: {exc}", flush=True)
+        return False
+
+
+PENDING_CHANNEL_MAX = 100
+pending_channel_messages = deque(maxlen=PENDING_CHANNEL_MAX)
+pending_channel_lock = threading.Lock()
+
+
+def _queue_channel_result(channel_id: int, *, content=None, embed=None, context: str = "command-result"):
+    item = {
+        "channel_id": int(channel_id),
+        "content": content,
+        "embed": embed,
+        "context": str(context),
+        "queued_at": time.time(),
+    }
+    with pending_channel_lock:
+        pending_channel_messages.append(item)
+        size = len(pending_channel_messages)
+    print(
+        f"⏸️ Discord channel result queued during REST cooldown | context={context} | queue={size}/{PENDING_CHANNEL_MAX}",
+        flush=True,
+    )
+
+
+async def _flush_pending_channel_messages_once():
+    if _discord_rest_rate_limit_remaining() > 0:
+        return
+    for _ in range(2):
+        with pending_channel_lock:
+            if not pending_channel_messages:
+                return
+            item = pending_channel_messages[0]
+        channel = bot.get_channel(int(item.get("channel_id", 0)))
+        if channel is None:
+            with pending_channel_lock:
+                if pending_channel_messages and pending_channel_messages[0] is item:
+                    pending_channel_messages.popleft()
+            continue
+        try:
+            result = await guarded_channel_send(
+                channel,
+                context=item.get("context", "command-result"),
+                content=item.get("content"),
+                embed=item.get("embed"),
+            )
+        except Exception as exc:
+            print(f"⚠️ queued Discord channel result failed: {exc!r}", flush=True)
+            return
+        if result is None:
+            return
+        with pending_channel_lock:
+            if pending_channel_messages and pending_channel_messages[0] is item:
+                pending_channel_messages.popleft()
+        await asyncio.sleep(max(0.5, discord_rest_min_interval))
+
+
+async def flush_pending_command_outputs_once():
+    await _flush_pending_channel_messages_once()
+    await flush_pending_audit_logs_once()
+
+
+@tasks.loop(seconds=15)
+async def flush_pending_command_outputs():
+    try:
+        await flush_pending_command_outputs_once()
+    except Exception as exc:
+        print(f"⚠️ queued command output worker failed safely: {exc!r}", flush=True)
+
+
+async def flush_pending_audit_logs_once():
+    # Never sleep on a long global cooldown. This worker only drains when REST is usable.
+    if _discord_rest_rate_limit_remaining() > 0:
+        return
+    for _ in range(3):
+        with pending_audit_lock:
+            if not pending_audit_logs:
+                return
+            item = pending_audit_logs[0]
+        ok = await _send_one_audit_log(item)
+        if not ok:
+            return
+        with pending_audit_lock:
+            if pending_audit_logs and pending_audit_logs[0] is item:
+                pending_audit_logs.popleft()
+        await asyncio.sleep(max(0.5, discord_rest_min_interval))
+
+
+async def send_audit_log(guild: discord.Guild, user: discord.User, action: str, details: str, color: discord.Color):
+    if not guild:
+        return
+    log_channel = discord.utils.get(guild.text_channels, name=LOG_CHANNEL_NAME)
+    if not log_channel:
+        print(f"⚠️ Audit Log channel not found | guild={guild.name} | channel={LOG_CHANNEL_NAME}", flush=True)
+        return
+
+    embed = _build_audit_embed(user, action, details, color)
+    try:
+        result = await guarded_channel_send(log_channel, context=f"audit:{action}", embed=embed)
+        if result is not None:
+            return
+        _queue_audit_log(
+            guild.id,
+            log_channel.id,
+            action,
+            getattr(user, "id", 0),
+            getattr(user, "display_name", getattr(user, "name", "unknown")),
+            details,
+            int(color.value),
+        )
+    except Exception as exc:
+        print(f"❌ ส่ง Audit Log ไม่สำเร็จ: {exc}", flush=True)
+        _queue_audit_log(
+            guild.id,
+            log_channel.id,
+            action,
+            getattr(user, "id", 0),
+            getattr(user, "display_name", getattr(user, "name", "unknown")),
+            details,
+            int(color.value),
+        )
 
 # ==========================================
 # 🛡️ 4. Check สำหรับตรวจสอบสิทธิ์ผู้ใช้งาน
@@ -3661,6 +4031,10 @@ async def on_ready():
     if not check_library_boss_notifications.is_running(): check_library_boss_notifications.start()
     if not update_live_embed.is_running(): update_live_embed.start()
     if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
+    if not flush_pending_command_outputs.is_running(): flush_pending_command_outputs.start()
+    if not getattr(discord_block_diagnostics_loop, "_started", False):
+        discord_block_diagnostics_loop._started = True
+        asyncio.create_task(discord_block_diagnostics_loop(), name="discord-block-diagnostics")
 
     is_bot_ready = True
     loop = bot_event_loop
@@ -3746,6 +4120,8 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
             cf_ray = headers.get("CF-RAY") or headers.get("cf-ray") or "-"
             via = headers.get("Via") or headers.get("via") or "-"
             date_header = headers.get("Date") or headers.get("date") or "-"
+            _record_discord_block_observed(exc, context="interaction-ack", source="INTERACTION")
+            _mark_discord_block_log("interaction-ack", force=True)
             print(
                 f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
                 f"cf_ray={cf_ray} | via={via} | date={date_header} | shared REST cooldown unchanged",
@@ -3782,6 +4158,8 @@ async def _safe_interaction_send_message(interaction: discord.Interaction, conte
         except (TypeError, ValueError):
             pass
         if getattr(exc, "status", None) == 429:
+            _record_discord_block_observed(exc, context="interaction-initial-response", source="INTERACTION")
+            _mark_discord_block_log("interaction-initial-response", force=True)
             print(
                 f"⚠️ Interaction initial response rejected by Discord 429 | retry_after={retry_after:.2f}s | "
                 "shared REST cooldown unchanged",
@@ -4813,26 +5191,52 @@ async def _time_channel_fallback(interaction: discord.Interaction, *, embed=None
                     embed=embed,
                 ),
                 context="time-channel-fallback",
-                wait_for_cooldown=True,
+                # Do not sleep for a Discord global/IP block. The command must remain
+                # non-blocking; the audit/result queue handles recovery after cooldown.
+                wait_for_cooldown=False,
             ),
             timeout=4.0,
         )
         if message is not None:
             print("✅ /time channel fallback sent successfully", flush=True)
             return True
-        print("⚠️ /time channel fallback was skipped by Discord REST guard", flush=True)
+        _queue_channel_result(
+            interaction.channel_id,
+            content=content,
+            embed=embed,
+            context="time-channel-fallback-queued",
+        )
+        print("⏸️ /time result queued for automatic delivery after Discord REST cooldown", flush=True)
         return False
     except asyncio.TimeoutError:
-        print("⚠️ /time channel fallback timed out safely", flush=True)
+        _queue_channel_result(
+            interaction.channel_id,
+            content=content,
+            embed=embed,
+            context="time-channel-fallback-queued",
+        )
+        print("⚠️ /time channel fallback timed out safely | result queued", flush=True)
         return False
     except discord.HTTPException as exc:
+        _queue_channel_result(
+            interaction.channel_id,
+            content=content,
+            embed=embed,
+            context="time-channel-fallback-queued",
+        )
         print(
-            f"⚠️ /time channel fallback failed | status={getattr(exc, 'status', None)} | {exc}",
+            f"⚠️ /time channel fallback failed | status={getattr(exc, 'status', None)} | {exc} | result queued",
             flush=True,
         )
         return False
     except Exception as exc:
-        print(f"⚠️ /time channel fallback failed unexpectedly: {exc!r}", flush=True)
+        _queue_channel_result(
+            interaction.channel_id,
+            content=content,
+            embed=embed,
+            context="time-channel-fallback-queued",
+        )
+        print(f"⚠️ /time channel fallback failed unexpectedly: {exc!r} | result queued", flush=True)
         return False
 
 
@@ -5835,13 +6239,13 @@ def _run_v47_command_integrity_check():
     except Exception:
         direct_names = []
     if missing:
-        print(f"❌ V47 integrity failure | missing symbols: {missing}", flush=True)
-        raise RuntimeError(f"V47 integrity failure: {missing}")
+        print(f"❌ V50 integrity failure | missing symbols: {missing}", flush=True)
+        raise RuntimeError(f"V50 integrity failure: {missing}")
     if len(direct_names) != 16:
-        print(f"⚠️ V47 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
+        print(f"⚠️ V50 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
     else:
         print(
-            f"✅ V47 integrity check passed | 16 direct + /add boss = 17 command paths | "
+            f"✅ V50 command integrity check passed | 16 direct + /add boss = 17 command paths | "
             f"direct={', '.join(direct_names)}",
             flush=True,
         )
