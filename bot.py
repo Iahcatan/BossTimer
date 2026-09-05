@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V55_DASHBOARD_TTS_FALLBACK_NO_AUDIO_FIX_2026-09-05"
+NOTICE_BF_PATCH_VERSION = "V56_DISCORD_REST_RECOVERY_QUARANTINE_2026-09-05"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2268,7 +2268,9 @@ discord_block_next_probe_mono = 0.0
 discord_block_local_retry_seconds = 60.0
 discord_block_recovery_grace_seconds = max(5.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_GRACE", "15")))
 discord_block_recovery_until_mono = 0.0
-discord_block_recovery_window_seconds = max(60.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_WINDOW", "120")))
+discord_block_post_recovery_quiet_seconds = max(0.0, float(os.environ.get("DISCORD_BLOCK_POST_RECOVERY_QUIET", "600")))
+discord_block_post_recovery_quiet_until_wall = 0.0
+discord_block_post_recovery_quiet_until_mono = 0.0
 
 # V53: Persist the REST restriction state across process/Gateway restarts.
 # Firebase is the durable source on Render; SQLite is kept as a local fallback
@@ -2358,6 +2360,7 @@ def _discord_block_state_snapshot() -> dict:
         temp_restriction = bool(discord_block_temp_restriction)
         next_probe_mono = float(discord_block_next_probe_mono or 0.0)
         local_retry = float(discord_block_local_retry_seconds or 60.0)
+        post_recovery_quiet_until_wall = float(discord_block_post_recovery_quiet_until_wall or 0.0)
 
     next_probe_remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
     # If the 429 evidence already contains an authoritative server expiry but the
@@ -2386,6 +2389,8 @@ def _discord_block_state_snapshot() -> dict:
         "source": source,
         "temp_restriction": temp_restriction,
         "local_retry_seconds": local_retry,
+        "post_recovery_quiet_until_wall": post_recovery_quiet_until_wall,
+        "post_recovery_quiet_remaining": max(0.0, post_recovery_quiet_until_wall - now_wall),
         "updated_at": time.time(),
     }
 
@@ -2481,32 +2486,39 @@ async def _persist_discord_block_state_async(*, reason: str):
 
 
 async def _clear_persisted_discord_block_state(*, reason: str):
-    """Remove the persisted restriction only after a confirmed success and only
-    when no newer block has already been observed."""
-    with discord_block_lock:
-        # A new 429 may have happened after the success that scheduled this clear.
-        # Never let an older clear delete the newer persisted restriction.
-        if discord_block_started_at > 0:
-            return
+    """Persist the short recovery quarantine after a confirmed successful REST call."""
     try:
         async with discord_block_persist_lock:
+            with discord_block_lock:
+                if discord_block_started_at > 0:
+                    return
+                quiet_until = float(discord_block_post_recovery_quiet_until_wall or 0.0)
+            if quiet_until <= time.time():
+                return
+            state = {
+                "version": 2,
+                "cleared_at": time.time(),
+                "post_recovery_quiet_until_wall": quiet_until,
+                "reason": str(reason),
+            }
             try:
-                set_db_value("discord_rest_block", None)
+                set_db_value("discord_rest_block", state)
             except Exception as exc:
-                print(f"⚠️ Discord REST block SQLite clear failed: {exc!r}", flush=True)
+                print(f"⚠️ Discord REST block SQLite recovery-state write failed: {exc!r}", flush=True)
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(
-                        db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).delete,
+                        db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).set,
+                        state,
                     ),
                     timeout=5.0,
                 )
             except Exception as exc:
-                print(f"⚠️ Discord REST block Firebase clear failed | reason={reason}: {exc!r}", flush=True)
+                print(f"⚠️ Discord REST block Firebase recovery-state write failed | reason={reason}: {exc!r}", flush=True)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        print(f"⚠️ Discord REST block persistence clear failed | reason={reason}: {exc!r}", flush=True)
+        print(f"⚠️ Discord REST recovery-state persistence failed | reason={reason}: {exc!r}", flush=True)
 
 
 async def restore_persisted_discord_block_state():
@@ -2516,6 +2528,7 @@ async def restore_persisted_discord_block_state():
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
     global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_local_retry_seconds
+    global discord_block_post_recovery_quiet_until_wall, discord_block_post_recovery_quiet_until_mono
     now_wall = time.time()
     state = None
 
@@ -2525,7 +2538,7 @@ async def restore_persisted_discord_block_state():
             asyncio.to_thread(db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).get),
             timeout=5.0,
         )
-        if isinstance(raw, dict) and raw.get("started_at"):
+        if isinstance(raw, dict) and (raw.get("started_at") or raw.get("post_recovery_quiet_until_wall")):
             state = raw
     except Exception as exc:
         print(f"⚠️ Discord REST block Firebase restore unavailable: {exc!r}", flush=True)
@@ -2533,7 +2546,7 @@ async def restore_persisted_discord_block_state():
     if state is None:
         try:
             raw = get_db_value("discord_rest_block", None)
-            if isinstance(raw, dict) and raw.get("started_at"):
+            if isinstance(raw, dict) and (raw.get("started_at") or raw.get("post_recovery_quiet_until_wall")):
                 state = raw
         except Exception as exc:
             print(f"⚠️ Discord REST block SQLite restore unavailable: {exc!r}", flush=True)
@@ -2545,6 +2558,7 @@ async def restore_persisted_discord_block_state():
     try:
         started = float(state.get("started_at") or 0.0)
         last_seen = float(state.get("last_seen_at") or started)
+        persisted_quiet_until = float(state.get("post_recovery_quiet_until_wall") or 0.0)
         server_until = float(state.get("server_until") or 0.0)
         server_retry_after = float(state.get("server_retry_after") or 0.0)
         next_probe_at = float(state.get("next_probe_at") or 0.0)
@@ -2558,6 +2572,15 @@ async def restore_persisted_discord_block_state():
     except (TypeError, ValueError) as exc:
         print(f"⚠️ Discord REST block persisted state invalid; ignoring it: {exc!r}", flush=True)
         return False
+
+    if persisted_quiet_until > now_wall and started <= 0:
+        remaining_quiet = persisted_quiet_until - now_wall
+        with discord_block_lock:
+            discord_block_post_recovery_quiet_until_wall = persisted_quiet_until
+            discord_block_post_recovery_quiet_until_mono = time.monotonic() + remaining_quiet
+        discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, time.monotonic() + remaining_quiet)
+        print(f"🛡️ Discord REST post-recovery quarantine RESTORED | remaining={_format_duration(remaining_quiet)} | no background HTTP", flush=True)
+        return True
 
     # An old/stale record must never permanently suppress REST.
     # For temporary restrictions, Discord's supplied server expiry is authoritative.
@@ -2727,6 +2750,7 @@ def _clear_discord_block_after_success(*, context: str):
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
     global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_recovery_until_mono
+    global discord_block_post_recovery_quiet_until_wall, discord_block_post_recovery_quiet_until_mono
     now_wall = time.time()
     with discord_block_lock:
         started = discord_block_started_at
@@ -2734,9 +2758,11 @@ def _clear_discord_block_after_success(*, context: str):
         if started <= 0:
             return
         elapsed = max(0.0, now_wall - started)
+        quiet_until_wall = now_wall + discord_block_post_recovery_quiet_seconds
         print(
             f"✅ DISCORD API BLOCK CLEARED | context={context} | duration={_format_duration(elapsed)} | "
-            f"last_429_seen={datetime.fromtimestamp(last_seen, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if last_seen else '-'}",
+            f"last_429_seen={datetime.fromtimestamp(last_seen, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if last_seen else '-'} | "
+            f"post-recovery quarantine={_format_duration(discord_block_post_recovery_quiet_seconds)}",
             flush=True,
         )
         discord_block_started_at = 0.0
@@ -2749,7 +2775,9 @@ def _clear_discord_block_after_success(*, context: str):
         discord_block_source = ""
         discord_block_temp_restriction = False
         discord_block_next_probe_mono = 0.0
-        discord_block_recovery_until_mono = time.monotonic() + discord_block_recovery_window_seconds
+        discord_block_recovery_until_mono = time.monotonic() + 30.0
+        discord_block_post_recovery_quiet_until_wall = quiet_until_wall
+        discord_block_post_recovery_quiet_until_mono = time.monotonic() + discord_block_post_recovery_quiet_seconds
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(
@@ -2788,7 +2816,11 @@ async def discord_block_diagnostics_loop():
 def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
     global discord_rest_rate_limited_until, discord_rest_backoff_seconds, discord_rest_last_429_log
     global discord_block_next_probe_mono, discord_block_local_retry_seconds
+    global discord_block_post_recovery_quiet_until_wall, discord_block_post_recovery_quiet_until_mono
     meta = _record_discord_block_observed(exc, context=context, source="REST")
+    with discord_block_lock:
+        discord_block_post_recovery_quiet_until_wall = 0.0
+        discord_block_post_recovery_quiet_until_mono = 0.0
     server_retry = float(meta.get("retry_after") or 0.0)
     if server_retry <= 0:
         server_retry = float(meta.get("reset_after") or 0.0)
@@ -2870,13 +2902,9 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
     with discord_block_lock:
         temp_restriction = discord_block_temp_restriction
         next_probe_mono = discord_block_next_probe_mono
-        recovery_until_mono = discord_block_recovery_until_mono
-    # After a successful recovery request (normally startup tree-sync), keep a
-    # short post-recovery quiet window. This prevents all background schedulers
-    # and queued outputs from resuming simultaneously and recreating a burst
-    # immediately after a temporary Discord/Cloudflare restriction expires.
-    if recovery_until_mono > now_mono:
-        _log_rest_skip(context, recovery_until_mono - now_mono)
+        post_recovery_quiet_until_mono = discord_block_post_recovery_quiet_until_mono
+    if post_recovery_quiet_until_mono > now_mono:
+        _log_rest_skip(context, max(0.0, post_recovery_quiet_until_mono - now_mono))
         return None
     if temp_restriction and next_probe_mono > now_mono:
         _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
@@ -2894,9 +2922,9 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
         with discord_block_lock:
             temp_restriction = discord_block_temp_restriction
             next_probe_mono = discord_block_next_probe_mono
-            recovery_until_mono = discord_block_recovery_until_mono
-        if recovery_until_mono > now_mono:
-            _log_rest_skip(context, recovery_until_mono - now_mono)
+            post_recovery_quiet_until_mono = discord_block_post_recovery_quiet_until_mono
+        if post_recovery_quiet_until_mono > now_mono:
+            _log_rest_skip(context, max(0.0, post_recovery_quiet_until_mono - now_mono))
             return None
         if temp_restriction and next_probe_mono > now_mono:
             _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
@@ -4564,7 +4592,7 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
             _mark_discord_block_log("interaction-ack", force=True)
             print(
                 f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
-                f"cf_ray={cf_ray} | via={via} | date={date_header} | temporary REST circuit engaged",
+                f"cf_ray={cf_ray} | via={via} | date={date_header} | shared REST cooldown unchanged",
                 flush=True,
             )
             return False
@@ -4616,7 +4644,7 @@ async def _safe_interaction_send_message(interaction: discord.Interaction, conte
             _mark_discord_block_log("interaction-initial-response", force=True)
             print(
                 f"⚠️ Interaction initial response rejected by Discord 429 | retry_after={retry_after:.2f}s | "
-                "temporary REST circuit engaged",
+                "shared REST cooldown unchanged",
                 flush=True,
             )
         else:
