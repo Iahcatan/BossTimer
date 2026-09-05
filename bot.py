@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V51_DISCORD_BLOCK_TIMER_DIAGNOSTICS_RATE_LIMIT_SAFE_2026-09-05"
+NOTICE_BF_PATCH_VERSION = "V52_DISCORD_BLOCK_LOOP_BREAKER_RATE_LIMIT_SAFE_2026-09-05"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2263,6 +2263,11 @@ discord_block_global = False
 discord_block_kind = ""
 discord_block_source = ""
 discord_block_last_log_at = 0.0
+discord_block_temp_restriction = False
+discord_block_next_probe_mono = 0.0
+discord_block_local_retry_seconds = 60.0
+discord_block_recovery_grace_seconds = max(5.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_GRACE", "15")))
+discord_block_recovery_until_mono = 0.0
 discord_block_lock = threading.Lock()
 
 
@@ -2331,6 +2336,7 @@ def _record_discord_block_observed(exc: Exception, *, context: str, source: str 
     global discord_block_started_at, discord_block_last_seen_at
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_temp_restriction
 
     meta = _extract_discord_rate_limit_metadata(exc)
     now_wall = time.time()
@@ -2349,8 +2355,9 @@ def _record_discord_block_observed(exc: Exception, *, context: str, source: str 
         discord_block_scope = meta["scope"] or discord_block_scope
         discord_block_global = bool(meta["global"] or discord_block_global)
         text = meta["message"].lower()
-        if "blocked from accessing our api" in text or "temporarily" in text and "api" in text:
+        if "blocked from accessing our api" in text or ("temporarily" in text and "api" in text):
             discord_block_kind = "API_TEMPORARY_RESTRICTION"
+            discord_block_temp_restriction = True
         elif discord_block_global:
             discord_block_kind = "GLOBAL_RATE_LIMIT"
         elif meta["scope"]:
@@ -2377,6 +2384,8 @@ def _discord_block_diagnostic_line() -> str:
         started = discord_block_started_at
         last_seen = discord_block_last_seen_at
         server_until = discord_block_server_until
+        next_probe_mono = discord_block_next_probe_mono
+        temp_restriction = discord_block_temp_restriction
         scope = discord_block_scope or "-"
         is_global = discord_block_global
         kind = discord_block_kind or "-"
@@ -2384,13 +2393,15 @@ def _discord_block_diagnostic_line() -> str:
     if started <= 0:
         return "✅ Discord API restriction: NONE OBSERVED"
     elapsed = max(0.0, now_wall - started)
+    now_mono = time.monotonic()
     server_remaining = max(0.0, server_until - now_wall) if server_until > 0 else 0.0
+    next_probe_remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
     if server_until > now_wall:
         remaining_text = f"server-provided remaining={_format_duration(server_remaining)}"
         expiry_text = datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime("%d/%m/%Y %H:%M:%S %Z")
         certainty = "EXACT TIMER FROM DISCORD"
     elif server_until > 0 and last_seen > 0 and now_wall >= server_until:
-        remaining_text = "server timer expired; waiting for a successful request to confirm clear"
+        remaining_text = (f"server timer expired; safe recovery hold remaining={_format_duration(next_probe_remaining)}" if temp_restriction and next_probe_remaining > 0 else "server timer expired; waiting for a successful request to confirm clear")
         expiry_text = datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime("%d/%m/%Y %H:%M:%S %Z")
         certainty = "SERVER TIMER EXPIRED — CLEAR NOT YET CONFIRMED"
     else:
@@ -2400,7 +2411,8 @@ def _discord_block_diagnostic_line() -> str:
     return (
         f"🚨 DISCORD API BLOCK STATUS | kind={kind} | source={source} | scope={scope} | global={is_global} | "
         f"started={datetime.fromtimestamp(started, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z')} | "
-        f"elapsed={_format_duration(elapsed)} | {remaining_text} | expiry={expiry_text} | {certainty}"
+        f"elapsed={_format_duration(elapsed)} | {remaining_text} | expiry={expiry_text} | "
+        f"next_probe_in={_format_duration(next_probe_remaining) if next_probe_remaining > 0 else 'READY'} | {certainty}"
     )
 
 
@@ -2408,6 +2420,7 @@ def _clear_discord_block_after_success(*, context: str):
     global discord_block_started_at, discord_block_last_seen_at
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_recovery_until_mono
     now_wall = time.time()
     with discord_block_lock:
         started = discord_block_started_at
@@ -2428,6 +2441,9 @@ def _clear_discord_block_after_success(*, context: str):
         discord_block_global = False
         discord_block_kind = ""
         discord_block_source = ""
+        discord_block_temp_restriction = False
+        discord_block_next_probe_mono = 0.0
+        discord_block_recovery_until_mono = time.monotonic() + 30.0
 
 
 def _mark_discord_block_log(context: str, *, force: bool = False):
@@ -2457,32 +2473,29 @@ async def discord_block_diagnostics_loop():
 
 def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
     global discord_rest_rate_limited_until, discord_rest_backoff_seconds, discord_rest_last_429_log
+    global discord_block_next_probe_mono, discord_block_local_retry_seconds
     meta = _record_discord_block_observed(exc, context=context, source="REST")
     server_retry = float(meta.get("retry_after") or 0.0)
     if server_retry <= 0:
         server_retry = float(meta.get("reset_after") or 0.0)
-    if server_retry <= 0:
-        local_pause = discord_rest_backoff_seconds
-        discord_rest_backoff_seconds = min(discord_rest_backoff_seconds * 2.0, 900.0)
-    else:
-        local_pause = server_retry
-        discord_rest_backoff_seconds = min(max(60.0, server_retry * 2.0), 900.0)
-
-    until = time.monotonic() + max(1.0, local_pause)
-    discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, until)
-
+    is_temp_restriction = bool(discord_block_temp_restriction)
     now_mono = time.monotonic()
-    if now_mono - discord_rest_last_429_log >= 5.0:
-        discord_rest_last_429_log = now_mono
-        timer_note = (
-            f"server_timer={server_retry:.3f}s" if server_retry > 0 else
-            f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
-        )
-        print(
-            f"⏸️ GLOBAL Discord REST 429 | context={context} | {timer_note} | "
-            "all non-essential REST paused",
-            flush=True,
-        )
+    if server_retry > 0:
+        local_pause = server_retry
+        probe_in = server_retry + (discord_block_recovery_grace_seconds if is_temp_restriction else 0.0)
+        discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
+        discord_rest_backoff_seconds = discord_block_local_retry_seconds
+    else:
+        local_pause = discord_block_local_retry_seconds
+        discord_block_local_retry_seconds = min(discord_block_local_retry_seconds * 2.0, 900.0)
+        probe_in = local_pause
+    discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, now_mono + max(1.0, local_pause))
+    discord_block_next_probe_mono = max(discord_block_next_probe_mono, now_mono + max(1.0, probe_in))
+    now_log = time.monotonic()
+    if now_log - discord_rest_last_429_log >= 5.0:
+        discord_rest_last_429_log = now_log
+        timer_note = f"server_timer={server_retry:.3f}s" if server_retry > 0 else f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
+        print(f"⏸️ GLOBAL Discord REST 429 | context={context} | {timer_note} | next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | repeat probes suppressed", flush=True)
     _mark_discord_block_log(context, force=True)
     return local_pause
 
@@ -2538,6 +2551,13 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
     scheduler/notification task.  Voice/TTS calls never enter this function.
     """
     global discord_rest_next_call_at
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        temp_restriction = discord_block_temp_restriction
+        next_probe_mono = discord_block_next_probe_mono
+    if temp_restriction and next_probe_mono > now_mono:
+        _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
+        return None
     remaining = _discord_rest_rate_limit_remaining()
     if remaining > 0:
         if not wait_for_cooldown:
@@ -2547,6 +2567,13 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
         await asyncio.sleep(remaining)
 
     async with discord_rest_guard_lock:
+        now_mono = time.monotonic()
+        with discord_block_lock:
+            temp_restriction = discord_block_temp_restriction
+            next_probe_mono = discord_block_next_probe_mono
+        if temp_restriction and next_probe_mono > now_mono:
+            _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
+            return None
         remaining = _discord_rest_rate_limit_remaining()
         if remaining > 0:
             if not wait_for_cooldown:
@@ -4745,7 +4772,7 @@ async def check_boss_notifications():
                 try:
                     channel = bot.get_channel(int(channel_id))
                     if channel is None:
-                        channel = await bot.fetch_channel(int(channel_id))
+                        channel = await guarded_fetch_channel(int(channel_id), context=f"boss-notify:fetch-channel:{boss_name}")
                 except Exception:
                     channel = None
 
