@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V54_DISCORD_REST_BLOCK_PERSISTENCE_STARTUP_GATE_HARDENED_2026-09-05"
+NOTICE_BF_PATCH_VERSION = "V55_DASHBOARD_TTS_FALLBACK_NO_AUDIO_FIX_2026-09-05"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -4067,8 +4067,13 @@ async def refresh_tts_settings_from_firebase():
     return True
 
 async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
-    """Generate TTS with live Firebase settings and bounded retries.
-    A transient Edge TTS "No audio was received" error must not make /notice silently fail.
+    """Generate TTS with live Firebase settings and bounded recovery.
+
+    Keep the configured voice as the primary voice. If Edge TTS returns
+    ``NoAudioReceived`` for that voice, make one bounded fallback attempt with
+    another currently supported voice in the same language. This is intentionally
+    limited to TTS generation and does not change Firebase, Boss, Voice, or command
+    behavior.
     """
     await refresh_tts_settings_from_firebase()
     actual = []
@@ -4079,12 +4084,22 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
     if tts_ko_enabled and text_ko:
         actual.append(("ko", text_ko, VOICE_KOR, "-10%", "+0Hz"))
 
+    # Fallbacks are used only after the configured voice has exhausted its
+    # normal bounded retries. They preserve the language and avoid retry storms.
+    tts_voice_fallbacks = {
+        "th": ["th-TH-AcharaNeural"],
+        "en": ["en-US-JennyNeural"],
+        "ko": ["ko-KR-JiMinNeural"],
+    }
+
     files = []
     uid = uuid.uuid4().hex
     for lang, text, voice, rate, pitch in actual:
         filename = f"temp_tts_{lang}_{guild_id}_{uid}.mp3"
         success = False
         last_error = None
+
+        # Phase 1: configured voice, unchanged from the existing 3-attempt policy.
         for attempt in range(1, 4):
             try:
                 if os.path.exists(filename):
@@ -4098,16 +4113,48 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
                 await communicator.save(filename)
                 if os.path.exists(filename) and os.path.getsize(filename) > 256:
                     files.append((lang, filename))
-                    print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id}) attempt={attempt}")
+                    print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id}) voice={voice} attempt={attempt}")
                     success = True
                     break
                 last_error = RuntimeError("No audio was received")
             except Exception as e:
                 last_error = e
-                print(f"⚠️ TTS attempt {attempt}/3 failed ({lang}): {e}")
-                await asyncio.sleep(0.8 * attempt)
+                print(f"⚠️ TTS attempt {attempt}/3 failed ({lang}) voice={voice}: {e}")
+                if attempt < 3:
+                    await asyncio.sleep(0.8 * attempt)
+
+        if success:
+            continue
+
+        # Phase 2: one fallback voice, only for a no-audio/voice-rejection class
+        # failure. Do not fan out across many voices because that can create an
+        # upstream retry storm.
+        error_text = str(last_error or "")
+        no_audio_failure = bool(last_error) and (
+            "No audio was received" in error_text
+            or last_error.__class__.__name__ == "NoAudioReceived"
+        )
+        if no_audio_failure:
+            for fallback_voice in tts_voice_fallbacks.get(lang, []):
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                    print(f"🔁 TTS fallback voice | lang={lang} | primary={voice} | fallback={fallback_voice}")
+                    await asyncio.sleep(1.5)
+                    communicator = edge_tts.Communicate(text, fallback_voice)
+                    await communicator.save(filename)
+                    if os.path.exists(filename) and os.path.getsize(filename) > 256:
+                        files.append((lang, filename))
+                        print(f"✅ TTS fallback สำเร็จ: {lang} ({guild_id}) voice={fallback_voice}")
+                        success = True
+                        break
+                    last_error = RuntimeError("No audio was received")
+                except Exception as e:
+                    last_error = e
+                    print(f"⚠️ TTS fallback failed ({lang}) voice={fallback_voice}: {e}")
+
         if not success:
-            print(f"❌ สร้าง TTS ไม่สำเร็จ ({lang}) หลังลอง 3 ครั้ง: {last_error}")
+            print(f"❌ สร้าง TTS ไม่สำเร็จ ({lang}) หลัง primary 3 attempts + bounded fallback: {last_error}")
     return files
 
 
