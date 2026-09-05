@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V53_DISCORD_REST_BLOCK_PERSISTENCE_STARTUP_GATE_2026-09-05"
+NOTICE_BF_PATCH_VERSION = "V54_DISCORD_REST_BLOCK_PERSISTENCE_STARTUP_GATE_HARDENED_2026-09-05"
 print(f"🧩 BOT PATCH VERSION: {NOTICE_BF_PATCH_VERSION}")
 
 logging.getLogger('discord.player').setLevel(logging.WARNING)
@@ -2276,6 +2276,7 @@ discord_block_recovery_until_mono = 0.0
 DISCORD_REST_BLOCK_FIREBASE_PATH = "app_settings/discord_rest_block"
 discord_block_persist_lock = asyncio.Lock()
 discord_block_persist_task = None
+discord_block_persist_dirty = False
 
 discord_block_lock = threading.Lock()
 
@@ -2384,18 +2385,23 @@ def _discord_block_state_snapshot() -> dict:
         "source": source,
         "temp_restriction": temp_restriction,
         "local_retry_seconds": local_retry,
+        "updated_at": time.time(),
     }
 
 
 def _schedule_persist_discord_block_state(reason: str):
-    """Persist restriction state without blocking the Discord event loop."""
-    global discord_block_persist_task
+    """Persist the latest restriction snapshot without losing later state changes."""
+    global discord_block_persist_task, discord_block_persist_dirty
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
     if discord_block_persist_task and not discord_block_persist_task.done():
+        # A persist is already in flight. Mark it dirty so the final/latest state
+        # is written again after the current write completes.
+        discord_block_persist_dirty = True
         return
+    discord_block_persist_dirty = False
     discord_block_persist_task = loop.create_task(
         _persist_discord_block_state_async(reason=reason),
         name="discord-rest-block-persist",
@@ -2403,38 +2409,84 @@ def _schedule_persist_discord_block_state(reason: str):
 
 
 async def _persist_discord_block_state_async(*, reason: str):
-    state = _discord_block_state_snapshot()
-    if state.get("started_at", 0.0) <= 0:
-        return
-    try:
-        async with discord_block_persist_lock:
-            # Local fallback first; this is immediate and useful if the process
-            # restarts without a new Render deploy.
-            try:
-                set_db_value("discord_rest_block", state)
-            except Exception as exc:
-                print(f"⚠️ Discord REST block SQLite persist failed: {exc!r}", flush=True)
+    """Persist the latest complete restriction state to SQLite + durable Firebase."""
+    global discord_block_persist_task, discord_block_persist_dirty
 
-            # Firebase is durable across Render restarts/deploys. It is an
-            # isolated small state node and does not alter Boss/Firebase schemas.
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).set,
-                        state,
-                    ),
-                    timeout=5.0,
-                )
-            except Exception as exc:
-                print(f"⚠️ Discord REST block Firebase persist failed | reason={reason}: {exc!r}", flush=True)
+    try:
+        while True:
+            # Snapshot only after all fields for the current event have been updated.
+            state = _discord_block_state_snapshot()
+            if state.get("started_at", 0.0) <= 0:
+                return
+
+            async with discord_block_persist_lock:
+                # SQLite is the local fallback for process restarts.
+                try:
+                    set_db_value("discord_rest_block", state)
+                except Exception as exc:
+                    print(f"⚠️ Discord REST block SQLite persist failed: {exc!r}", flush=True)
+
+                # Firebase is the durable cross-restart/deploy copy.
+                firebase_saved = False
+                last_exc = None
+                for attempt in range(1, 4):
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(
+                                db.reference(DISCORD_REST_BLOCK_FIREBASE_PATH).set,
+                                state,
+                            ),
+                            timeout=5.0,
+                        )
+                        firebase_saved = True
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 3:
+                            await asyncio.sleep(float(attempt))
+
+                if not firebase_saved:
+                    print(
+                        f"⚠️ Discord REST block Firebase persist failed after 3 attempts | "
+                        f"reason={reason}: {last_exc!r}",
+                        flush=True,
+                    )
+
+            # If a later 429/observation changed the state while we were writing,
+            # do one more write using the newest snapshot. This closes the V53
+            # race where the first queued write could capture pre-_apply state.
+            if discord_block_persist_dirty:
+                discord_block_persist_dirty = False
+                continue
+            return
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         print(f"⚠️ Discord REST block persistence failed | reason={reason}: {exc!r}", flush=True)
+    finally:
+        # Only clear the task pointer when no newer writer has replaced/marked it.
+        if discord_block_persist_task is asyncio.current_task():
+            discord_block_persist_task = None
+            if discord_block_persist_dirty:
+                discord_block_persist_dirty = False
+                try:
+                    loop = asyncio.get_running_loop()
+                    discord_block_persist_task = loop.create_task(
+                        _persist_discord_block_state_async(reason=f"followup:{reason}"),
+                        name="discord-rest-block-persist",
+                    )
+                except RuntimeError:
+                    discord_block_persist_task = None
 
 
 async def _clear_persisted_discord_block_state(*, reason: str):
-    """Remove the persisted restriction only after a confirmed successful REST request."""
+    """Remove the persisted restriction only after a confirmed success and only
+    when no newer block has already been observed."""
+    with discord_block_lock:
+        # A new 429 may have happened after the success that scheduled this clear.
+        # Never let an older clear delete the newer persisted restriction.
+        if discord_block_started_at > 0:
+            return
     try:
         async with discord_block_persist_lock:
             try:
@@ -2501,6 +2553,7 @@ async def restore_persisted_discord_block_state():
         source = str(state.get("source") or "")
         temp_restriction = bool(state.get("temp_restriction"))
         local_retry = max(60.0, float(state.get("local_retry_seconds") or 60.0))
+        updated_at = float(state.get("updated_at") or last_seen or started)
     except (TypeError, ValueError) as exc:
         print(f"⚠️ Discord REST block persisted state invalid; ignoring it: {exc!r}", flush=True)
         return False
@@ -2559,7 +2612,8 @@ async def restore_persisted_discord_block_state():
         f"🛡️ Discord REST startup recovery gate RESTORED | kind={kind or '-'} | "
         f"source={source or 'PERSISTED'} | server_remaining={_format_duration(server_remaining) if server_remaining else 'expired/unknown'} | "
         f"gate_hold={_format_duration(probe_remaining) if probe_remaining > 0 else 'READY'} | "
-        f"expiry={datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if server_until > 0 else 'UNKNOWN'}",
+        f"expiry={datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z') if server_until > 0 else 'UNKNOWN'} | "
+        f"persisted_age={_format_duration(max(0.0, now_wall - updated_at))}",
         flush=True,
     )
     return True
@@ -2617,7 +2671,6 @@ def _record_discord_block_observed(exc: Exception, *, context: str, source: str 
             discord_block_kind = "RATE_LIMIT"
         discord_block_source = source
 
-    _schedule_persist_discord_block_state(reason=f"observed:{context}")
     return meta
 
 
@@ -4404,6 +4457,7 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
     restriction), the command continues its Voice work, but the Discord client may show
     "The application did not respond" until the restriction clears.
     """
+    global discord_rest_rate_limited_until, discord_block_next_probe_mono
     try:
         if interaction.response.is_done():
             return True
@@ -4434,6 +4488,19 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
             via = headers.get("Via") or headers.get("via") or "-"
             date_header = headers.get("Date") or headers.get("date") or "-"
             _record_discord_block_observed(exc, context="interaction-ack", source="INTERACTION")
+            with discord_block_lock:
+                if discord_block_temp_restriction:
+                    server_retry = max(0.0, discord_block_server_until - time.time())
+                    gate_hold = server_retry + discord_block_recovery_grace_seconds if server_retry > 0 else 60.0
+                    discord_block_next_probe_mono = max(
+                        discord_block_next_probe_mono,
+                        time.monotonic() + gate_hold,
+                    )
+                    discord_rest_rate_limited_until = max(
+                        discord_rest_rate_limited_until,
+                        time.monotonic() + gate_hold,
+                    )
+            _schedule_persist_discord_block_state(reason="interaction-ack-429")
             _mark_discord_block_log("interaction-ack", force=True)
             print(
                 f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
@@ -4450,6 +4517,7 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
 
 async def _safe_interaction_send_message(interaction: discord.Interaction, content=None, *, ephemeral=True, **kwargs):
     """Best-effort initial interaction response for short-lived acknowledgement lanes."""
+    global discord_rest_rate_limited_until, discord_block_next_probe_mono
     try:
         if interaction.response.is_done():
             return False
@@ -4472,6 +4540,19 @@ async def _safe_interaction_send_message(interaction: discord.Interaction, conte
             pass
         if getattr(exc, "status", None) == 429:
             _record_discord_block_observed(exc, context="interaction-initial-response", source="INTERACTION")
+            with discord_block_lock:
+                if discord_block_temp_restriction:
+                    server_retry = max(0.0, discord_block_server_until - time.time())
+                    gate_hold = server_retry + discord_block_recovery_grace_seconds if server_retry > 0 else 60.0
+                    discord_block_next_probe_mono = max(
+                        discord_block_next_probe_mono,
+                        time.monotonic() + gate_hold,
+                    )
+                    discord_rest_rate_limited_until = max(
+                        discord_rest_rate_limited_until,
+                        time.monotonic() + gate_hold,
+                    )
+            _schedule_persist_discord_block_state(reason="interaction-initial-response-429")
             _mark_discord_block_log("interaction-initial-response", force=True)
             print(
                 f"⚠️ Interaction initial response rejected by Discord 429 | retry_after={retry_after:.2f}s | "
