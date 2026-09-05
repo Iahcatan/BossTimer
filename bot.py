@@ -2268,6 +2268,7 @@ discord_block_next_probe_mono = 0.0
 discord_block_local_retry_seconds = 60.0
 discord_block_recovery_grace_seconds = max(5.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_GRACE", "15")))
 discord_block_recovery_until_mono = 0.0
+discord_block_recovery_window_seconds = max(60.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_WINDOW", "120")))
 
 # V53: Persist the REST restriction state across process/Gateway restarts.
 # Firebase is the durable source on Render; SQLite is kept as a local fallback
@@ -2748,7 +2749,7 @@ def _clear_discord_block_after_success(*, context: str):
         discord_block_source = ""
         discord_block_temp_restriction = False
         discord_block_next_probe_mono = 0.0
-        discord_block_recovery_until_mono = time.monotonic() + 30.0
+        discord_block_recovery_until_mono = time.monotonic() + discord_block_recovery_window_seconds
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(
@@ -2869,6 +2870,14 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
     with discord_block_lock:
         temp_restriction = discord_block_temp_restriction
         next_probe_mono = discord_block_next_probe_mono
+        recovery_until_mono = discord_block_recovery_until_mono
+    # After a successful recovery request (normally startup tree-sync), keep a
+    # short post-recovery quiet window. This prevents all background schedulers
+    # and queued outputs from resuming simultaneously and recreating a burst
+    # immediately after a temporary Discord/Cloudflare restriction expires.
+    if recovery_until_mono > now_mono:
+        _log_rest_skip(context, recovery_until_mono - now_mono)
+        return None
     if temp_restriction and next_probe_mono > now_mono:
         _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
         return None
@@ -2885,6 +2894,10 @@ async def guarded_discord_call(call_factory, *, context: str, wait_for_cooldown:
         with discord_block_lock:
             temp_restriction = discord_block_temp_restriction
             next_probe_mono = discord_block_next_probe_mono
+            recovery_until_mono = discord_block_recovery_until_mono
+        if recovery_until_mono > now_mono:
+            _log_rest_skip(context, recovery_until_mono - now_mono)
+            return None
         if temp_restriction and next_probe_mono > now_mono:
             _log_rest_skip(context, max(0.0, next_probe_mono - now_mono))
             return None
@@ -4551,7 +4564,7 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
             _mark_discord_block_log("interaction-ack", force=True)
             print(
                 f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
-                f"cf_ray={cf_ray} | via={via} | date={date_header} | shared REST cooldown unchanged",
+                f"cf_ray={cf_ray} | via={via} | date={date_header} | temporary REST circuit engaged",
                 flush=True,
             )
             return False
@@ -4603,7 +4616,7 @@ async def _safe_interaction_send_message(interaction: discord.Interaction, conte
             _mark_discord_block_log("interaction-initial-response", force=True)
             print(
                 f"⚠️ Interaction initial response rejected by Discord 429 | retry_after={retry_after:.2f}s | "
-                "shared REST cooldown unchanged",
+                "temporary REST circuit engaged",
                 flush=True,
             )
         else:
