@@ -2297,6 +2297,10 @@ discord_background_rest_recovery_grace_seconds = max(
 )
 discord_background_rest_suppressed_until = 0.0
 discord_background_rest_quarantined = False
+# Hold all non-essential background Discord REST until the first successful
+# guild command sync after READY. This closes the startup race where on_ready
+# notification tasks can begin before start.py completes tree.sync().
+discord_background_rest_startup_hold = True
 
 discord_background_rest_context_prefixes = (
     "boss-notify:",
@@ -2988,9 +2992,17 @@ async def guarded_discord_call(
         return None
 
     global discord_rest_next_call_at, discord_background_rest_next_call_at
-    global discord_background_rest_quarantined
+    global discord_background_rest_quarantined, discord_background_rest_startup_hold
 
     if background:
+        if discord_background_rest_startup_hold:
+            _log_background_rest_skip(
+                context,
+                0.0,
+                reason="startup-command-sync-hold",
+            )
+            return None
+
         bg_remaining = _background_rest_remaining()
         if discord_background_rest_quarantined or bg_remaining > 0:
             if bg_remaining <= 0 and discord_background_rest_quarantined:
@@ -4596,6 +4608,12 @@ async def _guarded_tree_sync(*args, **kwargs):
     await wait_for_discord_rest_startup_gate(context="startup:tree-sync")
     try:
         result = await _original_tree_sync(*args, **kwargs)
+        global discord_background_rest_startup_hold
+        discord_background_rest_startup_hold = False
+        print(
+            "🟢 Background Discord REST startup hold released | command sync succeeded",
+            flush=True,
+        )
         # Tree sync is a confirmed successful foreground REST request, but it is
         # intentionally outside guarded_discord_call.  V59 therefore arms the
         # existing background recovery grace here too, so queued boss/audit REST
