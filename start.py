@@ -2,7 +2,6 @@ import asyncio
 import os
 import sys
 import traceback
-import discord
 
 # Render normally runs Python with stdout connected to a log pipe.
 # Reconfigure BEFORE importing bot.py so even Firebase/import/on_ready logs
@@ -15,6 +14,10 @@ except Exception:
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
+
+SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
+if SKYNET_RUNTIME_ROLE not in {"web", "bot"}:
+    raise RuntimeError("SKYNET_RUNTIME_ROLE must be exactly 'web' or 'bot'")
 
 # ============================================================
 # SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
@@ -114,36 +117,31 @@ async def sync_commands_once():
             log("❌ ไม่มี Guild สำหรับ sync คำสั่ง")
             return
 
-        # Authoritative registration is GLOBAL only.
-        # First sync the current tree globally, then explicitly clear guild-local
-        # registrations so old duplicate guild commands are removed.
-        global_synced = await bot_module.bot.tree.sync()
-        global_names = sorted(getattr(command, "qualified_name", getattr(command, "name", str(command))) for command in global_synced)
-        log(f"✅ Global Sync: {len(global_names)} commands")
-        log("🔎 Global Commands: " + ", ".join(global_names))
-
         successful = 0
         for guild in guilds:
             try:
                 bot_module.bot.tree.clear_commands(guild=guild)
-                cleared = await bot_module.bot.tree.sync(guild=guild)
-                log(f"🧹 Guild Local Commands Cleared: {guild.name} ({guild.id}) -> {len(cleared)}")
+                bot_module.bot.tree.copy_global_to(guild=guild)
+                synced = await bot_module.bot.tree.sync(guild=guild)
+                remote_names = sorted(command.qualified_name for command in synced)
+                log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
+                log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
+
+                missing_remote = sorted(required - set(remote_names))
+                if missing_remote:
+                    log("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
+                else:
+                    log("🟢 Required commands verified: /status /kill /setvoice")
                 successful += 1
             except Exception as exc:
-                log(f"❌ Guild cleanup failed: {guild.name} ({guild.id}): {exc!r}")
+                log(f"❌ Guild Sync failed: {guild.name} ({guild.id}): {exc!r}")
                 traceback.print_exc()
-
-        missing_global = sorted(required - set(global_names))
-        if missing_global:
-            log("❌ Required global commands missing: " + ", ".join(missing_global))
-        else:
-            log("🟢 Required global commands verified: /status /kill /setvoice")
 
         if successful == len(guilds):
             _sync_complete = True
-            log(f"✅ GLOBAL COMMAND SYNC COMPLETE + GUILD CLEANUP ({successful}/{len(guilds)} guilds)")
+            log(f"✅ DISCORD GUILD COMMAND SYNC COMPLETE ({successful}/{len(guilds)} guilds)")
         else:
-            log(f"⚠️ GLOBAL COMMAND SYNC COMPLETE, GUILD CLEANUP PARTIAL ({successful}/{len(guilds)} guilds)")
+            log(f"⚠️ DISCORD GUILD COMMAND SYNC PARTIAL ({successful}/{len(guilds)} guilds)")
         log("=" * 60)
 
 
@@ -154,7 +152,7 @@ bot_module.sync_commands_once = sync_commands_once
 async def interaction_diagnostic(interaction):
     """Diagnostic only: NEVER acknowledge/defer the interaction here."""
     try:
-        if interaction.type != discord.InteractionType.application_command:
+        if interaction.type != interaction.InteractionType.application_command:
             return
         command_name = None
         try:
@@ -179,6 +177,8 @@ async def interaction_diagnostic(interaction):
 
 @bot_module.bot.listen("on_ready")
 async def startup_command_sync():
+    if SKYNET_RUNTIME_ROLE != "bot":
+        return
     log("🟢 on_ready received by start.py")
     try:
         await sync_commands_once()
@@ -207,19 +207,42 @@ async def startup_heartbeat():
 async def main():
     log("=" * 60)
     log("🚀 SKYNET STARTING")
+    log(f"🧭 Runtime role: {SKYNET_RUNTIME_ROLE}")
     log("=" * 60)
-    log("🌐 Starting web server...")
 
+    if SKYNET_RUNTIME_ROLE == "web":
+        log("🌐 Starting web server...")
+        bot_module.keep_alive()
+        log("🌐 Web server startup requested")
+        log("🛡️ Render web runtime: Discord Gateway/REST DISABLED")
+        heartbeat_task = asyncio.create_task(startup_heartbeat())
+        try:
+            await asyncio.Event().wait()
+        except KeyboardInterrupt:
+            log("🛑 Web runtime stopped")
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        return
+
+    # Single Render Web Service mode: serve Dashboard/API and run the Discord bot
+    # in the same process when SKYNET_RUNTIME_ROLE=bot.
+    # This keeps the existing one-service deployment model working while
+    # preventing accidental Gateway startup when role=web.
     bot_module.keep_alive()
-    log("🌐 Web server startup requested")
+    log("🌐 Web server startup requested (bot runtime shares this service)")
 
     token = os.environ.get("DISCORD_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("ไม่พบ DISCORD_TOKEN ใน Environment Variables")
+        raise RuntimeError("SKYNET_RUNTIME_ROLE=bot requires DISCORD_TOKEN")
 
     log("🔑 พบ DISCORD_TOKEN")
     log("🔌 กำลังเริ่ม Discord Bot...")
     log("🔌 กำลังเชื่อมต่อ Discord Gateway...")
+    log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
 
     heartbeat_task = asyncio.create_task(startup_heartbeat())
     try:
