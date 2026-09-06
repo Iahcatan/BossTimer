@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V59_DISCORD_REST_POST_RECOVERY_BACKGROUND_GRACE_2026-09-06"
+NOTICE_BF_PATCH_VERSION = "V60_INTERACTION_ACK_SCOPE_DIAGNOSTIC_FIX_2026-09-06"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -2988,6 +2988,7 @@ async def guarded_discord_call(
         return None
 
     global discord_rest_next_call_at, discord_background_rest_next_call_at
+    global discord_background_rest_quarantined
 
     if background:
         bg_remaining = _background_rest_remaining()
