@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V58_DISCORD_REST_MINIMAL_NO_REPROBE_BOSS_QUEUE_2026-09-06"
+NOTICE_BF_PATCH_VERSION = "V59_DISCORD_REST_POST_RECOVERY_BACKGROUND_GRACE_2026-09-06"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -4583,7 +4583,16 @@ async def _guarded_tree_sync(*args, **kwargs):
     await wait_for_discord_rest_startup_gate(context="startup:tree-sync")
     try:
         result = await _original_tree_sync(*args, **kwargs)
+        # Tree sync is a confirmed successful foreground REST request, but it is
+        # intentionally outside guarded_discord_call.  V59 therefore arms the
+        # existing background recovery grace here too, so queued boss/audit REST
+        # cannot immediately become the first post-block probe.
+        had_active_block = False
+        with discord_block_lock:
+            had_active_block = discord_block_started_at > 0
         _clear_discord_block_after_success(context="startup:tree-sync")
+        if had_active_block:
+            _arm_background_rest_after_foreground_recovery()
         return result
     except discord.HTTPException as exc:
         if getattr(exc, "status", None) == 429:
