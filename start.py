@@ -1,5 +1,4 @@
 import asyncio
-import discord
 import os
 import sys
 import traceback
@@ -124,11 +123,7 @@ async def sync_commands_once():
                 bot_module.bot.tree.clear_commands(guild=guild)
                 bot_module.bot.tree.copy_global_to(guild=guild)
                 synced = await bot_module.bot.tree.sync(guild=guild)
-                remote_names = sorted(
-                    getattr(command, "qualified_name", getattr(command, "name", ""))
-                    for command in synced
-                    if getattr(command, "name", None)
-                )
+                remote_names = sorted(getattr(command, "qualified_name", getattr(command, "name", "")) for command in synced)
                 log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
                 log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
 
@@ -157,7 +152,7 @@ bot_module.sync_commands_once = sync_commands_once
 async def interaction_diagnostic(interaction):
     """Diagnostic only: NEVER acknowledge/defer the interaction here."""
     try:
-        if interaction.type != discord.InteractionType.application_command:
+        if interaction.type != interaction.InteractionType.application_command:
             return
         command_name = None
         try:
