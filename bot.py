@@ -3916,15 +3916,27 @@ def start_firebase_listener(loop):
                 boss_schedule.clear()
                 boss_schedule.update(new_schedule)
 
-            # Trigger one-shot confirmation only for newly requested recordings.
+            # Trigger one-shot confirmation from the durable Firebase pending state.
+            # Do not require the local cache's previous requestId to differ: the local
+            # cache can already contain the same pending request after a dashboard save,
+            # a reconnect, or a root-sync race.  The requestId itself is the idempotency
+            # key, while confirmationStatus=pending is the durable work signal.
             for boss_name, item in new_schedule.items():
                 req_id = str(item.get("confirmationRequestId") or "").strip()
-                if not req_id or req_id in _confirmation_seen_ids:
+                status = str(item.get("confirmationStatus") or "pending").strip().lower()
+                if not req_id or status not in ("", "pending"):
                     continue
-                prev_id = str((previous.get(boss_name) or {}).get("confirmationRequestId") or "").strip()
-                _confirmation_seen_ids.add(req_id)
-                if req_id != prev_id and str(item.get("confirmationStatus") or "pending") in ("", "pending"):
-                    queue_voice_confirmation(boss_name, item, source='firebase-listener')
+                if req_id in _confirmation_seen_ids or req_id in _confirmation_queue_ids:
+                    continue
+
+                queue_result = queue_voice_confirmation(
+                    boss_name, item, source='firebase-listener'
+                )
+                # Only mark the request as seen after it has been accepted either
+                # for immediate execution or for the READY/pending queue.  This keeps
+                # a transient listener race from permanently swallowing the request.
+                if queue_result is not False:
+                    _confirmation_seen_ids.add(req_id)
             print(f"🔄 Firebase boss_schedule sync: {len(new_schedule)} รายการ")
         except Exception as e:
             print(f"❌ Firebase Listener boss_schedule ผิดพลาด: {e}")
@@ -5984,23 +5996,32 @@ async def _time_channel_fallback(interaction: discord.Interaction, *, embed=None
 
 @bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
 async def boss_time_slash(interaction: discord.Interaction):
-    # Build the result locally first, then use ONE initial interaction response.
-    # If Discord rejects that callback with 429, fall back to ONE ordinary channel
-    # message instead of retrying the interaction webhook.
+    # Discord requires the initial interaction callback to be acknowledged promptly.
+    # Defer FIRST, then build the summary, and edit the original response afterward.
+    # This preserves the existing /time result and Voice/TTS behavior while avoiding
+    # a preventable timeout caused by doing work before the initial ACK.
     ack_ok = False
     fallback_sent = False
+    response_content = None
+    response_embed = None
+    tts_text_th = tts_text_en = tts_text_ko = ""
     try:
+        ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
+
         embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
         response_content = None if embed is not None else tts_text_th
         response_embed = embed if embed is not None else None
 
-        ack_ok = await _safe_interaction_send_message(
-            interaction,
-            content=response_content,
-            embed=response_embed,
-            ephemeral=True,
-        )
-        if not ack_ok:
+        if ack_ok:
+            edited = await guarded_interaction_edit_original(
+                interaction,
+                "time-interaction-result",
+                content=response_content,
+                embed=response_embed,
+            )
+            if edited is None:
+                print("⚠️ /time initial ACK succeeded but original response edit was unavailable", flush=True)
+        else:
             print(
                 "⚠️ /time ACK unavailable; using one bounded normal-channel fallback safely",
                 flush=True,
@@ -6012,7 +6033,7 @@ async def boss_time_slash(interaction: discord.Interaction):
             )
 
         if embed is not None:
-            print("✅ /time summary prepared and initial response attempted", flush=True)
+            print("✅ /time summary prepared and response delivery attempted", flush=True)
         else:
             print("ℹ️ /time summary generated without embed", flush=True)
 
@@ -6027,9 +6048,8 @@ async def boss_time_slash(interaction: discord.Interaction):
                 )
             )
 
-        # Audit is independent from the interaction callback.  When the callback
-        # is rejected, still attempt exactly one normal REST audit request through
-        # the existing guard.  The guard will skip it safely during a long 429.
+        # Audit remains independent from the interaction callback.  The existing
+        # guard/queue policy is preserved for REST restrictions.
         await send_audit_log(
             interaction.guild,
             interaction.user,
@@ -6048,11 +6068,11 @@ async def boss_time_slash(interaction: discord.Interaction):
         print(f"❌ /time command failed safely: {exc!r}", flush=True)
         if ack_ok:
             try:
-                await guarded_interaction_followup_send(
+                await guarded_interaction_edit_original(
                     interaction,
-                    "interaction-followup",
-                    "⚠️ ไม่สามารถส่งผลลัพธ์ /time กลับไปใน Discord ได้ในขณะนี้",
-                    ephemeral=True,
+                    "time-interaction-error",
+                    content="⚠️ ไม่สามารถสร้าง/ส่งผลลัพธ์ /time กลับไปใน Discord ได้ในขณะนี้",
+                    embed=None,
                 )
             except Exception as response_exc:
                 print(f"⚠️ /time error response failed: {response_exc!r}", flush=True)
