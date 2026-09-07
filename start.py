@@ -3,6 +3,7 @@ import discord
 import os
 import sys
 import traceback
+from discord import app_commands
 
 # Render normally runs Python with stdout connected to a log pipe.
 # Reconfigure BEFORE importing bot.py so even Firebase/import/on_ready logs
@@ -91,7 +92,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V64 global-command dedup")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
@@ -117,6 +118,27 @@ async def sync_commands_once():
         if not guilds:
             log("❌ ไม่มี Guild สำหรับ sync คำสั่ง")
             return
+
+        # The bot is intentionally served from the configured Guild scope. Older
+        # deployments may have left the same 17 commands registered globally, which
+        # makes Discord show each command twice. Clear ONLY the remote GLOBAL command
+        # set using a separate empty CommandTree, without mutating bot_module.bot.tree.
+        try:
+            await bot_module.wait_for_discord_rest_startup_gate(context="startup:global-command-cleanup")
+        except Exception:
+            # Fallback to the already imported guard if the symbol is not exported.
+            await bot_module.bot.wait_until_ready()
+        try:
+            global_cleanup_tree = app_commands.CommandTree(bot_module.bot)
+            await global_cleanup_tree.sync()
+            log("🧹 Global Discord application commands cleared | guild commands remain authoritative")
+        except discord.HTTPException as exc:
+            if getattr(exc, "status", None) == 429:
+                try:
+                    bot_module._apply_discord_rest_429(exc, context="startup:global-command-cleanup")
+                except Exception:
+                    pass
+            raise
 
         successful = 0
         for guild in guilds:

@@ -3831,6 +3831,9 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
         return True
     try:
         result = future.result(timeout=float(timeout))
+        if result is None:
+            print(f"📣 Voice confirmation pending | boss={boss_name} | source={source} | room-not-occupied")
+            return None
         print(f"📣 Voice confirmation finished | boss={boss_name} | source={source} | success={bool(result)}")
         return bool(result)
     except Exception as exc:
@@ -3844,7 +3847,11 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
         _confirmation_queue_ids.discard(request_id)
 
 async def _voice_confirm_boss_recording(boss_name: str, data: dict):
-    """Speak one-shot confirmation for a newly recorded boss time in occupied Voice rooms only."""
+    """Speak one-shot confirmation for a newly recorded boss time in occupied Voice rooms only.
+
+    A configured /setvoice room with no human occupants is not a Voice failure: the
+    confirmation remains pending so a later Voice join can trigger it.
+    """
     request_id = str(data.get("confirmationRequestId") or "").strip()
     requested_at = data.get("confirmationRequestedAt")
     status = str(data.get("confirmationStatus") or "").strip()
@@ -3857,18 +3864,65 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
     except Exception:
         pass
 
-    try:
-        await asyncio.to_thread(db.reference(f"boss_schedule/{boss_name}").update, {"confirmationStatus": "processing"})
-    except Exception as exc:
-        print(f"⚠️ Could not mark confirmation processing: {boss_name}: {exc}")
-
     spoken_name = get_boss_pronunciation(boss_name)
     recorded_by = str(data.get("recordedBy") or data.get("recorded_by") or "").strip()
     if not recorded_by or recorded_by.lower() in {"unknown", "unknow", "ไม่ระบุ"}:
         recorded_by = "สมาชิก"
 
     success = False
+    has_configured_target = False
+    has_occupied_target = False
     try:
+        # Determine whether the configured /setvoice targets are actually occupied
+        # before marking the durable confirmation request as processing.
+        for guild in list(bot.guilds):
+            configured_channels = get_configured_voice_channels(guild)
+            if not configured_channels:
+                print(f"⚠️ Boss confirmation skipped: no /setvoice targets | guild={guild.name}")
+                continue
+            has_configured_target = True
+            for configured in configured_channels:
+                humans = [m for m in configured.members if not m.bot]
+                if not humans:
+                    print(f"⏭️ Boss confirmation skipped: configured Voice is empty | guild={guild.name} | channel={configured.name}")
+                    continue
+                has_occupied_target = True
+
+        # If /setvoice is configured but nobody is currently in those rooms, keep the
+        # durable Firebase request pending instead of reporting a false Voice failure.
+        if has_configured_target and not has_occupied_target:
+            with schedule_lock:
+                _confirmation_seen_ids.discard(request_id)
+            print(
+                f"⏳ Boss record confirmation pending: configured /setvoice rooms exist but are empty | "
+                f"boss={boss_name} | request={request_id}",
+                flush=True,
+            )
+            try:
+                await asyncio.to_thread(
+                    db.reference(f"boss_schedule/{boss_name}").update,
+                    {"confirmationStatus": "pending"}
+                )
+            except Exception as exc:
+                print(f"⚠️ Could not persist pending confirmation for {boss_name}: {exc}")
+            return None
+
+        if not has_configured_target:
+            print(
+                f"⚠️ Boss record confirmation failed: no /setvoice targets | "
+                f"boss={boss_name} | request={request_id}",
+                flush=True,
+            )
+            return False
+
+        try:
+            await asyncio.to_thread(
+                db.reference(f"boss_schedule/{boss_name}").update,
+                {"confirmationStatus": "processing"}
+            )
+        except Exception as exc:
+            print(f"⚠️ Could not mark confirmation processing: {boss_name}: {exc}")
+
         await refresh_tts_settings_from_firebase()
         # User explicitly requested a confirmation after saving; use the Thai text
         # and the currently enabled languages for the same TTS policy.
@@ -3877,13 +3931,9 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
         text_ko = f"보스 {boss_name} 시간이 성공적으로 저장되었습니다."
         for guild in list(bot.guilds):
             configured_channels = get_configured_voice_channels(guild)
-            if not configured_channels:
-                print(f"⚠️ Boss confirmation skipped: no /setvoice targets | guild={guild.name}")
-                continue
             for configured in configured_channels:
                 humans = [m for m in configured.members if not m.bot]
                 if not humans:
-                    print(f"⏭️ Boss confirmation skipped: configured Voice is empty | guild={guild.name} | channel={configured.name}")
                     continue
                 print(f"📢 Boss confirmation voice target | guild={guild.name} | channel={configured.name} | humans={len(humans)}")
                 try:
@@ -3894,13 +3944,18 @@ async def _voice_confirm_boss_recording(boss_name: str, data: dict):
                     success = success or bool(ok)
                 except Exception as exc:
                     print(f"❌ Boss record confirmation failed ({boss_name}/{guild.name}/{configured.name}): {exc}")
+
         print(f"✅ Boss record confirmation | boss={boss_name} | user={recorded_by} | success={success}")
     finally:
         try:
+            final_status = "sent" if success else ("pending" if has_configured_target else "failed")
             await asyncio.to_thread(
                 db.reference(f"boss_schedule/{boss_name}").update,
-                {"confirmationStatus": "sent" if success else "failed"}
+                {"confirmationStatus": final_status}
             )
+            if final_status == "pending":
+                with schedule_lock:
+                    _confirmation_seen_ids.discard(request_id)
         except Exception as exc:
             print(f"⚠️ Could not persist confirmation status for {boss_name}: {exc}")
         _confirmation_queue_ids.discard(request_id)
@@ -4632,12 +4687,39 @@ async def _guarded_tree_sync(*args, **kwargs):
 
 bot.tree.sync = _guarded_tree_sync
 
+async def _retry_pending_voice_confirmations_for_guild(guild: discord.Guild):
+    """Retry pending Dashboard confirmations when a human joins a configured Voice room."""
+    if not guild or not is_bot_ready:
+        return
+    configured = get_configured_voice_channels(guild)
+    if not configured or not any(any(not m.bot for m in ch.members) for ch in configured):
+        return
+
+    candidates = []
+    with schedule_lock:
+        for boss_name, item in boss_schedule.items():
+            if not isinstance(item, dict):
+                continue
+            request_id = str(item.get("confirmationRequestId") or "").strip()
+            status = str(item.get("confirmationStatus") or "pending").strip().lower()
+            if request_id and status == "pending":
+                candidates.append((boss_name, dict(item)))
+
+    for boss_name, item in candidates:
+        try:
+            queue_voice_confirmation(boss_name, item, source="voice-join", wait=False)
+        except Exception as exc:
+            print(f"⚠️ Pending Voice confirmation retry failed | boss={boss_name} | {exc}", flush=True)
+
+
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
     global ppl_notify_enabled, vip_config
     if member.bot: return
 
     if before.channel != after.channel and after.channel is not None:
+        if not member.bot:
+            asyncio.create_task(_retry_pending_voice_confirmations_for_guild(member.guild))
         if vip_config.get("enabled", False) and member.id == vip_config.get("user_id"):
             greeting_text = vip_config.get("message", "")
             if greeting_text: asyncio.create_task(speak_in_guild(member.guild, text_th=greeting_text, target_channel=after.channel))
