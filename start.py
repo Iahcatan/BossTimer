@@ -92,7 +92,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V65 global-command dedup (single CommandTree)")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V66 global-command dedup (single CommandTree)")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
@@ -134,7 +134,7 @@ async def sync_commands_once():
         try:
             existing_global_commands = list(bot_module.bot.tree.get_commands())
             if existing_global_commands:
-                bot_module.bot.tree.clear_commands()
+                bot_module.bot.tree.clear_commands(guild=None)
                 await bot_module._original_tree_sync()
                 log(
                     f"🧹 Global Discord application commands cleared | "
