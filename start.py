@@ -92,7 +92,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V64 global-command dedup")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V65 global-command dedup (single CommandTree)")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
@@ -119,19 +119,40 @@ async def sync_commands_once():
             log("❌ ไม่มี Guild สำหรับ sync คำสั่ง")
             return
 
-        # The bot is intentionally served from the configured Guild scope. Older
-        # deployments may have left the same 17 commands registered globally, which
-        # makes Discord show each command twice. Clear ONLY the remote GLOBAL command
-        # set using a separate empty CommandTree, without mutating bot_module.bot.tree.
+        # Older deployments can leave the same commands registered globally while
+        # the current deployment intentionally uses Guild Commands.  discord.py does
+        # not allow constructing a second CommandTree for the same Bot, so cleanup
+        # must use the Bot's existing tree.  Preserve the current local command objects,
+        # sync an empty GLOBAL set once, then restore the same objects before the normal
+        # Guild sync.  This changes only remote command scope; callbacks/17 commands are
+        # not replaced or modified.
         try:
             await bot_module.wait_for_discord_rest_startup_gate(context="startup:global-command-cleanup")
         except Exception:
-            # Fallback to the already imported guard if the symbol is not exported.
             await bot_module.bot.wait_until_ready()
+
         try:
-            global_cleanup_tree = app_commands.CommandTree(bot_module.bot)
-            await global_cleanup_tree.sync()
-            log("🧹 Global Discord application commands cleared | guild commands remain authoritative")
+            existing_global_commands = list(bot_module.bot.tree.get_commands())
+            if existing_global_commands:
+                bot_module.bot.tree.clear_commands()
+                await bot_module._original_tree_sync()
+                log(
+                    f"🧹 Global Discord application commands cleared | "
+                    f"removed={len(existing_global_commands)} | guild commands remain authoritative"
+                )
+                for command in existing_global_commands:
+                    bot_module.bot.tree.add_command(command)
+                restored_names = sorted(
+                    getattr(command, "qualified_name", getattr(command, "name", ""))
+                    for command in bot_module.bot.tree.get_commands()
+                    if getattr(command, "name", None)
+                )
+                log(
+                    f"🔄 Local command tree restored | commands={len(restored_names)} | "
+                    f"paths={', '.join(restored_names)}"
+                )
+            else:
+                log("ℹ️ No local Global Commands to clear | proceeding with Guild-only sync")
         except discord.HTTPException as exc:
             if getattr(exc, "status", None) == 429:
                 try:

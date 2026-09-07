@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V60_INTERACTION_ACK_SCOPE_DIAGNOSTIC_FIX_2026-09-06"
+NOTICE_BF_PATCH_VERSION = "V65_GLOBAL_COMMAND_DEDUP_SINGLE_TREE_2026-09-07"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
