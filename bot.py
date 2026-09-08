@@ -69,7 +69,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V73_COMMAND18_INTEGRITY_FIX_2026-09-08"
+NOTICE_BF_PATCH_VERSION = "V74_DISCORD_ALL_NOTIFICATIONS_I18N_2026-09-08"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -3499,15 +3499,55 @@ pending_audit_logs = deque(maxlen=PENDING_AUDIT_MAX)
 pending_audit_lock = threading.Lock()
 
 
-def _build_audit_embed(user: discord.User, action: str, details: str, color: discord.Color):
-    now = datetime.now(TZ_THAI)
-    embed = discord.Embed(
-        title=f"📝 Audit Log: {action}",
-        color=color,
-        timestamp=now
-    )
-    embed.add_field(name="👤 ผู้ดำเนินการ", value=f"{user.mention} (`{user.name}`)", inline=True)
-    embed.add_field(name="📋 รายละเอียด", value=details, inline=False)
+AUDIT_ACTION_TRANSLATIONS = {
+    "ตั้งค่า TTS เสียง (/tts)":{"th":"ตั้งค่า TTS เสียง (/tts)","en":"TTS Voice Settings (/tts)","ko":"TTS 음성 설정 (/tts)"},
+    "ตั้งค่าการแจ้งเตือน BF (/notify)":{"th":"ตั้งค่าการแจ้งเตือน BF (/notify)","en":"BF Notification Settings (/notify)","ko":"BF 알림 설정 (/notify)"},
+    "ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)":{"th":"ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)","en":"Member Voice-Join Notification Settings (/ppl)","ko":"음성 채널 입장 알림 설정 (/ppl)"},
+    "เปิดระบบทักทายคนพิเศษ (/vip)":{"th":"เปิดระบบทักทายคนพิเศษ (/vip)","en":"Enable VIP Greeting (/vip)","ko":"VIP 인사 기능 활성화 (/vip)"},
+    "ปิดระบบทักทายคนพิเศษ (/vip)":{"th":"ปิดระบบทักทายคนพิเศษ (/vip)","en":"Disable VIP Greeting (/vip)","ko":"VIP 인사 기능 비활성화 (/vip)"},
+    "เช็กเวลาบอสพร้อม TTS (!time)":{"th":"เช็กเวลาบอสพร้อม TTS (!time)","en":"Check Boss Times with TTS (!time)","ko":"TTS와 함께 보스 시간 확인 (!time)"},
+    "เพิ่มบอส (/addboss)":{"th":"เพิ่มบอส (/addboss)","en":"Add Boss (/addboss)","ko":"보스 추가 (/addboss)"},
+    "ลบบอส (/delboss)":{"th":"ลบบอส (/delboss)","en":"Delete Boss (/delboss)","ko":"보스 삭제 (/delboss)"},
+    "สร้าง Live Embed (/setlive)":{"th":"สร้าง Live Embed (/setlive)","en":"Create Live Embed (/setlive)","ko":"Live Embed 생성 (/setlive)"},
+    "ประกาศเช็คชื่อบอส":{"th":"ประกาศเช็คชื่อบอส","en":"Boss Attendance Announcement","ko":"보스 출석 공지"},
+}
+
+def _translate_audit_action(action: str, lang: str) -> str:
+    entry=AUDIT_ACTION_TRANSLATIONS.get(str(action))
+    return entry.get(lang, entry.get("th", str(action))) if entry else str(action)
+
+def _translate_audit_details(action: str, details: str, lang: str) -> str:
+    text=str(details or "-")
+    if lang=="th": return text
+    if action=="ตั้งค่า TTS เสียง (/tts)":
+        m=re.match(r"ภาษา:\s*`([^`]+)`\s*\|\s*สถานะ:\s*`([^`]+)`",text)
+        if m: return f"Language: `{m.group(1)}` | Status: `{m.group(2)}`" if lang=="en" else f"언어: `{m.group(1)}` | 상태: `{m.group(2)}`"
+    if action in {"ตั้งค่าการแจ้งเตือน BF (/notify)","ตั้งค่าการแจ้งเตือนสมาชิกเข้าห้อง (/ppl)"}:
+        m=re.search(r"`([^`]+)`",text); status=m.group(1) if m else "-"
+        return f"Changed status to: `{status}`" if lang=="en" else f"상태 변경: `{status}`"
+    if action=="เปิดระบบทักทายคนพิเศษ (/vip)":
+        m=re.search(r"คนพิเศษ:\s*`([^`]*)`\s*\n💬 ข้อความ:\s*(.*)$",text,re.S)
+        if m: return f"👤 VIP User: `{m.group(1)}`\n💬 Message: {m.group(2)}" if lang=="en" else f"👤 VIP 사용자: `{m.group(1)}`\n💬 메시지: {m.group(2)}"
+    if action=="ปิดระบบทักทายคนพิเศษ (/vip)": return "VIP information was cleared successfully." if lang=="en" else "VIP 정보가 성공적으로 삭제되었습니다."
+    if action=="เช็กเวลาบอสพร้อม TTS (!time)": return "Boss times were calculated, sorted, and read aloud successfully." if lang=="en" else "보스 시간을 계산하고 정렬한 후 음성으로 안내했습니다."
+    if action=="เพิ่มบอส (/addboss)": return text.replace("ไม่มีการสร้าง boss_schedule","No boss_schedule was created.") if lang=="en" else text.replace("ไม่มีการสร้าง boss_schedule","boss_schedule은 생성되지 않았습니다.")
+    if action=="ลบบอส (/delboss)":
+        m=re.search(r"ลบบอส:\s*`([^`]*)`",text)
+        if m: return f"🗑️ Deleted boss: `{m.group(1)}`" if lang=="en" else f"🗑️ 삭제된 보스: `{m.group(1)}`"
+    if action=="สร้าง Live Embed (/setlive)":
+        return text.replace("ช่อง:","Channel:") if lang=="en" else text.replace("ช่อง:","채널:").replace("Message ID:","메시지 ID:")
+    if action=="ประกาศเช็คชื่อบอส":
+        return text.replace("ผู้ประกาศ","Announcer" if lang=="en" else "공지자").replace("ชื่อบอส","Boss" if lang=="en" else "보스").replace("โค้ด (Code)","Code").replace("ไอเทมดรอป","Drop Item" if lang=="en" else "드롭 아이템")
+    return text
+
+def _build_audit_embed(user: discord.User, action: str, details: str, color: discord.Color, *, languages=None):
+    enabled=list(languages or get_enabled_discord_notification_languages()) or ["th"]; primary=enabled[0]
+    embed=discord.Embed(title=f"📝 Audit Log: {_translate_audit_action(action,primary)}",color=color,timestamp=datetime.now(TZ_THAI))
+    actor={"th":"👤 ผู้ดำเนินการ","en":"👤 Actor","ko":"👤 수행자"}; detail={"th":"📋 รายละเอียด","en":"📋 Details","ko":"📋 상세 정보"}
+    embed.add_field(name=actor[primary],value=f"{user.mention} (`{user.name}`)",inline=True)
+    for lang in enabled:
+        label={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]
+        embed.add_field(name=f"{detail[lang]} • {label}",value=_translate_audit_details(action,details,lang),inline=False)
     embed.set_footer(text=f"User ID: {user.id}")
     return embed
 
@@ -3533,6 +3573,10 @@ def _queue_audit_log(guild_id: int, channel_id: int, action: str, user_id: int, 
 
 
 async def _send_one_audit_log(item: dict) -> bool:
+    try:
+        await refresh_discord_notification_languages()
+    except Exception:
+        pass
     guild = bot.get_guild(int(item.get("guild_id", 0)))
     if guild is None:
         return False
@@ -3554,13 +3598,15 @@ async def _send_one_audit_log(item: dict) -> bool:
         user_mention = getattr(user_obj, "mention", f"<@{user_id}>")
     else:
         user_mention = f"<@{user_id}>"
-    embed = discord.Embed(
-        title=f"📝 Audit Log: {item.get('action', '-')}",
-        color=discord.Color(int(item.get("color_value", 0x5865F2))),
-        timestamp=datetime.fromtimestamp(float(item.get("queued_at", time.time())), tz=TZ_THAI),
-    )
-    embed.add_field(name="👤 ผู้ดำเนินการ", value=f"{user_mention} (`{display_name}`)", inline=True)
-    embed.add_field(name="📋 รายละเอียด", value=str(item.get("details") or "-"), inline=False)
+    enabled=get_enabled_discord_notification_languages() or ["th"]
+    primary=enabled[0]
+    action=str(item.get("action","-")); details=str(item.get("details") or "-")
+    embed=discord.Embed(title=f"📝 Audit Log: {_translate_audit_action(action,primary)}",color=discord.Color(int(item.get("color_value",0x5865F2))),timestamp=datetime.fromtimestamp(float(item.get("queued_at",time.time())),tz=TZ_THAI))
+    actor_labels={"th":"👤 ผู้ดำเนินการ","en":"👤 Actor","ko":"👤 수행자"}; detail_labels={"th":"📋 รายละเอียด","en":"📋 Details","ko":"📋 상세 정보"}
+    embed.add_field(name=actor_labels[primary],value=f"{user_mention} (`{display_name}`)",inline=True)
+    for lang in enabled:
+        label={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]
+        embed.add_field(name=f"{detail_labels[lang]} • {label}",value=_translate_audit_details(action,details,lang),inline=False)
     embed.set_footer(text=f"User ID: {user_id}")
     try:
         result = await guarded_channel_send(channel, context=f"audit:{item.get('action', '-')}", embed=embed)
@@ -3675,7 +3721,11 @@ async def send_audit_log(guild: discord.Guild, user: discord.User, action: str, 
         print(f"⚠️ Audit Log channel not found | guild={guild.name} | channel={LOG_CHANNEL_NAME}", flush=True)
         return
 
-    embed = _build_audit_embed(user, action, details, color)
+    try:
+        await refresh_discord_notification_languages()
+    except Exception:
+        pass
+    embed = _build_audit_embed(user, action, details, color, languages=get_enabled_discord_notification_languages())
     try:
         result = await guarded_channel_send(log_channel, context=f"audit:{action}", embed=embed)
         if result is not None:
@@ -5568,11 +5618,13 @@ async def check_bf_notifications():
                 if not text_channel:
                     text_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
                 if text_channel:
-                    embed = discord.Embed(
-                        title="⚔️ แจ้งเตือนสงคราม Battlefield (BF)!",
-                        description=f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
-                        color=discord.Color.red()
-                    )
+                    await refresh_discord_notification_languages()
+                    enabled=get_enabled_discord_notification_languages() or ["th"]
+                    primary=enabled[0]
+                    title_map={"th":"⚔️ แจ้งเตือนสงคราม Battlefield (BF)!","en":"⚔️ Battlefield (BF) Alert!","ko":"⚔️ Battlefield (BF) 알림!"}
+                    body_map={"th":f"สนามรบ **BF** กำลังจะเริ่มในอีก **3 นาที** (เวลา **{next_bf_time} น.**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!","en":f"Battlefield **BF** will start in **3 minutes** (at **{next_bf_time}**)!\nPlease get ready.","ko":f"Battlefield **BF**가 **3분 후** 시작됩니다 (시간 **{next_bf_time}**)!\n준비해 주세요."}
+                    embed=discord.Embed(title=title_map[primary],color=discord.Color.red())
+                    for lang in enabled: embed.add_field(name={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang],value=body_map[lang],inline=False)
                     # Reserve one attempt first. On 429, allow at most one later retry.
                     bf_text_retry_after_ts[trigger_key] = time.monotonic() + 30.0
                     try:
@@ -5691,11 +5743,13 @@ async def check_library_boss_notifications():
                         channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
 
                     if channel:
-                        embed = discord.Embed(
-                            title="⚔️ แจ้งเตือน Library Boss!",
-                            description=f"บอส **Library Boss** ถึงเวลาเตรียมตัวแล้ว! (เวลา **{time_str}**)\nเตรียมตัวเข้าประจำที่ได้เลยครับ!",
-                            color=discord.Color.purple()
-                        )
+                        await refresh_discord_notification_languages()
+                        enabled=get_enabled_discord_notification_languages() or ["th"]
+                        primary=enabled[0]
+                        title_map={"th":"⚔️ แจ้งเตือน Library Boss!","en":"⚔️ Library Boss Alert!","ko":"⚔️ Library Boss 알림!"}
+                        body_map={"th":f"บอส **Library Boss** ถึงเวลาเตรียมตัวแล้ว! (เวลา **{time_str}**)!\nเตรียมตัวเข้าประจำที่ได้เลยครับ!","en":f"**Library Boss** is ready! (Time **{time_str}**)!\nPlease get ready.","ko":f"**Library Boss** 등장 시간입니다! (시간 **{time_str}**)!\n준비해 주세요."}
+                        embed=discord.Embed(title=title_map[primary],color=discord.Color.purple())
+                        for lang in enabled: embed.add_field(name={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang],value=body_map[lang],inline=False)
                         try:
                             send_content = mention_target if mention_target.strip() else None
                             await guarded_channel_send(channel, context="library-boss", content=send_content, embed=embed)
@@ -6937,14 +6991,18 @@ async def set_live(interaction: discord.Interaction):
 async def attendance_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
     await _safe_interaction_ack(interaction, ephemeral=False)
     
-    embed = discord.Embed(
-        title="📢 แจ้งเตือนเช็คชื่อบอส (Attendance)",
-        color=discord.Color.green(),
-        timestamp=datetime.now(TZ_THAI)
-    )
-    embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-    embed.add_field(name="🔑 โค้ด (Code)", value=f"**{code}**", inline=True)
-    embed.add_field(name="🎁 ไอเทมดรอป", value=f"`{drop_item}`", inline=False)
+    await refresh_discord_notification_languages()
+    enabled=get_enabled_discord_notification_languages() or ["th"]
+    primary=enabled[0]
+    title_map={"th":"📢 แจ้งเตือนเช็คชื่อบอส (Attendance)","en":"📢 Boss Attendance Announcement","ko":"📢 보스 출석 공지"}
+    embed=discord.Embed(title=title_map[primary],color=discord.Color.green(),timestamp=datetime.now(TZ_THAI))
+    labels={"th":("👾 ชื่อบอส","🔑 โค้ด (Code)","🎁 ไอเทมดรอป"),"en":("👾 Boss","🔑 Code","🎁 Drop Item"),"ko":("👾 보스","🔑 코드","🎁 드롭 아이템")}
+    for lang in enabled:
+        prefix={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]
+        lb,lc,ld=labels[lang]
+        embed.add_field(name=f"{prefix} • {lb}",value=f"`{boss_name}`",inline=True)
+        embed.add_field(name=lc,value=f"**{code}**",inline=True)
+        embed.add_field(name=ld,value=f"`{drop_item}`",inline=False)
     embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
     
     await guarded_interaction_followup_send(interaction, "interaction-followup", content="✅ ส่งประกาศเช็คชื่อสำเร็จ!", embed=embed)
@@ -6961,15 +7019,17 @@ async def attendance_command(interaction: discord.Interaction, boss_name: str, c
     if interaction.guild:
         attendance_channel = discord.utils.get(interaction.guild.text_channels, name="boss-attendance")
         if attendance_channel:
-            log_embed = discord.Embed(
-                title="📝 Audit Log: ประกาศเช็คชื่อบอส",
-                color=discord.Color.green(),
-                timestamp=datetime.now(TZ_THAI)
-            )
-            log_embed.add_field(name="👤 ผู้ประกาศ", value=f"{interaction.user.mention} (`{interaction.user.name}`)", inline=False)
-            log_embed.add_field(name="👾 ชื่อบอส", value=f"`{boss_name}`", inline=True)
-            log_embed.add_field(name="🔑 โค้ด (Code)", value=f"**{code}**", inline=True)
-            log_embed.add_field(name="🎁 ไอเทมดรอป", value=f"`{drop_item}`", inline=False)
+            await refresh_discord_notification_languages()
+            enabled=get_enabled_discord_notification_languages() or ["th"]
+            primary=enabled[0]
+            log_embed=discord.Embed(title=f"📝 Audit Log: {_translate_audit_action('ประกาศเช็คชื่อบอส',primary)}",color=discord.Color.green(),timestamp=datetime.now(TZ_THAI))
+            labels={"th":("ผู้ประกาศ","ชื่อบอส","โค้ด (Code)","ไอเทมดรอป"),"en":("Announcer","Boss","Code","Drop Item"),"ko":("공지자","보스","코드","드롭 아이템")}
+            for lang in enabled:
+                prefix={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]; la,lb,lc,ld=labels[lang]
+                log_embed.add_field(name=f"{prefix} • 👤 {la}",value=f"{interaction.user.mention} (`{interaction.user.name}`)",inline=False)
+                log_embed.add_field(name=f"👾 {lb}",value=f"`{boss_name}`",inline=True)
+                log_embed.add_field(name=f"🔑 {lc}",value=f"**{code}**",inline=True)
+                log_embed.add_field(name=f"🎁 {ld}",value=f"`{drop_item}`",inline=False)
             log_embed.set_footer(text=f"User ID: {interaction.user.id}")
             try:
                 await guarded_channel_send(attendance_channel, context="audit:boss-attendance", embed=log_embed)
