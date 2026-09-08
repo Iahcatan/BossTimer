@@ -558,7 +558,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <datalist id="bossOptions"></datalist>
                 </div>
                 <div class="col-md-3">
-                    <label class="form-label" data-i18n="labelKillDate">วันที่ (วัน/เดือน/ปี)</label>
+                    <label class="form-label" data-i18n="labelKillDate">วันที่(วัน/เดือน/ปี)</label>
                     <input type="text" id="killDate" class="form-control" placeholder="เช่น 08/09/2026" data-i18n-ph="phKillDate" maxlength="10" autocomplete="off" inputmode="numeric">
                     <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่างไว้หากใช้วันที่ปัจจุบัน</small>
                 </div>
@@ -773,7 +773,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
-                labelKillDate: "วันที่ (วัน/เดือน/ปี)",
+                labelKillDate: "วันที่(วัน/เดือน/ปี)",
                 labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
                 phKillDate: "เช่น 08/09/2026",
                 phKillTime: "เช่น 17:30 หรือ 1730",
@@ -6235,7 +6235,7 @@ async def boss_autocomplete(interaction: discord.Interaction, current: str) -> l
 @app_commands.describe(
     boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
     kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน",
-    kill_date="วันที่บอสตาย DD/MM/YYYY (เว้นว่าง = วันนี้)"
+    kill_date="วันที่ (DD/MM/YYYY) (เว้นว่าง = วันนี้)"
 )
 
 @has_allowed_role()
