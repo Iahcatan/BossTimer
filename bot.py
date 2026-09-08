@@ -1,3 +1,4 @@
+# SKYNET_BOSSTIMER_V72_NOTIFICATION_CHANNEL_COMMAND18_2026-09-08
 import os
 
 # 🛡️ ON-DEMAND MULTI-CHANNEL PATCH v3
@@ -2289,6 +2290,9 @@ voice_locks = {}
 voice_connect_locks = {}
 disconnect_tasks = {}
 voice_config = {}
+# V71/V72: Persistent Discord text-notification target channels.
+# Shape: {guild_id: {channel_id: {guild_id, channel_id, channel_name, enabled, ...}}}
+notification_channels = {}
 custom_bosses = {}
 last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
@@ -3296,7 +3300,7 @@ tts_th_enabled = True
 tts_en_enabled = True
 tts_ko_enabled = True
 
-# V70: Discord text notification languages are independent from TTS languages.
+# V72: Discord text notification languages are independent from TTS languages.
 discord_notify_th_enabled = True
 discord_notify_en_enabled = True
 discord_notify_ko_enabled = True
@@ -4068,6 +4072,154 @@ async def save_voice_config():
     await asyncio.to_thread(set_db_value, "voice_config", data)
     await asyncio.to_thread(save_json_local, VOICE_CONFIG_FILE, data)
 
+async def save_notification_channels():
+    """Persist Discord text-notification target channels to Firebase and local storage."""
+    with schedule_lock:
+        data = {str(gid): dict(channels) for gid, channels in (notification_channels or {}).items()}
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("notification_channels").set, data), timeout=8
+        )
+        firebase_ok = True
+    except Exception as e:
+        firebase_ok = False
+        print(f"⚠️ บันทึก notification_channels ลง Firebase ไม่สำเร็จ: {e}")
+    await asyncio.to_thread(set_db_value, "notification_channels", data)
+    await asyncio.to_thread(save_json_local, "notification_channels.json", data)
+    return firebase_ok
+
+
+async def load_notification_channels():
+    """Load persistent Discord text-notification channels. Firebase is canonical."""
+    global notification_channels
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("notification_channels").get)
+    except Exception as e:
+        print(f"⚠️ โหลด notification_channels จาก Firebase ไม่สำเร็จ: {e}")
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("notification_channels", None)
+
+    normalized = {}
+    if isinstance(data, dict):
+        for guild_id, guild_data in data.items():
+            if not isinstance(guild_data, dict):
+                continue
+            bucket = {}
+            # Accept the canonical channels map. Also tolerate a flat legacy shape.
+            source = guild_data.get("channels") if isinstance(guild_data.get("channels"), dict) else guild_data
+            for channel_id, cfg in source.items():
+                if not isinstance(cfg, dict):
+                    continue
+                cid = cfg.get("channel_id", channel_id)
+                try:
+                    cid = int(cid)
+                except (TypeError, ValueError):
+                    continue
+                enabled = parse_bool(cfg.get("enabled"), True)
+                if not enabled:
+                    continue
+                gid = cfg.get("guild_id", guild_id)
+                try:
+                    gid = int(gid)
+                except (TypeError, ValueError):
+                    try:
+                        gid = int(guild_id)
+                    except (TypeError, ValueError):
+                        continue
+                bucket[str(cid)] = {
+                    "guild_id": gid,
+                    "channel_id": cid,
+                    "channel_name": str(cfg.get("channel_name") or ""),
+                    "enabled": True,
+                    "updated_by": str(cfg.get("updated_by") or ""),
+                    "updated_at": str(cfg.get("updated_at") or ""),
+                }
+            if bucket:
+                normalized[str(guild_id)] = bucket
+    notification_channels = normalized
+    total = sum(len(v) for v in notification_channels.values())
+    print(f"✅ load_notification_channels สำเร็จ ({total} enabled channel(s))")
+    return notification_channels
+
+
+def _notification_channel_ids_from_memory():
+    """Return enabled persistent notification channel IDs, de-duplicated globally."""
+    ids = []
+    seen = set()
+    with schedule_lock:
+        snapshot = {str(gid): dict(chs) for gid, chs in (notification_channels or {}).items()}
+    for _, channels in snapshot.items():
+        for channel_id, cfg in channels.items():
+            if not isinstance(cfg, dict) or not parse_bool(cfg.get("enabled"), True):
+                continue
+            try:
+                cid = int(cfg.get("channel_id", channel_id))
+            except (TypeError, ValueError):
+                continue
+            if cid not in seen:
+                ids.append(cid)
+                seen.add(cid)
+    return ids
+
+
+async def get_notification_channel_ids_from_database():
+    """Fetch the canonical notification_channels root immediately before a Boss send."""
+    global notification_channels
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(db.reference("notification_channels").get), timeout=8
+        )
+        if isinstance(data, dict):
+            # Reuse the same normalization logic without adding another Firebase write.
+            normalized = {}
+            for guild_id, guild_data in data.items():
+                if not isinstance(guild_data, dict):
+                    continue
+                source = guild_data.get("channels") if isinstance(guild_data.get("channels"), dict) else guild_data
+                bucket = {}
+                for channel_id, cfg in source.items():
+                    if not isinstance(cfg, dict) or not parse_bool(cfg.get("enabled"), True):
+                        continue
+                    cid = cfg.get("channel_id", channel_id)
+                    try:
+                        cid = int(cid)
+                    except (TypeError, ValueError):
+                        continue
+                    bucket[str(cid)] = {
+                        "guild_id": int(cfg.get("guild_id", guild_id)),
+                        "channel_id": cid,
+                        "channel_name": str(cfg.get("channel_name") or ""),
+                        "enabled": True,
+                        "updated_by": str(cfg.get("updated_by") or ""),
+                        "updated_at": str(cfg.get("updated_at") or ""),
+                    }
+                if bucket:
+                    normalized[str(guild_id)] = bucket
+            notification_channels = normalized
+            return _notification_channel_ids_from_memory()
+    except Exception as e:
+        print(f"⚠️ อ่าน notification_channels สดจาก Firebase ไม่สำเร็จ; ใช้ cache: {e}")
+    return _notification_channel_ids_from_memory()
+
+
+async def refresh_discord_notification_languages():
+    """Refresh only Discord notification language switches; do not reload TTS/BF/Voice settings."""
+    global discord_notify_th_enabled, discord_notify_en_enabled, discord_notify_ko_enabled
+    try:
+        data = await asyncio.wait_for(
+            asyncio.to_thread(db.reference("bot_settings").get), timeout=8
+        )
+        if isinstance(data, dict):
+            discord_notify_th_enabled = parse_bool(data.get("discord_notify_th_enabled"), discord_notify_th_enabled)
+            discord_notify_en_enabled = parse_bool(data.get("discord_notify_en_enabled"), discord_notify_en_enabled)
+            discord_notify_ko_enabled = parse_bool(data.get("discord_notify_ko_enabled"), discord_notify_ko_enabled)
+            return True
+    except Exception as e:
+        print(f"⚠️ อ่าน Discord notification languages สดจาก Firebase ไม่สำเร็จ; ใช้ค่าเดิม: {e}")
+    return False
+
+
 async def save_bot_settings():
     """Persist notification/TTS switches to Firebase and local SQLite."""
     data = {
@@ -4803,6 +4955,7 @@ async def on_ready():
     await load_live_config()
     await load_vip_config()
     await load_voice_config()
+    await load_notification_channels()
 
     # Voice is ON-DEMAND: do not connect on startup. /setvoice only stores the target channel.
     print("🟢 Voice mode: ON-DEMAND GLOBAL (occupied-room announcements; connect only when speaking, disconnect after TTS)")
@@ -5109,6 +5262,133 @@ async def toggle_vip_greet(interaction: discord.Interaction, status: app_command
         embed = discord.Embed(title="⚙️ ปิดระบบทักทายคนพิเศษ (VIP)", description="🔴 **สถานะ:** ปิดใช้งานเรียบร้อยแล้ว", color=discord.Color.red())
         await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
         await send_audit_log(interaction.guild, interaction.user, "ปิดระบบทักทายคนพิเศษ (/vip)", "ยกเลิกข้อมูลคนพิเศษเรียบร้อยแล้ว", discord.Color.red())
+
+
+@bot.tree.command(name="set-notification", description="ตั้งค่าห้อง Text Channel สำหรับรับการแจ้งเตือน Boss (บันทึก Channel ID ลงฐานข้อมูล)")
+@app_commands.describe(
+    channel="ห้อง Text Channel ที่ต้องการรับการแจ้งเตือน",
+    action="เพิ่ม/เปิด, ปิด/ลบ หรือแสดงรายการห้องที่ตั้งไว้"
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="เพิ่ม/เปิด", value="add"),
+    app_commands.Choice(name="ปิด/ลบ", value="remove"),
+    app_commands.Choice(name="แสดงรายการ", value="list"),
+])
+@has_allowed_role()
+async def set_notification_channel(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel = None,
+    action: app_commands.Choice[str] = None,
+):
+    """Persist one or more Discord text-notification targets per guild."""
+    try:
+        await _safe_interaction_ack(interaction, ephemeral=True)
+    except Exception as e:
+        print(f"❌ /set-notification defer failed: {e}")
+        return
+
+    guild = interaction.guild
+    if guild is None:
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            "❌ คำสั่งนี้ใช้ได้เฉพาะใน Server เท่านั้น",
+            ephemeral=True,
+        )
+        return
+
+    action_value = (action.value if action else "add")
+    guild_key = str(guild.id)
+    with schedule_lock:
+        current = dict(notification_channels.get(guild_key, {}) or {})
+
+    if action_value == "list":
+        enabled = []
+        for cfg in current.values():
+            if not isinstance(cfg, dict) or not parse_bool(cfg.get("enabled"), True):
+                continue
+            cid = cfg.get("channel_id")
+            if not cid:
+                continue
+            resolved = guild.get_channel(int(cid))
+            label = resolved.mention if resolved else f"`{cid}`"
+            name = resolved.name if isinstance(resolved, discord.TextChannel) else (cfg.get("channel_name") or "unknown")
+            enabled.append(f"• {label} — **#{name}** (`{cid}`)")
+        text = "\n".join(enabled) if enabled else "- ยังไม่มีห้อง Text Channel ที่เปิดใช้งาน"
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            f"📋 **ห้องแจ้งเตือน Boss ที่ตั้งไว้ใน {guild.name}**\n{text}",
+            ephemeral=True,
+        )
+        return
+
+    if channel is None:
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            "❌ กรุณาเลือก Text Channel เช่น `#boss-notify`",
+            ephemeral=True,
+        )
+        return
+
+    me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    if me is not None:
+        perms = channel.permissions_for(me)
+        missing = []
+        if not perms.view_channel:
+            missing.append("View Channel")
+        if not perms.send_messages:
+            missing.append("Send Messages")
+        if not perms.embed_links:
+            missing.append("Embed Links")
+        if missing:
+            await guarded_interaction_followup_send(
+                interaction, "interaction-followup",
+                "❌ บอทไม่มีสิทธิ์ในห้องนี้: " + ", ".join(missing),
+                ephemeral=True,
+            )
+            return
+
+    now_iso = datetime.now(TZ_THAI).isoformat()
+    cid_key = str(channel.id)
+    if action_value == "remove":
+        current.pop(cid_key, None)
+        with schedule_lock:
+            if current:
+                notification_channels[guild_key] = current
+            else:
+                notification_channels.pop(guild_key, None)
+        await save_notification_channels()
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            f"🔕 ปิดห้องแจ้งเตือน **#{channel.name}** (`{channel.id}`) แล้ว",
+            ephemeral=True,
+        )
+        print(f"🔕 /set-notification removed | guild={guild.name} | channel={channel.name} ({channel.id})")
+        return
+
+    current[cid_key] = {
+        "guild_id": guild.id,
+        "channel_id": int(channel.id),
+        "channel_name": channel.name,
+        "enabled": True,
+        "updated_by": str(interaction.user.id),
+        "updated_at": now_iso,
+    }
+    with schedule_lock:
+        notification_channels[guild_key] = current
+    await save_notification_channels()
+
+    configured_count = sum(
+        1 for cfg in current.values()
+        if isinstance(cfg, dict) and parse_bool(cfg.get("enabled"), True)
+    )
+    await guarded_interaction_followup_send(
+        interaction, "interaction-followup",
+        f"🔔 ตั้งห้องแจ้งเตือน **#{channel.name}** (`{channel.id}`) สำเร็จ\n"
+        f"📋 ห้องที่เปิดใช้งานใน Server นี้: **{configured_count} ห้อง**\n"
+        f"✅ Channel ID ถูกบันทึกลง `notification_channels` ใน Firebase แล้ว",
+        ephemeral=True,
+    )
+    print(f"🔔 /set-notification saved | guild={guild.name} | channel={channel.name} ({channel.id}) | total={configured_count}")
 
 
 @bot.tree.command(name="setvoice", description="เพิ่มห้อง Voice สำหรับ Boss TTS (เข้าเฉพาะตอนแจ้งเตือน)")
@@ -5680,24 +5960,54 @@ async def check_boss_notifications():
                         f"spawn_sent={notified_spawn} | voice_advance={voice_advance} | voice_spawn={voice_spawn}"
                     )
 
-            channel = None
-            channel_id = data.get("channel_id") or data.get("channelId")
-            if channel_id:
+            # Text notification targets are now persisted in Firebase under
+            # notification_channels and are read immediately before a Boss event.
+            # This preserves the old per-boss/fallback behavior only when no explicit
+            # notification channels are configured yet.
+            configured_notification_ids = await get_notification_channel_ids_from_database()
+            channels_to_notify = []
+            seen_channel_ids = set()
+            for target_channel_id in configured_notification_ids:
                 try:
-                    channel = bot.get_channel(int(channel_id))
-                    if channel is None:
-                        channel = await guarded_fetch_channel(int(channel_id), context=f"boss-notify:fetch-channel:{boss_name}")
-                except Exception:
-                    channel = None
+                    target_channel_id = int(target_channel_id)
+                except (TypeError, ValueError):
+                    continue
+                if target_channel_id in seen_channel_ids:
+                    continue
+                ch = bot.get_channel(target_channel_id)
+                if ch is None:
+                    try:
+                        ch = await guarded_fetch_channel(target_channel_id, context=f"boss-notify:fetch-configured-channel:{boss_name}")
+                    except Exception:
+                        ch = None
+                if isinstance(ch, discord.TextChannel):
+                    if ch.id not in seen_channel_ids:
+                        channels_to_notify.append(ch)
+                        seen_channel_ids.add(ch.id)
 
-            channels_to_notify = [channel] if channel else []
             if not channels_to_notify:
-                for guild in bot.guilds:
-                    fb_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
-                    if not fb_channel:
-                        fb_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
-                    if fb_channel:
-                        channels_to_notify.append(fb_channel)
+                # Backward-compatible fallback for deployments that have not run
+                # /set-notification yet. Do not remove the existing boss channel/fallback.
+                channel = None
+                channel_id = data.get("channel_id") or data.get("channelId")
+                if channel_id:
+                    try:
+                        channel = bot.get_channel(int(channel_id))
+                        if channel is None:
+                            channel = await guarded_fetch_channel(int(channel_id), context=f"boss-notify:fetch-channel:{boss_name}")
+                    except Exception:
+                        channel = None
+                if channel:
+                    channels_to_notify.append(channel)
+
+                if not channels_to_notify:
+                    for guild in bot.guilds:
+                        fb_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+                        if not fb_channel:
+                            fb_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+                        if fb_channel and fb_channel.id not in seen_channel_ids:
+                            channels_to_notify.append(fb_channel)
+                            seen_channel_ids.add(fb_channel.id)
 
             # Voice notifications must not depend on text-channel resolution or REST availability.
             # Always evaluate configured /setvoice targets directly from the READY guild cache.
@@ -5711,6 +6021,7 @@ async def check_boss_notifications():
                 spawn_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "spawn" for item in pending_boss_rest_notifications)
 
             if 0 < time_left <= notice_seconds and not notified_advance and not advance_stage_queued:
+                await refresh_discord_notification_languages()
                 embed = build_boss_discord_notification(boss_name, "advance", spawn_time, notice_minutes)
                 for ch in channels_to_notify:
                     try:
@@ -5761,6 +6072,7 @@ async def check_boss_notifications():
             # Spawn: only notify at the actual crossing. Old schedules >60s late
             # are marked complete instead of replaying after every deploy/reload.
             if time_left <= 0 and not notified_spawn and not spawn_stage_queued:
+                await refresh_discord_notification_languages()
                 embed = build_boss_discord_notification(boss_name, "spawn", spawn_time, notice_minutes)
                 for ch in channels_to_notify:
                     try:
