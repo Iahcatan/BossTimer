@@ -68,7 +68,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V65_GLOBAL_COMMAND_DEDUP_SINGLE_TREE_2026-09-07"
+NOTICE_BF_PATCH_VERSION = "V70_BOSS_VOICE_OCCUPANCY_DISCORD_I18N_2026-09-08"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -649,10 +649,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         <input class="form-check-input" type="checkbox" id="ttsEnToggle">
                         <label class="form-check-label" for="ttsEnToggle">🇺🇸 ภาษาอังกฤษ (EN)</label>
                     </div>
-                    <div class="form-check form-switch mb-2">
+                    <div class="form-check form-switch mb-3">
                         <input class="form-check-input" type="checkbox" id="ttsKoToggle">
                         <label class="form-check-label" for="ttsKoToggle">🇰🇷 ภาษาเกาหลี (KO)</label>
                     </div>
+                    <h6 class="text-info mb-3" data-i18n="labelDiscordLang">💬 ภาษาที่ใช้แจ้งเตือนใน Discord</h6>
+                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="discordThToggle"><label class="form-check-label" for="discordThToggle">🇹🇭 ภาษาไทย (TH)</label></div>
+                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="discordEnToggle"><label class="form-check-label" for="discordEnToggle">🇺🇸 ภาษาอังกฤษ (EN)</label></div>
+                    <div class="form-check form-switch mb-2"><input class="form-check-input" type="checkbox" id="discordKoToggle"><label class="form-check-label" for="discordKoToggle">🇰🇷 ภาษาเกาหลี (KO)</label></div>
                 </div>
             </div>
         </div>
@@ -713,18 +717,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
             document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
             document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
+            document.getElementById('discordThToggle').checked = data.discord_notify_th_enabled !== false;
+            document.getElementById('discordEnToggle').checked = data.discord_notify_en_enabled !== false;
+            document.getElementById('discordKoToggle').checked = data.discord_notify_ko_enabled !== false;
         });
 
         // ตรวจจับเมื่อมีการกดเปลี่ยนสวิตช์ภาษา
-        ['ttsThToggle', 'ttsEnToggle', 'ttsKoToggle'].forEach(id => {
+        ['ttsThToggle', 'ttsEnToggle', 'ttsKoToggle', 'discordThToggle', 'discordEnToggle', 'discordKoToggle'].forEach(id => {
             document.getElementById(id).addEventListener('change', async (e) => {
                 if (!await requireApprovedUser()) {
                     e.target.checked = !e.target.checked;
                     return;
                 }
-                const key = id === 'ttsThToggle' ? 'tts_th_enabled' : 
-                            id === 'ttsEnToggle' ? 'tts_en_enabled' : 'tts_ko_enabled';
-                await botSettingsRef.child(key).set(e.target.checked);
+                const keyMap = {
+                    ttsThToggle: 'tts_th_enabled', ttsEnToggle: 'tts_en_enabled', ttsKoToggle: 'tts_ko_enabled',
+                    discordThToggle: 'discord_notify_th_enabled', discordEnToggle: 'discord_notify_en_enabled', discordKoToggle: 'discord_notify_ko_enabled'
+                };
+                await botSettingsRef.child(keyMap[id]).set(e.target.checked);
             });
         });
 
@@ -756,6 +765,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 btnBotSettings: "⚙️ ตั้งค่าบอท",
                 modalBotSettingsTitle: "⚙️ ตั้งค่าแจ้งเตือนบอท",
                 labelVoiceLang: "🔊 ภาษาที่ใช้พูดแจ้งเตือน (Voice Notification)",
+                labelDiscordLang: "💬 ภาษาที่ใช้แจ้งเตือนใน Discord",
                 phLoginUser: "กรอกชื่อผู้ใช้",
                 phLoginPass: "กรอกรหัสผ่าน",
                 phRegUser: "ตั้งชื่อผู้ใช้",
@@ -860,6 +870,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 btnBotSettings: "⚙️ Bot Settings",
                 modalBotSettingsTitle: "⚙️ Bot Notification Settings",
                 labelVoiceLang: "🔊 Voice Notification Languages",
+                labelDiscordLang: "💬 Discord Notification Languages",
                 phLoginUser: "Enter username",
                 phLoginPass: "Enter password",
                 phRegUser: "Set username",
@@ -964,6 +975,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 btnBotSettings: "⚙️ 봇 설정",
                 modalBotSettingsTitle: "⚙️ 봇 알림 설정",
                 labelVoiceLang: "🔊 음성 알림 언어",
+                labelDiscordLang: "💬 Discord 알림 언어",
                 phLoginUser: "사용자 이름을 입력하세요",
                 phLoginPass: "비밀번호를 입력하세요",
                 phRegUser: "사용자 이름 설정",
@@ -3284,6 +3296,11 @@ tts_th_enabled = True
 tts_en_enabled = True
 tts_ko_enabled = True
 
+# V70: Discord text notification languages are independent from TTS languages.
+discord_notify_th_enabled = True
+discord_notify_en_enabled = True
+discord_notify_ko_enabled = True
+
 vip_config = {"enabled": False, "user_id": None, "user_name": "", "message": ""}
 last_bf_notified_hour = -1
 last_bf_text_notified_hour = -1
@@ -4060,6 +4077,9 @@ async def save_bot_settings():
         "tts_th_enabled": bool(tts_th_enabled),
         "tts_en_enabled": bool(tts_en_enabled),
         "tts_ko_enabled": bool(tts_ko_enabled),
+        "discord_notify_th_enabled": bool(discord_notify_th_enabled),
+        "discord_notify_en_enabled": bool(discord_notify_en_enabled),
+        "discord_notify_ko_enabled": bool(discord_notify_ko_enabled),
     }
     try:
         await asyncio.wait_for(
@@ -4074,6 +4094,7 @@ async def load_bot_settings():
     """Load notification/TTS switches. Firebase is canonical; local storage is fallback."""
     global bf_notify_enabled, lib_notify_enabled, ppl_notify_enabled
     global tts_th_enabled, tts_en_enabled, tts_ko_enabled
+    global discord_notify_th_enabled, discord_notify_en_enabled, discord_notify_ko_enabled
     data = None
     try:
         data = await asyncio.to_thread(db.reference("bot_settings").get)
@@ -4088,6 +4109,9 @@ async def load_bot_settings():
         tts_th_enabled = parse_bool(data.get("tts_th_enabled"), tts_th_enabled)
         tts_en_enabled = parse_bool(data.get("tts_en_enabled"), tts_en_enabled)
         tts_ko_enabled = parse_bool(data.get("tts_ko_enabled"), tts_ko_enabled)
+        discord_notify_th_enabled = parse_bool(data.get("discord_notify_th_enabled"), discord_notify_th_enabled)
+        discord_notify_en_enabled = parse_bool(data.get("discord_notify_en_enabled"), discord_notify_en_enabled)
+        discord_notify_ko_enabled = parse_bool(data.get("discord_notify_ko_enabled"), discord_notify_ko_enabled)
     print("✅ load_bot_settings สำเร็จ")
 
 async def load_custom_bosses():
@@ -4634,7 +4658,12 @@ async def speak_in_guild(guild: discord.Guild, text_th=None, text_en=None, text_
     async with voice_locks[guild.id]:
         channels = []
         if target_channel and isinstance(target_channel, discord.VoiceChannel):
-            channels = [target_channel]
+            # V70: final occupancy check closes the race where a user leaves
+            # between the scheduler filter and the Voice connection.
+            if any(not m.bot for m in target_channel.members):
+                channels = [target_channel]
+            else:
+                print(f"⏭️ Voice target became empty before connect: {guild.name} -> {target_channel.name}")
         else:
             channels = [
                 ch for ch in guild.voice_channels
@@ -5400,6 +5429,46 @@ async def check_library_boss_notifications():
         print(f"❌ เกิดข้อผิดพลาดใน Task 'check_library_boss_notifications': {e}")
 
 
+def get_enabled_discord_notification_languages():
+    """Return enabled Discord text-notification languages in TH/EN/KO order."""
+    langs = []
+    if discord_notify_th_enabled:
+        langs.append("th")
+    if discord_notify_en_enabled:
+        langs.append("en")
+    if discord_notify_ko_enabled:
+        langs.append("ko")
+    return langs
+
+
+def build_boss_discord_notification(boss_name: str, stage: str, spawn_time: datetime, notice_minutes: int):
+    """Build one Discord embed containing only the enabled TH/EN/KO text."""
+    enabled = get_enabled_discord_notification_languages()
+    time_str = spawn_time.strftime('%H:%M:%S')
+    title_by_lang = {
+        "th": f"⚠️ {boss_name} ใกล้เกิด!" if stage == "advance" else f"⚔️ {boss_name} เกิดแล้ว!",
+        "en": f"⚠️ {boss_name} Spawning Soon!" if stage == "advance" else f"⚔️ {boss_name} Spawned!",
+        "ko": f"⚠️ {boss_name} 젠 임박!" if stage == "advance" else f"⚔️ {boss_name} 젠 완료!",
+    }
+    body_by_lang = {
+        "th": (f"บอส **{boss_name}** จะเกิดในอีก **{notice_minutes} นาที**!\nเวลาเกิด: **{time_str} น.**" if stage == "advance" else f"บอส **{boss_name}** เกิดแล้วในขณะนี้!\nเวลาเกิด: **{time_str} น.**"),
+        "en": (f"Boss **{boss_name}** will spawn in **{notice_minutes} minutes**.\nSpawn time: **{time_str}**" if stage == "advance" else f"Boss **{boss_name}** has spawned!\nSpawn time: **{time_str}**"),
+        "ko": (f"보스 **{boss_name}**가 **{notice_minutes}분 후에** 나타납니다.\n생성 시간: **{time_str}**" if stage == "advance" else f"보스 **{boss_name}**가 지금 나타났습니다!\n생성 시간: **{time_str}**"),
+    }
+    if not enabled:
+        return discord.Embed(
+            title=f"⚔️ Boss Timer • {boss_name}",
+            description=f"{time_str} • {('ADVANCE' if stage == 'advance' else 'SPAWN')}",
+            color=discord.Color.gold() if stage == "advance" else discord.Color.green(),
+        )
+    primary_lang = enabled[0]
+    embed = discord.Embed(title=title_by_lang[primary_lang], color=discord.Color.gold() if stage == "advance" else discord.Color.green())
+    labels = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}
+    for lang in enabled:
+        embed.add_field(name=labels[lang], value=body_by_lang[lang], inline=False)
+    return embed
+
+
 def get_notification_mentions(guild: discord.Guild) -> str:
     if not guild:
         return ""
@@ -5642,11 +5711,7 @@ async def check_boss_notifications():
                 spawn_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "spawn" for item in pending_boss_rest_notifications)
 
             if 0 < time_left <= notice_seconds and not notified_advance and not advance_stage_queued:
-                embed = discord.Embed(
-                    title="⚠️ แจ้งเตือนบอสเตรียมเกิด!",
-                    description=f"บอส **{boss_name}** จะเกิดในอีก **{notice_minutes} นาที**!\nเวลาเกิด: **{spawn_time.strftime('%H:%M:%S น.')}**",
-                    color=discord.Color.gold()
-                )
+                embed = build_boss_discord_notification(boss_name, "advance", spawn_time, notice_minutes)
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
@@ -5696,11 +5761,7 @@ async def check_boss_notifications():
             # Spawn: only notify at the actual crossing. Old schedules >60s late
             # are marked complete instead of replaying after every deploy/reload.
             if time_left <= 0 and not notified_spawn and not spawn_stage_queued:
-                embed = discord.Embed(
-                    title="⚔️ บอสเกิดแล้ว!",
-                    description=f"บอส **{boss_name}** เกิดแล้วในขณะนี้!",
-                    color=discord.Color.green()
-                )
+                embed = build_boss_discord_notification(boss_name, "spawn", spawn_time, notice_minutes)
                 for ch in channels_to_notify:
                     try:
                         mentions = get_notification_mentions(getattr(ch, "guild", None))
