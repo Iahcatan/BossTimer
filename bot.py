@@ -69,7 +69,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V74_DISCORD_ALL_NOTIFICATIONS_I18N_2026-09-08"
+NOTICE_BF_PATCH_VERSION = "V75_VOICE_CONFIRMATION_QUEUE_CLEANUP_2026-09-09"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -3922,6 +3922,13 @@ def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown'
     print(f"📢 Queue voice confirmation | source={source} | boss={boss_name} | request={request_id} | wait={wait}")
     future = asyncio.run_coroutine_threadsafe(_voice_confirm_boss_recording(boss_name, dict(data)), bot_event_loop)
     if not wait:
+        # Release the in-memory dedup marker when the actual confirmation task
+        # finishes.  V74 left this ID in the set forever for fire-and-forget
+        # confirmations, so later retries of the same completed request emitted
+        # the misleading "already queued" log indefinitely.
+        def _release_confirmation_marker(_future):
+            _confirmation_queue_ids.discard(request_id)
+        future.add_done_callback(_release_confirmation_marker)
         return True
     try:
         result = future.result(timeout=float(timeout))
