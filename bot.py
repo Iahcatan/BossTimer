@@ -1,4 +1,4 @@
-# SKYNET_BOSSTIMER_V72_NOTIFICATION_CHANNEL_COMMAND18_2026-09-08
+# SKYNET_BOSSTIMER_V73_COMMAND18_INTEGRITY_FIX_2026-09-08
 import os
 
 # 🛡️ ON-DEMAND MULTI-CHANNEL PATCH v3
@@ -69,7 +69,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V70_BOSS_VOICE_OCCUPANCY_DISCORD_I18N_2026-09-08"
+NOTICE_BF_PATCH_VERSION = "V73_COMMAND18_INTEGRITY_FIX_2026-09-08"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -7419,6 +7419,7 @@ EXPECTED_SLASH_COMMANDS = {
     "panel",
     "ppl",
     "setlive",
+    "set-notification",
     "setvoice",
     "status",
     "time",
@@ -7500,11 +7501,11 @@ def _run_v47_command_integrity_check():
     if missing:
         print(f"❌ V50 integrity failure | missing symbols: {missing}", flush=True)
         raise RuntimeError(f"V50 integrity failure: {missing}")
-    if len(direct_names) != 16:
-        print(f"⚠️ V50 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
+    if len(direct_names) != 17:
+        print(f"⚠️ V73 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
     else:
         print(
-            f"✅ V50 command integrity check passed | 16 direct + /add boss = 17 command paths | "
+            f"✅ V73 command integrity check passed | 17 direct + /add boss = 18 command paths | "
             f"direct={', '.join(direct_names)}",
             flush=True,
         )
