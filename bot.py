@@ -558,6 +558,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <datalist id="bossOptions"></datalist>
                 </div>
                 <div class="col-md-3">
+                    <label class="form-label" data-i18n="labelKillDate">วันที่ (วัน/เดือน/ปี)</label>
+                    <input type="text" id="killDate" class="form-control" placeholder="เช่น 08/09/2026" data-i18n-ph="phKillDate" maxlength="10" autocomplete="off" inputmode="numeric">
+                    <small class="text-white-50" data-i18n="hintKillDate">*เว้นว่างไว้หากใช้วันที่ปัจจุบัน</small>
+                </div>
+                <div class="col-md-3">
                     <label class="form-label" data-i18n="labelKillTime">เวลาที่ตาย (ระบบ 24 ชม.)</label>
                     <input type="text" id="killTime" class="form-control" placeholder="เช่น 17:30 หรือ 1730" data-i18n-ph="phKillTime" maxlength="5" autocomplete="off" enterkeyhint="done">
                     <small class="text-white-50" data-i18n="hintKillTime">*เว้นว่างไว้หากใช้เวลาปัจจุบัน</small>
@@ -768,8 +773,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 labelBoss: "เลือก หรือ พิมพ์ชื่อบอส",
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
+                labelKillDate: "วันที่ (วัน/เดือน/ปี)",
                 labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
+                phKillDate: "เช่น 08/09/2026",
                 phKillTime: "เช่น 17:30 หรือ 1730",
+                hintKillDate: "*เว้นว่างไว้หากใช้วันที่ปัจจุบัน",
                 hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",
                 labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",
                 btnSave: "⚔️ บันทึกเวลา",
@@ -790,6 +798,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 secUnit: "วินาที",
                 footer: "ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ",
                 invalidTimeAlert: "กรุณากรอกเวลาให้ถูกต้องตามระบบ 24 ชั่วโมง (เช่น 08:30 หรือ 17:45)",
+                invalidDateAlert: "กรุณากรอกวันที่ให้ถูกต้องในรูปแบบ วัน/เดือน/ปี เช่น 08/09/2026",
                 confirmClear: "คุณต้องการล้างตารางบอสทั้งหมดใช่หรือไม่?",
                 notifyReadyTitle: "⚔️ ระบบแจ้งเตือนพร้อมทำงาน",
                 notifyReadyBody: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว",
@@ -868,8 +877,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 labelBoss: "Select or Type Boss Name",
                 phBoss: "Type to search or select...",
                 labelKillTime: "Kill Time (24h Format)",
+                labelKillDate: "Date (Day/Month/Year)",
                 labelSpTime: "Special Time (mins)",
+                phKillDate: "e.g. 08/09/2026",
                 phKillTime: "e.g. 17:30 or 1730",
+                hintKillDate: "*Leave blank to use today's date",
                 hintKillTime: "*Leave blank to use current time",
                 labelNotice: "Advance Notice (Mins)",
                 btnSave: "⚔️ Save Time",
@@ -890,6 +902,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 secUnit: "s",
                 footer: "Real-time Boss Countdown System • Synced with Cloud Database",
                 invalidTimeAlert: "Please enter time in valid 24-hour format (e.g. 08:30 or 17:45)",
+                invalidDateAlert: "Please enter a valid date in Day/Month/Year format, e.g. 08/09/2026",
                 confirmClear: "Are you sure you want to clear all boss timers?",
                 notifyReadyTitle: "⚔️ Notifications Active",
                 notifyReadyBody: "You will be alerted before boss spawns and when spawned.",
@@ -968,8 +981,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 labelBoss: "보스 선택 또는 입력",
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
+                labelKillDate: "날짜 (일/월/년)",
                 labelSpTime: "추가 시간 (분)",
+                phKillDate: "예: 08/09/2026",
                 phKillTime: "예: 17:30 또는 1730",
+                hintKillDate: "*오늘 날짜를 사용하려면 비워두세요",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
@@ -989,7 +1005,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 minUnit: "분",
                 secUnit: "초",
                 footer: "실시간 보스 카운트다운 시스템 • 클라우드 자동 동기화",
-                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 หรือ 17:45)",
+                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 또는 17:45)",
+                invalidDateAlert: "일/월/년 형식으로 올바른 날짜를 입력해주세요. 예: 08/09/2026",
                 confirmClear: "모든 보스 타이머를 삭제하시겠습니까?",
                 notifyReadyTitle: "⚔️ 알림 시스템 준비 완료",
                 notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",
@@ -1717,10 +1734,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             e.preventDefault();
             if (!await requireApprovedUser()) return;
             const bossInput = document.getElementById('bossSelect').value.trim();
+            const dateInput = document.getElementById('killDate').value.trim();
             const timeInput = document.getElementById('killTime').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
             const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
             if (!bossInput) return;
+            if (dateInput && !(new RegExp("^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$")).test(dateInput)) {
+                alert(TRANSLATIONS[currentLang].invalidDateAlert);
+                return;
+            }
 
             try {
                 const idToken = await auth.currentUser.getIdToken(true);
@@ -1735,6 +1757,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     },
                     body: JSON.stringify({
                         bossName: bossInput,
+                        killDate: dateInput,
                         killTime: timeInput,
                         noticeMinutes: noticeMin,
                         spTimeMinutes: spTimeMin,
