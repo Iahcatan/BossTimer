@@ -14,6 +14,7 @@ import re
 import uuid
 import sqlite3
 from collections import deque
+from typing import Optional
 import aiohttp
 from datetime import datetime, timedelta, timezone
 import discord
@@ -69,7 +70,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V77_BOSS_SCHEDULER_LOOP_DATE_I18N_FIX_2026-09-09"
+NOTICE_BF_PATCH_VERSION = "V78_BOSS_RAID_ATTENDANCE_2026-09-09-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -380,6 +381,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             border-bottom: 3px solid #38bdf8;
             font-weight: 600;
         }
+        .attendance-stat { min-height: 120px; }
+        .attendance-status-open { color: #22c55e; }
+        .attendance-status-scheduled { color: #f59e0b; }
+        .attendance-status-closed { color: #94a3b8; }
+        .attendance-table td, .attendance-table th { white-space: nowrap; }
     </style>
 <style>
 .skynet-logo{width:52px;height:52px;object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,.25);box-shadow:0 4px 16px rgba(0,0,0,.35)}
@@ -606,6 +612,81 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </div>
         </div>
 
+        <!-- ⚔️ Boss Raid Attendance -->
+        <div class="card p-4 mb-4 shadow-sm" id="attendanceDashboardSection">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                <div>
+                    <h4 class="card-title text-warning mb-1" data-i18n="attendanceTitle">⚔️ Boss Raid Attendance</h4>
+                    <small class="text-white-50" data-i18n="attendanceSubtitle">เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord</small>
+                </div>
+                <span class="badge bg-success status-badge" id="attendanceRealtimeStatus" data-i18n="attendanceRealtime">🟢 Realtime</span>
+            </div>
+
+            <div class="row g-3 mb-3">
+                <div class="col-md-4">
+                    <div class="card p-3 attendance-stat h-100">
+                        <div class="text-info small" data-i18n="attendanceTotalRaids">กิจกรรมทั้งหมด</div>
+                        <div class="fs-3 fw-bold" id="attendanceTotalRaidsCount">0</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 attendance-stat h-100">
+                        <div class="text-success small" data-i18n="attendanceUniqueMembers">สมาชิกที่เข้าร่วม</div>
+                        <div class="fs-3 fw-bold" id="attendanceUniqueMembersCount">0</div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card p-3 attendance-stat h-100">
+                        <div class="text-warning small" data-i18n="attendanceTotalCheckins">เช็คชื่อรวม</div>
+                        <div class="fs-3 fw-bold" id="attendanceTotalCheckinsCount">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <h5 class="text-info mt-3" data-i18n="attendanceCurrent">กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม</h5>
+            <div class="table-responsive mb-4">
+                <table class="table table-dark table-hover align-middle attendance-table mb-0">
+                    <thead><tr>
+                        <th data-i18n="attendanceBoss">บอส</th>
+                        <th data-i18n="attendanceDate">วันที่</th>
+                        <th data-i18n="attendanceAttackTime">เวลาโจมตี</th>
+                        <th data-i18n="attendanceOpenClose">เปิด–ปิด</th>
+                        <th data-i18n="attendanceCount">ผู้เข้าร่วม</th>
+                        <th data-i18n="attendanceStatus">สถานะ</th>
+                    </tr></thead>
+                    <tbody id="attendanceCurrentBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>
+                </table>
+            </div>
+
+            <h5 class="text-info" data-i18n="attendanceHistory">ประวัติย้อนหลัง</h5>
+            <div class="table-responsive mb-4">
+                <table class="table table-dark table-hover align-middle attendance-table mb-0">
+                    <thead><tr>
+                        <th data-i18n="attendanceBoss">บอส</th>
+                        <th data-i18n="attendanceDate">วันที่</th>
+                        <th data-i18n="attendanceAttackTime">เวลาโจมตี</th>
+                        <th data-i18n="attendanceCount">ผู้เข้าร่วม</th>
+                        <th data-i18n="attendanceCreatedBy">สร้างโดย</th>
+                        <th data-i18n="attendanceStatus">สถานะ</th>
+                    </tr></thead>
+                    <tbody id="attendanceHistoryBody"><tr><td colspan="6" class="text-center text-muted">-</td></tr></tbody>
+                </table>
+            </div>
+
+            <h5 class="text-warning" data-i18n="attendanceMonthly">📊 รายงานประจำเดือน</h5>
+            <div class="table-responsive">
+                <table class="table table-dark table-hover align-middle attendance-table mb-0">
+                    <thead><tr>
+                        <th data-i18n="attendanceMonth">เดือน</th>
+                        <th data-i18n="attendanceRaids">กิจกรรม</th>
+                        <th data-i18n="attendanceMembers">สมาชิก</th>
+                        <th data-i18n="attendanceChecks">เช็คชื่อ</th>
+                    </tr></thead>
+                    <tbody id="attendanceMonthlyBody"><tr><td colspan="4" class="text-center text-muted">-</td></tr></tbody>
+                </table>
+            </div>
+        </div>
+
         <footer class="text-center text-white mt-4">
             <small data-i18n="footer">ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ</small>
         </footer>
@@ -693,6 +774,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // Override with window.SKYNET_API_ORIGIN only when deploying the backend elsewhere.
         window.SKYNET_API_ORIGIN = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
         const sessionsRef = db.ref('dashboard_sessions');
+        const raidAttendanceRef = db.ref('raid_attendance');
+        const monthlyReportsRef = db.ref('monthly_reports');
 
         // 🔐 Admin account
         // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด
@@ -830,6 +913,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 errAccountNotApproved: "บัญชีนี้ยังไม่ได้รับอนุมัติจาก Admin",
                 errWeakAccount: "ชื่อผู้ใช้ต้องมีอย่างน้อย 3 ตัวอักษร และรหัสผ่านอย่างน้อย 6 ตัวอักษร",
                 errAdminUsername: "ไม่สามารถใช้ชื่อ admin สำหรับการสมัครทั่วไปได้",
+                attendanceTitle: "⚔️ Boss Raid Attendance",
+                attendanceSubtitle: "เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord",
+                attendanceRealtime: "🟢 Real-time",
+                attendanceTotalRaids: "กิจกรรมทั้งหมด", attendanceUniqueMembers: "สมาชิกที่เข้าร่วม", attendanceTotalCheckins: "เช็คชื่อรวม",
+                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน",
+                attendanceBoss: "บอส", attendanceDate: "วันที่", attendanceAttackTime: "เวลาโจมตี", attendanceOpenClose: "เปิด–ปิด",
+                attendanceCount: "ผู้เข้าร่วม", attendanceCreatedBy: "สร้างโดย", attendanceStatus: "สถานะ", attendanceMonth: "เดือน",
+                attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ",
                 adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",
                 adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติ / Ban / Unban อยู่ในตารางด้านล่าง",
                 adminRefresh: "🔄 รีเฟรช",
@@ -935,6 +1026,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 errAccountNotApproved: "This account has not been approved by Admin.",
                 errWeakAccount: "Username must be at least 3 characters and password at least 6 characters.",
                 errAdminUsername: "The admin username is reserved.",
+                attendanceTitle: "⚔️ Boss Raid Attendance",
+                attendanceSubtitle: "Real-time boss raid check-in from Discord",
+                attendanceRealtime: "🟢 Realtime",
+                attendanceTotalRaids: "Total Raids", attendanceUniqueMembers: "Unique Members", attendanceTotalCheckins: "Total Check-ins",
+                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports",
+                attendanceBoss: "Boss", attendanceDate: "Date", attendanceAttackTime: "Attack Time", attendanceOpenClose: "Open–Close",
+                attendanceCount: "Participants", attendanceCreatedBy: "Created By", attendanceStatus: "Status", attendanceMonth: "Month",
+                attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins",
                 adminPanelTitle: "🛡️ Admin • User Management",
                 adminPanelSubtitle: "Approve registrations, review history, and see active users. Approve / Ban / Unban buttons are in the table below.",
                 adminRefresh: "🔄 Refresh",
@@ -1040,6 +1139,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 errAccountNotApproved: "이 계정은 아직 Admin의 승인을 받지 못했습니다.",
                 errWeakAccount: "사용자 이름은 3자 이상, 비밀번호는 6자 이상이어야 합니다.",
                 errAdminUsername: "admin 사용자 이름은 일반 가입에 사용할 수 없습니다.",
+                attendanceTitle: "⚔️ 보스 레이드 출석",
+                attendanceSubtitle: "Discord에서 실시간 보스 레이드 출석 확인",
+                attendanceRealtime: "🟢 실시간",
+                attendanceTotalRaids: "전체 활동", attendanceUniqueMembers: "참여 회원", attendanceTotalCheckins: "총 출석",
+                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서",
+                attendanceBoss: "보스", attendanceDate: "날짜", attendanceAttackTime: "공격 시간", attendanceOpenClose: "시작–마감",
+                attendanceCount: "참여자", attendanceCreatedBy: "생성자", attendanceStatus: "상태", attendanceMonth: "월",
+                attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석",
                 adminPanelTitle: "🛡️ Admin • 사용자 관리",
                 adminPanelSubtitle: "가입 승인, 이용 기록 및 현재 접속 사용자를 확인합니다.",
                 adminRefresh: "🔄 새로고침",
@@ -1575,6 +1682,69 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (label && langData.labelKillDate) label.textContent = langData.labelKillDate;
             if (input && langData.phKillDate) input.placeholder = langData.phKillDate;
             if (hint && langData.hintKillDate) hint.textContent = langData.hintKillDate;
+        }
+
+        function renderAttendanceDashboard(rootData) {
+            try {
+                const all = [];
+                const now = new Date();
+                Object.entries(rootData || {}).forEach(([guildId, acts]) => {
+                    if (!acts || typeof acts !== 'object') return;
+                    Object.entries(acts).forEach(([activityId, a]) => {
+                        if (!a || typeof a !== 'object') return;
+                        const participants = a.participants && typeof a.participants === 'object' ? Object.values(a.participants) : [];
+                        const checked = participants.filter(p => p && p.status === 'checked_in');
+                        all.push({ guildId, activityId, a, checked });
+                    });
+                });
+                all.sort((x,y) => String(x.a.attack_at||x.a.created_at||'').localeCompare(String(y.a.attack_at||y.a.created_at||'')));
+                const current = all.filter(x => x.a.status !== 'closed').sort((x,y)=>String(x.a.attack_at||'').localeCompare(String(y.a.attack_at||'')));
+                const history = all.filter(x => x.a.status === 'closed').reverse().slice(0, 50);
+                const totalRaids = all.length;
+                const unique = new Set();
+                let totalCheckins = 0;
+                all.forEach(x => x.checked.forEach(p => { if (p && p.user_id) unique.add(String(p.user_id)); totalCheckins++; }));
+                document.getElementById('attendanceTotalRaidsCount').innerText = totalRaids;
+                document.getElementById('attendanceUniqueMembersCount').innerText = unique.size;
+                document.getElementById('attendanceTotalCheckinsCount').innerText = totalCheckins;
+
+                const currentBody = document.getElementById('attendanceCurrentBody');
+                currentBody.innerHTML = current.length ? current.map(x => {
+                    const a=x.a; const status=a.status==='open' ? (currentLang==='ko'?'진행 중':currentLang==='en'?'OPEN':'เปิด') : (currentLang==='ko'?'예정':currentLang==='en'?'SCHEDULED':'กำหนดการ');
+                    return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${escapeHtml(String(a.checkin_open||'-'))} – ${escapeHtml(String(a.checkin_close||'-'))}</td><td>${x.checked.length}</td><td>${status}</td></tr>`;
+                }).join('') : `<tr><td colspan="6" class="text-center text-muted">-</td></tr>`;
+
+                const historyBody = document.getElementById('attendanceHistoryBody');
+                historyBody.innerHTML = history.length ? history.map(x => {
+                    const a=x.a;
+                    return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${x.checked.length}</td><td>${escapeHtml(String(a.created_by_name||'-'))}</td><td>${currentLang==='ko'?'마감':currentLang==='en'?'CLOSED':'ปิดแล้ว'}</td></tr>`;
+                }).join('') : `<tr><td colspan="6" class="text-center text-muted">-</td></tr>`;
+
+                const monthlyMap = {};
+                all.forEach(x => {
+                    const raw = String(x.a.attack_at || x.a.created_at || '');
+                    const m = raw.slice(0,7);
+                    if (!/^\\d{4}-\\d{2}$/.test(m)) return;
+                    if (!monthlyMap[m]) monthlyMap[m] = {raids:0,members:new Set(),checks:0};
+                    monthlyMap[m].raids++;
+                    x.checked.forEach(p=>{monthlyMap[m].checks++; if(p && p.user_id) monthlyMap[m].members.add(String(p.user_id));});
+                });
+                const months = Object.keys(monthlyMap).sort().reverse().slice(0,12);
+                const monthBody = document.getElementById('attendanceMonthlyBody');
+                monthBody.innerHTML = months.length ? months.map(m=>`<tr><td>${m}</td><td>${monthlyMap[m].raids}</td><td>${monthlyMap[m].members.size}</td><td>${monthlyMap[m].checks}</td></tr>`).join('') : `<tr><td colspan="4" class="text-center text-muted">-</td></tr>`;
+            } catch (e) { console.warn('[SKYNET] attendance dashboard render:', e); }
+        }
+
+        function escapeHtml(value) {
+            return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
+        }
+
+        function startAttendanceRealtimeListener(){
+            raidAttendanceRef.on('value', snap => renderAttendanceDashboard(snap.val() || {}));
+            monthlyReportsRef.on('value', snap => {
+                // Server-generated monthly reports remain in Firebase; the live activity table is the primary dashboard view.
+                window.__SKYNET_MONTHLY_REPORTS__ = snap.val() || {};
+            });
         }
 
         function applyLanguage() {
@@ -2305,6 +2475,9 @@ voice_config = {}
 # V71/V72: Persistent Discord text-notification target channels.
 # Shape: {guild_id: {channel_id: {guild_id, channel_id, channel_name, enabled, ...}}}
 notification_channels = {}
+
+attendance_config = {}  # guild_id -> {summary_channel_id, ...}
+attendance_lifecycle_lock = asyncio.Lock()
 custom_bosses = {}
 last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
@@ -5025,6 +5198,7 @@ async def on_ready():
     await load_vip_config()
     await load_voice_config()
     await load_notification_channels()
+    await load_attendance_config()
 
     # Voice is ON-DEMAND: do not connect on startup. /setvoice only stores the target channel.
     print("🟢 Voice mode: ON-DEMAND GLOBAL (occupied-room announcements; connect only when speaking, disconnect after TTS)")
@@ -5045,6 +5219,9 @@ async def on_ready():
     if not update_live_embed.is_running(): update_live_embed.start()
     if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
     if not flush_pending_command_outputs.is_running(): flush_pending_command_outputs.start()
+    if not attendance_lifecycle_loop.is_running(): attendance_lifecycle_loop.start()
+    if not attendance_monthly_report_loop.is_running(): attendance_monthly_report_loop.start()
+    asyncio.create_task(restore_raid_attendance_views(), name="restore-raid-attendance-views")
     if not getattr(discord_block_diagnostics_loop, "_started", False):
         discord_block_diagnostics_loop._started = True
         asyncio.create_task(discord_block_diagnostics_loop(), name="discord-block-diagnostics")
@@ -5342,6 +5519,7 @@ async def toggle_vip_greet(interaction: discord.Interaction, status: app_command
     app_commands.Choice(name="เพิ่ม/เปิด", value="add"),
     app_commands.Choice(name="ปิด/ลบ", value="remove"),
     app_commands.Choice(name="แสดงรายการ", value="list"),
+    app_commands.Choice(name="ตั้งห้องสรุป Attendance", value="attendance_summary"),
 ])
 @has_allowed_role()
 async def set_notification_channel(
@@ -5365,6 +5543,53 @@ async def set_notification_channel(
         )
         return
 
+    action_value = (action.value if action else "add")
+    guild_key = str(guild.id)
+
+    if action_value == "attendance_summary":
+        if not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
+            await guarded_interaction_followup_send(
+                interaction, "interaction-followup",
+                "❌ การตั้งห้องสรุป Attendance อนุญาตเฉพาะ Admin หรือ Server Owner",
+                ephemeral=True,
+            )
+            return
+        if channel is None:
+            await guarded_interaction_followup_send(
+                interaction, "interaction-followup",
+                "❌ กรุณาเลือก Text Channel สำหรับสรุป Attendance",
+                ephemeral=True,
+            )
+            return
+        me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+        if me is not None:
+            perms = channel.permissions_for(me)
+            missing = []
+            if not perms.view_channel: missing.append("View Channel")
+            if not perms.send_messages: missing.append("Send Messages")
+            if not perms.embed_links: missing.append("Embed Links")
+            if missing:
+                await guarded_interaction_followup_send(
+                    interaction, "interaction-followup",
+                    "❌ บอทไม่มีสิทธิ์ในห้องสรุปนี้: " + ", ".join(missing),
+                    ephemeral=True,
+                )
+                return
+        with schedule_lock:
+            attendance_config[guild_key] = {
+                "guild_id": guild.id,
+                "summary_channel_id": int(channel.id),
+                "channel_name": channel.name,
+                "updated_by": str(interaction.user.id),
+                "updated_at": datetime.now(TZ_THAI).isoformat(),
+            }
+        await save_attendance_config()
+        await guarded_interaction_followup_send(
+            interaction, "interaction-followup",
+            f"📊 ตั้งห้องสรุป Attendance เป็น **#{channel.name}** สำเร็จ",
+            ephemeral=True,
+        )
+        return
     action_value = (action.value if action else "add")
     guild_key = str(guild.id)
     with schedule_lock:
@@ -7043,6 +7268,572 @@ async def set_live(interaction: discord.Interaction):
     await save_live_config()
     await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", f"📌 ช่อง: <#{interaction.channel_id}>\nMessage ID: `{msg.id}`", discord.Color.teal())
 
+
+# ==========================================
+# ⚔️ BOSS RAID ATTENDANCE SYSTEM (V78)
+# ใช้ Firebase root ใหม่ raid_attendance แยกจาก boss_schedule
+# ==========================================
+
+def is_guild_admin_or_owner(member: discord.Member) -> bool:
+    if not isinstance(member, discord.Member) or not member.guild:
+        return False
+    return bool(member.id == member.guild.owner_id or member.guild_permissions.administrator)
+
+
+def _attendance_config_snapshot(guild_id: int):
+    with schedule_lock:
+        cfg = dict(attendance_config.get(str(guild_id), {}) or {})
+    return cfg
+
+
+async def save_attendance_config():
+    with schedule_lock:
+        data = {str(k): dict(v) for k, v in (attendance_config or {}).items()}
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(db.reference("attendance_config").set, data), timeout=8
+        )
+    except Exception as e:
+        print(f"⚠️ บันทึก attendance_config ลง Firebase ไม่สำเร็จ: {e}", flush=True)
+    await asyncio.to_thread(set_db_value, "attendance_config", data)
+    await asyncio.to_thread(save_json_local, "attendance_config.json", data)
+
+
+async def load_attendance_config():
+    global attendance_config
+    data = None
+    try:
+        data = await asyncio.to_thread(db.reference("attendance_config").get)
+    except Exception as e:
+        print(f"⚠️ โหลด attendance_config จาก Firebase ไม่สำเร็จ: {e}", flush=True)
+    if not isinstance(data, dict) or not data:
+        data = get_db_value("attendance_config", None)
+    normalized = {}
+    if isinstance(data, dict):
+        for guild_id, cfg in data.items():
+            if not isinstance(cfg, dict):
+                continue
+            cid = cfg.get("summary_channel_id")
+            try:
+                cid = int(cid)
+            except (TypeError, ValueError):
+                continue
+            try:
+                gid = int(cfg.get("guild_id", guild_id))
+            except (TypeError, ValueError):
+                continue
+            normalized[str(gid)] = {
+                "guild_id": gid,
+                "summary_channel_id": cid,
+                "channel_name": str(cfg.get("channel_name") or ""),
+                "updated_by": str(cfg.get("updated_by") or ""),
+                "updated_at": str(cfg.get("updated_at") or ""),
+            }
+    attendance_config = normalized
+    print(f"✅ load_attendance_config สำเร็จ ({len(attendance_config)} server(s))", flush=True)
+    return attendance_config
+
+
+def _attendance_now_iso():
+    return datetime.now(TZ_THAI).isoformat()
+
+
+def _attendance_parse_local(date_text: str, time_text: str) -> datetime | None:
+    try:
+        dt = datetime.strptime(f"{date_text} {time_text}", "%d/%m/%Y %H:%M")
+        return dt.replace(tzinfo=TZ_THAI)
+    except Exception:
+        return None
+
+
+def _attendance_activity_path(guild_id: int, activity_id: str) -> str:
+    return f"raid_attendance/{int(guild_id)}/{activity_id}"
+
+
+def _attendance_member_display(member: discord.Member | discord.User) -> str:
+    return clean_display_name(getattr(member, "display_name", getattr(member, "name", "member")))
+
+
+def _attendance_language_blocks(activity: dict, participants: list[dict], *, closed=False):
+    enabled = get_enabled_discord_notification_languages()
+    if not enabled:
+        enabled = ["th"]
+    count = sum(1 for p in participants if str(p.get("status")) == "checked_in")
+    cancelled = sum(1 for p in participants if str(p.get("status")) == "cancelled")
+    boss = str(activity.get("boss_name") or "Boss")
+    attack = str(activity.get("attack_time") or "-")
+    date_text = str(activity.get("activity_date") or "-")
+    status = str(activity.get("status") or "scheduled")
+    title_by_lang = {
+        "th": "🔒 BOSS RAID ปิดเช็คชื่อ" if closed else "⚔️ BOSS RAID ATTENDANCE",
+        "en": "🔒 BOSS RAID CHECK-IN CLOSED" if closed else "⚔️ BOSS RAID ATTENDANCE",
+        "ko": "🔒 보스 레이드 출석 마감" if closed else "⚔️ 보스 레이드 출석",
+    }
+    line_by_lang = {
+        "th": f"⚔️ บอส: **{boss}**\n📅 วันที่: **{date_text}**\n⏰ เวลาโจมตี: **{attack} น.**\n👥 ผู้เข้าร่วม: **{count} คน**",
+        "en": f"⚔️ Boss: **{boss}**\n📅 Date: **{date_text}**\n⏰ Attack Time: **{attack}**\n👥 Checked in: **{count}**",
+        "ko": f"⚔️ 보스: **{boss}**\n📅 날짜: **{date_text}**\n⏰ 공격 시간: **{attack}**\n👥 참석: **{count}명**",
+    }
+    return enabled, title_by_lang, line_by_lang, count, cancelled, status
+
+
+def build_raid_activity_embed(activity: dict, participants: list[dict], *, closed=False):
+    enabled, title_map, body_map, count, cancelled, status = _attendance_language_blocks(activity, participants, closed=closed)
+    primary = enabled[0]
+    embed = discord.Embed(title=title_map[primary], color=discord.Color.red() if closed else discord.Color.blurple(), timestamp=datetime.now(TZ_THAI))
+    for lang in enabled:
+        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+        embed.add_field(name=prefix, value=body_map[lang], inline=False)
+    if not closed:
+        open_text = str(activity.get("checkin_open") or "-")
+        close_text = str(activity.get("checkin_close") or "-")
+        extra = {
+            "th": f"🟢 เปิดเช็คชื่อ: **{open_text} น.**\n🔴 ปิดเช็คชื่อ: **{close_text} น.**",
+            "en": f"🟢 Check-in opens: **{open_text}**\n🔴 Check-in closes: **{close_text}**",
+            "ko": f"🟢 출석 시작: **{open_text}**\n🔴 출석 마감: **{close_text}**",
+        }
+        for lang in enabled:
+            prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+            embed.add_field(name=f"{prefix} • Schedule", value=extra[lang], inline=False)
+    else:
+        extra = {
+            "th": f"✅ เช็กชื่อ: **{count}**\n❌ ยกเลิก: **{cancelled}**",
+            "en": f"✅ Checked in: **{count}**\n❌ Cancelled: **{cancelled}**",
+            "ko": f"✅ 출석: **{count}명**\n❌ 취소: **{cancelled}명**",
+        }
+        for lang in enabled:
+            prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+            embed.add_field(name=f"{prefix} • Result", value=extra[lang], inline=False)
+    embed.set_footer(text=f"Activity ID: {activity.get('activity_id', '-')} | Status: {status}")
+    return embed
+
+
+def build_raid_summary_embed(activity: dict, participants: list[dict]):
+    enabled, title_map, body_map, count, cancelled, _ = _attendance_language_blocks(activity, participants, closed=True)
+    primary = enabled[0]
+    embed = discord.Embed(title=title_map[primary], color=discord.Color.green(), timestamp=datetime.now(TZ_THAI))
+    for lang in enabled:
+        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+        embed.add_field(name=prefix, value=body_map[lang], inline=False)
+    checked = [p for p in participants if p.get("status") == "checked_in"]
+    names = []
+    for idx, p in enumerate(checked, 1):
+        names.append(f"{idx}. {p.get('display_name') or p.get('username') or p.get('user_id')}")
+    name_text = "\n".join(names) if names else "-"
+    if len(name_text) > 3900:
+        name_text = name_text[:3890] + "\n…"
+    labels = {"th": "📋 รายชื่อสมาชิก", "en": "📋 Participants", "ko": "📋 참석자"}
+    embed.add_field(name=labels[primary], value=name_text, inline=False)
+    return embed
+
+
+async def _attendance_fetch_activity(guild_id: int, activity_id: str):
+    try:
+        data = await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(guild_id, activity_id)).get), timeout=8)
+        return data if isinstance(data, dict) else None
+    except Exception as e:
+        print(f"⚠️ อ่าน Attendance activity ไม่สำเร็จ: {guild_id}/{activity_id}: {e}", flush=True)
+        return None
+
+
+async def _attendance_fetch_participants(guild_id: int, activity_id: str):
+    activity = await _attendance_fetch_activity(guild_id, activity_id)
+    if not activity:
+        return None, []
+    participants = activity.get("participants") if isinstance(activity.get("participants"), dict) else {}
+    rows = []
+    for uid, p in participants.items():
+        if not isinstance(p, dict):
+            continue
+        row = dict(p)
+        row.setdefault("user_id", str(uid))
+        rows.append(row)
+    rows.sort(key=lambda p: str(p.get("checked_in_at") or p.get("updated_at") or ""))
+    return activity, rows
+
+
+async def _attendance_refresh_panel(guild: discord.Guild, activity: dict, participants: list[dict], *, closed=False):
+    try:
+        channel_id = int(activity.get("panel_channel_id") or 0)
+        message_id = int(activity.get("panel_message_id") or 0)
+    except (TypeError, ValueError):
+        return
+    if not channel_id or not message_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if not isinstance(channel, discord.TextChannel):
+        return
+    try:
+        message = channel.get_partial_message(message_id)
+        view = RaidAttendanceView(str(activity.get("activity_id"))) if not closed else RaidAttendanceView(str(activity.get("activity_id")), disabled=True)
+        await guarded_message_edit(message, context=f"attendance:panel-edit:{activity.get('activity_id')}", embed=build_raid_activity_embed(activity, participants, closed=closed), view=view, background=False)
+    except Exception as e:
+        print(f"⚠️ อัปเดต Attendance panel ไม่สำเร็จ: {e}", flush=True)
+
+
+async def close_raid_activity(guild: discord.Guild, activity_id: str, *, reason="scheduled-close"):
+    async with attendance_lifecycle_lock:
+        activity, participants = await _attendance_fetch_participants(guild.id, activity_id)
+        if not activity or str(activity.get("status")) == "closed":
+            return False
+        activity["status"] = "closed"
+        activity["closed_at"] = _attendance_now_iso()
+        activity["closed_reason"] = reason
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(db.reference(_attendance_activity_path(guild.id, activity_id)).update, {
+                    "status": "closed",
+                    "closed_at": activity["closed_at"],
+                    "closed_reason": reason,
+                }), timeout=8
+            )
+        except Exception as e:
+            print(f"⚠️ ปิด Attendance activity ไม่สำเร็จ: {guild.id}/{activity_id}: {e}", flush=True)
+            return False
+        await _attendance_refresh_panel(guild, activity, participants, closed=True)
+        cfg = _attendance_config_snapshot(guild.id)
+        summary_id = cfg.get("summary_channel_id")
+        channel = guild.get_channel(int(summary_id)) if summary_id else None
+        if isinstance(channel, discord.TextChannel):
+            try:
+                embed = build_raid_summary_embed(activity, participants)
+                await guarded_channel_send(channel, context=f"attendance:summary:{activity_id}", embed=embed, background=True)
+            except Exception as e:
+                print(f"⚠️ ส่ง Attendance summary ไม่สำเร็จ: {guild.name}: {e}", flush=True)
+        print(f"📊 Attendance activity closed | guild={guild.name} | activity={activity_id} | participants={sum(1 for p in participants if p.get('status')=='checked_in')}", flush=True)
+        return True
+
+
+class RaidAttendanceCreateModal(discord.ui.Modal, title="⚔️ Create Boss Raid Activity"):
+    def __init__(self, boss_name: str):
+        super().__init__(timeout=300)
+        self.boss_name = discord.ui.TextInput(label="Boss", default=boss_name[:100], max_length=100, required=True)
+        self.activity_date = discord.ui.TextInput(label="วันที่ (DD/MM/YYYY)", placeholder="09/09/2026", max_length=10, required=True)
+        self.attack_time = discord.ui.TextInput(label="เวลาโจมตี (HH:MM)", placeholder="20:30", max_length=5, required=True)
+        self.checkin_open = discord.ui.TextInput(label="เปิดเช็คชื่อ (HH:MM)", placeholder="20:15", max_length=5, required=True)
+        self.checkin_close = discord.ui.TextInput(label="ปิดเช็คชื่อ (HH:MM)", placeholder="20:45", max_length=5, required=True)
+        for item in (self.boss_name, self.activity_date, self.attack_time, self.checkin_open, self.checkin_close):
+            self.add_item(item)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
+            await interaction.response.send_message("❌ เฉพาะ Admin หรือ Server Owner เท่านั้นที่สร้างกิจกรรมได้", ephemeral=True)
+            return
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        date_text = str(self.activity_date.value).strip()
+        attack_text = str(self.attack_time.value).strip()
+        open_text = str(self.checkin_open.value).strip()
+        close_text = str(self.checkin_close.value).strip()
+        attack_dt = _attendance_parse_local(date_text, attack_text)
+        open_dt = _attendance_parse_local(date_text, open_text)
+        close_dt = _attendance_parse_local(date_text, close_text)
+        if not attack_dt or not open_dt or not close_dt or not (open_dt <= attack_dt <= close_dt):
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ วันที่/เวลาไม่ถูกต้อง หรือช่วงเปิด-ปิดไม่ครอบคลุมเวลาโจมตี", ephemeral=True)
+            return
+        cfg = _attendance_config_snapshot(interaction.guild.id)
+        summary_id = cfg.get("summary_channel_id")
+        summary_channel = interaction.guild.get_channel(int(summary_id)) if summary_id else None
+        if not isinstance(summary_channel, discord.TextChannel):
+            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ ยังไม่ได้ตั้งห้องสรุป Attendance ใช้ `/set-notification` → `ตั้งห้องสรุป Attendance` ก่อน", ephemeral=True)
+            return
+        activity_id = f"{attack_dt.strftime('%Y%m%d')}_{re.sub(r'[^A-Za-z0-9]+', '_', str(self.boss_name.value).strip())[:32]}_{attack_dt.strftime('%H%M')}_{uuid.uuid4().hex[:6]}"
+        activity = {
+            "activity_id": activity_id,
+            "guild_id": interaction.guild.id,
+            "boss_name": str(self.boss_name.value).strip(),
+            "activity_date": date_text,
+            "attack_time": attack_text,
+            "checkin_open": open_text,
+            "checkin_close": close_text,
+            "open_at": open_dt.isoformat(),
+            "close_at": close_dt.isoformat(),
+            "attack_at": attack_dt.isoformat(),
+            "status": "scheduled" if datetime.now(TZ_THAI) < open_dt else "open",
+            "created_by": str(interaction.user.id),
+            "created_by_name": _attendance_member_display(interaction.user),
+            "created_at": _attendance_now_iso(),
+            "panel_channel_id": interaction.channel_id,
+            "panel_message_id": None,
+            "summary_channel_id": int(summary_channel.id),
+            "participants": {},
+        }
+        try:
+            await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, activity_id)).set, activity), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ บันทึกกิจกรรมลง Firebase ไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        view = RaidAttendanceView(activity_id)
+        message = await guarded_interaction_followup_send(interaction, "interaction-followup", embed=build_raid_activity_embed(activity, [], closed=False), view=view, ephemeral=False)
+        if message is not None:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, activity_id)).update, {"panel_message_id": int(message.id)}), timeout=8)
+                activity["panel_message_id"] = int(message.id)
+                bot.add_view(view, message_id=int(message.id))
+            except Exception as e:
+                print(f"⚠️ บันทึก panel message ID ไม่สำเร็จ: {e}", flush=True)
+        else:
+            print(f"⚠️ สร้าง Attendance panel message ไม่สำเร็จ: {activity_id}", flush=True)
+        await send_audit_log(interaction.guild, interaction.user, "สร้าง Boss Raid Attendance", f"Boss: `{activity['boss_name']}` | วันที่: `{date_text}` | เปิด: `{open_text}` | ปิด: `{close_text}` | Activity: `{activity_id}`", discord.Color.blurple())
+        print(f"⚔️ Attendance activity created | guild={interaction.guild.name} | activity={activity_id}", flush=True)
+
+
+class RaidAttendanceView(discord.ui.View):
+    def __init__(self, activity_id: str, disabled: bool = False):
+        super().__init__(timeout=None)
+        self.activity_id = str(activity_id)
+        self.add_item(self._button("check", "✅ เช็กชื่อ", discord.ButtonStyle.success, disabled))
+        self.add_item(self._button("cancel", "❌ ยกเลิกเช็กชื่อ", discord.ButtonStyle.danger, disabled))
+        self.add_item(self._button("list", "📋 รายชื่อ", discord.ButtonStyle.secondary, False))
+
+    def _button(self, action: str, label: str, style, disabled: bool):
+        button = discord.ui.Button(label=label, style=style, custom_id=f"raid_attendance:{action}:{self.activity_id}", disabled=disabled)
+        if action == "check":
+            button.callback = self._check
+        elif action == "cancel":
+            button.callback = self._cancel
+        else:
+            button.callback = self._list
+        return button
+
+    async def _load(self, interaction: discord.Interaction):
+        activity, participants = await _attendance_fetch_participants(interaction.guild.id, self.activity_id)
+        return activity, participants
+
+    async def _check(self, interaction: discord.Interaction):
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return
+        activity, participants = await self._load(interaction)
+        if not activity:
+            await guarded_interaction_followup_send(interaction, "attendance-check", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
+            return
+        now = datetime.now(TZ_THAI)
+        open_dt = parse_to_thai_datetime(activity.get("open_at"))
+        close_dt = parse_to_thai_datetime(activity.get("close_at"))
+        if str(activity.get("status")) == "closed" or not open_dt or not close_dt or not (open_dt <= now <= close_dt):
+            await guarded_interaction_followup_send(interaction, "attendance-check", "🔒 กิจกรรมนี้ยังไม่เปิดเช็คชื่อหรือปิดเช็คชื่อแล้ว", ephemeral=True)
+            return
+        ref_path = f"{_attendance_activity_path(interaction.guild.id, self.activity_id)}/participants/{interaction.user.id}"
+        record = {
+            "user_id": str(interaction.user.id),
+            "username": str(interaction.user.name),
+            "display_name": _attendance_member_display(interaction.user),
+            "checked_in_at": _attendance_now_iso(),
+            "status": "checked_in",
+        }
+        transaction_result = None
+        try:
+            def _tx(current_value):
+                if isinstance(current_value, dict) and current_value.get("status") == "checked_in":
+                    return current_value
+                return record
+            transaction_result = await asyncio.wait_for(
+                asyncio.to_thread(db.reference(ref_path).transaction, _tx), timeout=8
+            )
+            if isinstance(transaction_result, dict) and transaction_result.get("status") == "checked_in" and str(transaction_result.get("checked_in_at")) != str(record.get("checked_in_at")):
+                await guarded_interaction_followup_send(interaction, "attendance-check", "⚠️ คุณเช็คชื่อกิจกรรมนี้แล้ว", ephemeral=True)
+                return
+            await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, self.activity_id)).update, {"updated_at": _attendance_now_iso()}), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "attendance-check", f"❌ บันทึกเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        await guarded_interaction_followup_send(interaction, "attendance-check", "✅ เช็คชื่อเข้าร่วมกิจกรรมสำเร็จ", ephemeral=True)
+        activity, participants = await self._load(interaction)
+        await _attendance_refresh_panel(interaction.guild, activity, participants, closed=False)
+
+    async def _cancel(self, interaction: discord.Interaction):
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        if not interaction.guild or not isinstance(interaction.user, discord.Member):
+            return
+        activity, participants = await self._load(interaction)
+        if not activity:
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
+            return
+        now = datetime.now(TZ_THAI)
+        open_dt = parse_to_thai_datetime(activity.get("open_at"))
+        close_dt = parse_to_thai_datetime(activity.get("close_at"))
+        if str(activity.get("status")) == "closed" or not open_dt or not close_dt or not (open_dt <= now <= close_dt):
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", "🔒 กิจกรรมนี้ปิดเช็คชื่อแล้ว", ephemeral=True)
+            return
+        ref_path = f"{_attendance_activity_path(interaction.guild.id, self.activity_id)}/participants/{interaction.user.id}"
+        try:
+            current = await asyncio.wait_for(asyncio.to_thread(db.reference(ref_path).get), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", f"❌ อ่านข้อมูลเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        if not isinstance(current, dict) or current.get("status") != "checked_in":
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", "ℹ️ คุณยังไม่ได้เช็คชื่อกิจกรรมนี้", ephemeral=True)
+            return
+        current.update({"status": "cancelled", "cancelled_at": _attendance_now_iso()})
+        try:
+            await asyncio.wait_for(asyncio.to_thread(db.reference(ref_path).update, current), timeout=8)
+        except Exception as e:
+            await guarded_interaction_followup_send(interaction, "attendance-cancel", f"❌ ยกเลิกเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
+            return
+        await guarded_interaction_followup_send(interaction, "attendance-cancel", "❌ ยกเลิกเช็คชื่อเรียบร้อยแล้ว", ephemeral=True)
+        activity, participants = await self._load(interaction)
+        await _attendance_refresh_panel(interaction.guild, activity, participants, closed=False)
+
+    async def _list(self, interaction: discord.Interaction):
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        if not interaction.guild:
+            return
+        activity, participants = await self._load(interaction)
+        if not activity:
+            await guarded_interaction_followup_send(interaction, "attendance-list", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
+            return
+        checked = [p for p in participants if p.get("status") == "checked_in"]
+        names = [f"{idx}. {p.get('display_name') or p.get('username') or p.get('user_id')}" for idx, p in enumerate(checked, 1)]
+        if len(names) > 50:
+            names = names[:50] + [f"… และอีก {len(checked)-50} คน"]
+        await guarded_interaction_followup_send(interaction, "attendance-list", embed=discord.Embed(title="📋 รายชื่อผู้เข้าร่วม", description="\n".join(names) if names else "-", color=discord.Color.blurple()), ephemeral=True)
+
+
+async def restore_raid_attendance_views():
+    total = 0
+    for guild in list(bot.guilds):
+        try:
+            data = await asyncio.wait_for(asyncio.to_thread(db.reference(f"raid_attendance/{guild.id}").get), timeout=8)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for activity_id, activity in data.items():
+            if not isinstance(activity, dict):
+                continue
+            if str(activity.get("status")) == "closed":
+                continue
+            try:
+                msg_id = int(activity.get("panel_message_id") or 0)
+            except (TypeError, ValueError):
+                msg_id = 0
+            view = RaidAttendanceView(str(activity_id))
+            try:
+                if msg_id:
+                    bot.add_view(view, message_id=msg_id)
+                else:
+                    bot.add_view(view)
+                total += 1
+            except Exception as e:
+                print(f"⚠️ restore Attendance View failed: {guild.id}/{activity_id}: {e}", flush=True)
+    print(f"✅ restore_raid_attendance_views สำเร็จ ({total} active view(s))", flush=True)
+
+
+@tasks.loop(seconds=30)
+async def attendance_lifecycle_loop():
+    try:
+        root = await asyncio.wait_for(asyncio.to_thread(db.reference("raid_attendance").get), timeout=8)
+    except Exception as e:
+        print(f"⚠️ Attendance lifecycle Firebase read failed: {e}", flush=True)
+        return
+    if not isinstance(root, dict):
+        return
+    now = datetime.now(TZ_THAI)
+    for guild_id, activities in root.items():
+        try:
+            guild = bot.get_guild(int(guild_id))
+        except (TypeError, ValueError):
+            guild = None
+        if guild is None or not isinstance(activities, dict):
+            continue
+        for activity_id, activity in activities.items():
+            if not isinstance(activity, dict):
+                continue
+            status = str(activity.get("status") or "scheduled")
+            if status == "closed":
+                continue
+            open_dt = parse_to_thai_datetime(activity.get("open_at"))
+            close_dt = parse_to_thai_datetime(activity.get("close_at"))
+            if not open_dt or not close_dt:
+                continue
+            if now >= close_dt:
+                await close_raid_activity(guild, str(activity_id), reason="scheduled-close")
+            elif now >= open_dt and status != "open":
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(guild.id, str(activity_id))).update, {"status": "open", "opened_at": _attendance_now_iso()}), timeout=8)
+                except Exception as e:
+                    print(f"⚠️ Attendance open state update failed: {guild.id}/{activity_id}: {e}", flush=True)
+
+
+@tasks.loop(minutes=5)
+async def attendance_monthly_report_loop():
+    now = datetime.now(TZ_THAI)
+    if now.day != 1 or now.hour == 0 and now.minute < 5:
+        return
+    first_this = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_last = first_this - timedelta(seconds=1)
+    month_key = prev_last.strftime("%Y-%m")
+    month_label = prev_last.strftime("%B %Y")
+    for guild in list(bot.guilds):
+        cfg = _attendance_config_snapshot(guild.id)
+        summary_id = cfg.get("summary_channel_id")
+        channel = guild.get_channel(int(summary_id)) if summary_id else None
+        if not isinstance(channel, discord.TextChannel):
+            continue
+        sent_path = f"monthly_reports/{guild.id}/{month_key}"
+        try:
+            state = await asyncio.wait_for(asyncio.to_thread(db.reference(sent_path).get), timeout=8)
+        except Exception:
+            state = None
+        if isinstance(state, dict) and state.get("sent_at"):
+            continue
+        try:
+            activities = await asyncio.wait_for(asyncio.to_thread(db.reference(f"raid_attendance/{guild.id}").get), timeout=8)
+        except Exception as e:
+            print(f"⚠️ Monthly attendance read failed: {guild.name}: {e}", flush=True)
+            continue
+        events = []
+        unique = set()
+        total_checkins = 0
+        if isinstance(activities, dict):
+            for activity_id, activity in activities.items():
+                if not isinstance(activity, dict):
+                    continue
+                created = str(activity.get("created_at") or "")
+                attack_at = str(activity.get("attack_at") or created)
+                if not attack_at.startswith(month_key):
+                    continue
+                participants = activity.get("participants") if isinstance(activity.get("participants"), dict) else {}
+                checked = [p for p in participants.values() if isinstance(p, dict) and p.get("status") == "checked_in"]
+                total_checkins += len(checked)
+                for p in checked:
+                    unique.add(str(p.get("user_id") or ""))
+                events.append({"id": activity_id, "activity": activity, "checked": checked})
+        ranking = {}
+        for event in events:
+            for p in event["checked"]:
+                uid = str(p.get("user_id") or "")
+                if not uid:
+                    continue
+                row = ranking.setdefault(uid, {"name": p.get("display_name") or p.get("username") or uid, "count": 0})
+                row["count"] += 1
+        top = sorted(ranking.values(), key=lambda x: (-x["count"], str(x["name"]).lower()))[:15]
+        enabled = get_enabled_discord_notification_languages() or ["th"]
+        primary = enabled[0]
+        report_text = {
+            "th": f"📅 {month_label}\n⚔️ กิจกรรมทั้งหมด: **{len(events)}**\n👥 สมาชิกที่เข้าร่วม: **{len(unique)} คน**\n✅ เช็กชื่อรวม: **{total_checkins} ครั้ง**\n📈 ค่าเฉลี่ยต่อกิจกรรม: **{(total_checkins/len(events) if events else 0):.1f} คน**",
+            "en": f"📅 {month_label}\n⚔️ Total raids: **{len(events)}**\n👥 Unique members: **{len(unique)}**\n✅ Total check-ins: **{total_checkins}**\n📈 Average per raid: **{(total_checkins/len(events) if events else 0):.1f}**",
+            "ko": f"📅 {month_label}\n⚔️ 전체 레이드: **{len(events)}**\n👥 참여 회원: **{len(unique)}명**\n✅ 총 출석: **{total_checkins}회**\n📈 레이드당 평균: **{(total_checkins/len(events) if events else 0):.1f}명**",
+        }
+        titles = {"th": "📊 Boss Raid Attendance — รายงานประจำเดือน", "en": "📊 Boss Raid Attendance — Monthly Report", "ko": "📊 보스 레이드 출석 — 월간 보고서"}
+        embed = discord.Embed(title=titles[primary], color=discord.Color.gold(), timestamp=now)
+        for lang in enabled:
+            embed.add_field(name={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang], value=report_text[lang], inline=False)
+        rank_lines = [f"{idx}. {r['name']} — **{r['count']}**" for idx, r in enumerate(top, 1)] or ["-"]
+        embed.add_field(name={"th":"🏆 อันดับการเข้าร่วม","en":"🏆 Attendance Ranking","ko":"🏆 출석 순위"}[primary], value="\n".join(rank_lines), inline=False)
+        try:
+            result = await guarded_channel_send(channel, context=f"attendance:monthly:{month_key}", embed=embed, background=True)
+            if result is not None:
+                await asyncio.wait_for(asyncio.to_thread(db.reference(sent_path).set, {
+                    "guild_id": guild.id, "month": month_key, "month_label": month_label,
+                    "activity_count": len(events), "unique_members": len(unique),
+                    "total_checkins": total_checkins, "ranking": top, "sent_at": _attendance_now_iso()
+                }), timeout=8)
+                print(f"📊 Monthly Attendance report sent | guild={guild.name} | month={month_key}", flush=True)
+        except Exception as e:
+            print(f"⚠️ Monthly Attendance report send failed | guild={guild.name}: {e}", flush=True)
+
+
 @bot.tree.command(name="attendance", description="แจ้งเตือนเช็คชื่อบอสพร้อมโค้ดและไอเทมดรอป")
 @app_commands.describe(
     boss_name="ชื่อบอสที่ต้องการเช็คชื่อ",
@@ -7050,7 +7841,21 @@ async def set_live(interaction: discord.Interaction):
     drop_item="ไอเทมที่ดรอป (Drop Item)"
 )
 @has_allowed_role()
-async def attendance_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
+async def attendance_command(interaction: discord.Interaction, boss_name: str, code: Optional[str] = None, drop_item: Optional[str] = None):
+    # Backward-compatible: supplying code + drop_item keeps the original attendance announcement.
+    # Omitting both opens the new Admin/Owner Boss Raid Activity creator.
+    if code is None and drop_item is None:
+        if not interaction.guild or not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
+            await interaction.response.send_message("❌ การสร้างกิจกรรม Attendance อนุญาตเฉพาะ Admin หรือ Server Owner", ephemeral=True)
+            return
+        try:
+            await interaction.response.send_modal(RaidAttendanceCreateModal(boss_name))
+        except Exception as e:
+            print(f"❌ เปิด Activity creation modal ไม่สำเร็จ: {e}", flush=True)
+        return
+    if not code or not drop_item:
+        await interaction.response.send_message("❌ สำหรับการประกาศ Attendance แบบเดิม ต้องระบุทั้ง Code และ Drop Item หรือเว้นทั้งสองช่องเพื่อสร้างกิจกรรมใหม่", ephemeral=True)
+        return
     await _safe_interaction_ack(interaction, ephemeral=False)
     
     await refresh_discord_notification_languages()
