@@ -70,7 +70,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V81_ATTENDANCE_DELETE_REALTIME_FIX_2026-09-09-R1"
+NOTICE_BF_PATCH_VERSION = "V82_ATTENDANCE_MONTHLY_DELETE_FIX_2026-09-09-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -685,6 +685,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <tbody id="attendanceMonthlyBody"><tr><td colspan="4" class="text-center text-muted">-</td></tr></tbody>
                 </table>
             </div>
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-4">
+                <h5 class="text-warning mb-0" data-i18n="attendanceMemberMonthly">👤 สรุปรายสมาชิกสะสมรายเดือน</h5>
+                <select id="attendanceMemberMonthSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">
+                    <option value="all" data-i18n="attendanceAllMonths">ทุกเดือน</option>
+                </select>
+            </div>
+            <div class="table-responsive mt-2">
+                <table class="table table-dark table-hover align-middle attendance-table mb-0">
+                    <thead><tr>
+                        <th>#</th>
+                        <th data-i18n="attendanceMemberName">สมาชิก</th>
+                        <th data-i18n="attendanceMemberCount">จำนวนเข้าร่วม</th>
+                        <th data-i18n="attendanceMemberRaids">จำนวนกิจกรรม</th>
+                        <th data-i18n="attendanceLastCheckin">เช็คชื่อล่าสุด</th>
+                    </tr></thead>
+                    <tbody id="attendanceMemberMonthlyBody"><tr><td colspan="5" class="text-center text-muted">-</td></tr></tbody>
+                </table>
+            </div>
             </div>
         </div>
 
@@ -937,7 +955,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 attendanceSubtitle: "เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord",
                 attendanceRealtime: "🟢 Real-time",
                 attendanceTotalRaids: "กิจกรรมทั้งหมด", attendanceUniqueMembers: "สมาชิกที่เข้าร่วม", attendanceTotalCheckins: "เช็คชื่อรวม",
-                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน",
+                attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน", attendanceMemberMonthly: "👤 สรุปรายสมาชิกสะสมรายเดือน", attendanceAllMonths: "ทุกเดือน", attendanceMemberName: "สมาชิก", attendanceMemberCount: "จำนวนเข้าร่วม", attendanceMemberRaids: "จำนวนกิจกรรม", attendanceLastCheckin: "เช็คชื่อล่าสุด",
                 attendanceBoss: "บอส", attendanceDate: "วันที่", attendanceAttackTime: "เวลาโจมตี", attendanceOpenClose: "เปิด–ปิด",
                 attendanceCount: "ผู้เข้าร่วม", attendanceCreatedBy: "สร้างโดย", attendanceStatus: "สถานะ", attendanceMonth: "เดือน",
                 attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ", attendanceCollapseOpen: "▼ เปิด", attendanceCollapseClose: "▲ ปิด",
@@ -1047,7 +1065,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 attendanceSubtitle: "Real-time boss raid check-in from Discord",
                 attendanceRealtime: "🟢 Realtime",
                 attendanceTotalRaids: "Total Raids", attendanceUniqueMembers: "Unique Members", attendanceTotalCheckins: "Total Check-ins",
-                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports",
+                attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports", attendanceMemberMonthly: "👤 Monthly Member Totals", attendanceAllMonths: "All months", attendanceMemberName: "Member", attendanceMemberCount: "Check-ins", attendanceMemberRaids: "Raids", attendanceLastCheckin: "Last Check-in",
                 attendanceBoss: "Boss", attendanceDate: "Date", attendanceAttackTime: "Attack Time", attendanceOpenClose: "Open–Close",
                 attendanceCount: "Participants", attendanceCreatedBy: "Created By", attendanceStatus: "Status", attendanceMonth: "Month",
                 attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins", attendanceCollapseOpen: "▼ Open", attendanceCollapseClose: "▲ Close",
@@ -1157,7 +1175,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 attendanceSubtitle: "Discord에서 실시간 보스 레이드 출석 확인",
                 attendanceRealtime: "🟢 실시간",
                 attendanceTotalRaids: "전체 활동", attendanceUniqueMembers: "참여 회원", attendanceTotalCheckins: "총 출석",
-                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서",
+                attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서", attendanceMemberMonthly: "👤 월별 회원 누적", attendanceAllMonths: "전체 월", attendanceMemberName: "회원", attendanceMemberCount: "참여 횟수", attendanceMemberRaids: "활동 수", attendanceLastCheckin: "최근 출석",
                 attendanceBoss: "보스", attendanceDate: "날짜", attendanceAttackTime: "공격 시간", attendanceOpenClose: "시작–마감",
                 attendanceCount: "참여자", attendanceCreatedBy: "생성자", attendanceStatus: "상태", attendanceMonth: "월",
                 attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석", attendanceCollapseOpen: "▼ 열기", attendanceCollapseClose: "▲ 닫기",
@@ -1774,52 +1792,90 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         function renderAttendanceDashboard(rootData) {
             try {
                 const all = [];
-                const now = new Date();
+                const monthlyMembers = {};
+                const nowMs = Date.now();
+                const unique = new Set();
+                let totalCheckins = 0;
                 Object.entries(rootData || {}).forEach(([guildId, acts]) => {
                     if (!acts || typeof acts !== 'object') return;
                     Object.entries(acts).forEach(([activityId, a]) => {
                         if (!a || typeof a !== 'object') return;
                         const participants = a.participants && typeof a.participants === 'object' ? Object.values(a.participants) : [];
                         const checked = participants.filter(p => p && p.status === 'checked_in');
-                        all.push({ guildId, activityId, a, checked });
+                        const attackAt = String(a.attack_at || a.created_at || '');
+                        const monthKey = /^[0-9]{4}-[0-9]{2}/.test(attackAt) ? attackAt.slice(0,7) : '';
+                        all.push({ guildId, activityId, a, checked, attackMs: Date.parse(attackAt) || 0, monthKey });
+                        checked.forEach(p => {
+                            totalCheckins++;
+                            const uid=String(p.user_id||'');
+                            if(uid) unique.add(uid);
+                            if(!uid || !monthKey) return;
+                            const bucket = monthlyMembers[monthKey] || (monthlyMembers[monthKey]={});
+                            const row = bucket[uid] || (bucket[uid]={uid, name:p.display_name||p.username||uid, checkins:0, raids:0, lastCheckin:''});
+                            row.checkins += 1;
+                            row.raids += 1;
+                            const checkedAt=String(p.checked_in_at||'');
+                            if(checkedAt && (!row.lastCheckin || checkedAt > row.lastCheckin)) row.lastCheckin=checkedAt;
+                        });
                     });
                 });
-                all.sort((x,y) => String(x.a.attack_at||x.a.created_at||'').localeCompare(String(y.a.attack_at||y.a.created_at||'')));
-                const current = all.filter(x => x.a.status !== 'closed').sort((x,y)=>String(x.a.attack_at||'').localeCompare(String(y.a.attack_at||'')));
-                const history = all.filter(x => x.a.status === 'closed').reverse().slice(0, 50);
-                const totalRaids = all.length;
-                const unique = new Set();
-                let totalCheckins = 0;
-                all.forEach(x => x.checked.forEach(p => { if (p && p.user_id) unique.add(String(p.user_id)); totalCheckins++; }));
-                document.getElementById('attendanceTotalRaidsCount').innerText = totalRaids;
+                all.sort((x,y)=>(x.attackMs||0)-(y.attackMs||0));
+                document.getElementById('attendanceTotalRaidsCount').innerText = all.length;
                 document.getElementById('attendanceUniqueMembersCount').innerText = unique.size;
                 document.getElementById('attendanceTotalCheckinsCount').innerText = totalCheckins;
 
+                const current = all.filter(x => x.a.status !== 'closed');
+                const history = all.filter(x => x.a.status === 'closed').slice().reverse().slice(0,100);
                 const currentBody = document.getElementById('attendanceCurrentBody');
                 currentBody.innerHTML = current.length ? current.map(x => {
                     const a=x.a; const status=a.status==='open' ? (currentLang==='ko'?'진행 중':currentLang==='en'?'OPEN':'เปิด') : (currentLang==='ko'?'예정':currentLang==='en'?'SCHEDULED':'กำหนดการ');
                     return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${escapeHtml(String(a.checkin_open||'-'))} – ${escapeHtml(String(a.checkin_close||'-'))}</td><td>${x.checked.length}</td><td>${status}</td></tr>`;
-                }).join('') : `<tr><td colspan="6" class="text-center text-muted">-</td></tr>`;
-
+                }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
                 const historyBody = document.getElementById('attendanceHistoryBody');
                 historyBody.innerHTML = history.length ? history.map(x => {
                     const a=x.a;
-                    return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${x.checked.length}</td><td>${escapeHtml(String(a.created_by_name||'-'))}</td><td>${currentLang==='ko'?'마감':currentLang==='en'?'CLOSED':'ปิดแล้ว'}</td></tr>`;
-                }).join('') : `<tr><td colspan="6" class="text-center text-muted">-</td></tr>`;
+                    return `<tr><td class="fw-bold text-warning">${escapeHtml(String(a.boss_name||'-'))}</td><td>${escapeHtml(String(a.activity_date||'-'))}</td><td>${escapeHtml(String(a.attack_time||'-'))}</td><td>${x.checked.length}</td><td>${escapeHtml(String(a.created_by_name||a.created_by||'-'))}</td><td>${currentLang==='ko'?'마감':currentLang==='en'?'CLOSED':'ปิดแล้ว'}</td></tr>`;
+                }).join('') : '<tr><td colspan="6" class="text-center text-muted">-</td></tr>';
 
-                const monthlyMap = {};
-                all.forEach(x => {
-                    const raw = String(x.a.attack_at || x.a.created_at || '');
-                    const m = raw.slice(0,7);
-                    if (!/^[0-9]{4}-[0-9]{2}$/.test(m)) return;
-                    if (!monthlyMap[m]) monthlyMap[m] = {raids:0,members:new Set(),checks:0};
-                    monthlyMap[m].raids++;
-                    x.checked.forEach(p=>{monthlyMap[m].checks++; if(p && p.user_id) monthlyMap[m].members.add(String(p.user_id));});
-                });
-                const months = Object.keys(monthlyMap).sort().reverse().slice(0,12);
-                const monthBody = document.getElementById('attendanceMonthlyBody');
-                monthBody.innerHTML = months.length ? months.map(m=>`<tr><td>${m}</td><td>${monthlyMap[m].raids}</td><td>${monthlyMap[m].members.size}</td><td>${monthlyMap[m].checks}</td></tr>`).join('') : `<tr><td colspan="4" class="text-center text-muted">-</td></tr>`;
+                const months = Object.keys(monthlyMembers).sort().reverse();
+                const monthlyBody = document.getElementById('attendanceMonthlyBody');
+                monthlyBody.innerHTML = months.length ? months.map(m => {
+                    const members = Object.values(monthlyMembers[m]);
+                    const raids = all.filter(x => x.monthKey === m).length;
+                    const checks = members.reduce((n,row)=>n+row.checkins,0);
+                    return `<tr><td>${m}</td><td>${raids}</td><td>${members.length}</td><td>${checks}</td></tr>`;
+                }).join('') : '<tr><td colspan="4" class="text-center text-muted">-</td></tr>';
+
+                const monthSelect = document.getElementById('attendanceMemberMonthSelect');
+                const oldValue = monthSelect ? monthSelect.value : 'all';
+                if (monthSelect) {
+                    monthSelect.innerHTML = `<option value="all">${escapeHtml(TRANSLATIONS[currentLang].attendanceAllMonths || 'All months')}</option>` + months.map(m => `<option value="${m}">${m}</option>`).join('');
+                    monthSelect.value = (oldValue === 'all' || months.includes(oldValue)) ? oldValue : 'all';
+                }
+                window.__SKYNET_ATTENDANCE_MONTHLY_MEMBERS__ = monthlyMembers;
+                renderAttendanceMemberMonthly(monthSelect ? monthSelect.value : 'all');
             } catch (e) { console.warn('[SKYNET] attendance dashboard render:', e); }
+        }
+
+        function renderAttendanceMemberMonthly(selectedMonth='all') {
+            const body=document.getElementById('attendanceMemberMonthlyBody');
+            if(!body) return;
+            const source=window.__SKYNET_ATTENDANCE_MONTHLY_MEMBERS__ || {};
+            const merged={};
+            const buckets=selectedMonth==='all' ? Object.values(source) : [source[selectedMonth] || {}];
+            buckets.forEach(bucket => Object.values(bucket).forEach(row => {
+                const uid=String(row.uid||'');
+                if(!uid) return;
+                const out=merged[uid] || (merged[uid]={uid,name:row.name||uid,checkins:0,raids:0,lastCheckin:''});
+                out.checkins += Number(row.checkins||0);
+                out.raids += Number(row.raids||0);
+                if(row.lastCheckin && (!out.lastCheckin || row.lastCheckin > out.lastCheckin)) out.lastCheckin=row.lastCheckin;
+            }));
+            const rows=Object.values(merged).sort((a,b)=>b.checkins-a.checkins || String(a.name).localeCompare(String(b.name)));
+            body.innerHTML=rows.length ? rows.map((r,i)=>{
+                const last=r.lastCheckin ? new Date(r.lastCheckin).toLocaleString('th-TH',{hour12:false}) : '-';
+                return `<tr><td>${i+1}</td><td>${escapeHtml(r.name)}</td><td><strong>${r.checkins}</strong></td><td>${r.raids}</td><td>${escapeHtml(last)}</td></tr>`;
+            }).join('') : '<tr><td colspan="5" class="text-center text-muted">-</td></tr>';
         }
 
         function escapeHtml(value) {
@@ -1844,7 +1900,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     err.status = response.status;
                     throw err;
                 }
-                renderAttendanceDashboard(result.raid_attendance || {});
+                window.__SKYNET_ATTENDANCE_ROOT__ = result.raid_attendance || {};
+                renderAttendanceDashboard(window.__SKYNET_ATTENDANCE_ROOT__);
                 window.__SKYNET_MONTHLY_REPORTS__ = result.monthly_reports || {};
                 const status = document.getElementById('attendanceRealtimeStatus');
                 if (status) {
@@ -1865,6 +1922,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 attendanceRealtimeBusy = false;
             }
         }
+
+        document.getElementById('attendanceMemberMonthSelect')?.addEventListener('change', (e) => {
+            renderAttendanceMemberMonthly(e.target.value || 'all');
+        });
 
         function stopAttendanceRealtimeListener(){
             if (attendanceRealtimeTimer) {
@@ -2143,6 +2204,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
             const result = await response.json().catch(() => ({}));
             if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
+            const resolvedName = result.bossName || bossName;
+            delete activeBosses[resolvedName];
+            delete activeBosses[bossName];
+            renderTable();
+            console.log(`✅ Dashboard boss deleted: ${resolvedName}`);
         }
 
         document.getElementById('clearAllBtn').addEventListener('click', async () => {
@@ -2486,13 +2552,24 @@ def delete_boss_api():
         boss_name = str(payload.get('bossName') or '').strip()
         if not boss_name:
             return _api_json({'success': False, 'error': 'Boss name is required'}), 400
+        # Do not depend on the in-memory boss_schedule cache here. A Firebase SSE listener can
+        # temporarily disconnect (for example SSL EOF) while the REST/Admin SDK remains usable.
+        # Read the authoritative root and resolve the exact Firebase key before deleting.
+        root = None
+        try:
+            root = db.reference('boss_schedule').get() or {}
+        except Exception as read_exc:
+            print(f"⚠️ DASHBOARD DELETE READ FAILED | boss={boss_name} | {read_exc}", flush=True)
+            raise
         matched_key = None
-        with schedule_lock:
-            for key in boss_schedule.keys():
+        if isinstance(root, dict):
+            for key in root.keys():
                 if str(key).casefold() == boss_name.casefold():
                     matched_key = key
                     break
-        target_key = matched_key or boss_name
+        if matched_key is None:
+            return _api_json({'success': False, 'error': f'ไม่พบบอส `{boss_name}` ใน boss_schedule'}), 404
+        target_key = matched_key
         print(f"🗑️ DASHBOARD DELETE REQUEST | boss={target_key} | uid={uid}", flush=True)
         db.reference(f'boss_schedule/{target_key}').delete()
         with schedule_lock:
