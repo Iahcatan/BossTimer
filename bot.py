@@ -70,7 +70,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V78_BOSS_RAID_ATTENDANCE_2026-09-09-R1"
+NOTICE_BF_PATCH_VERSION = "V81_ATTENDANCE_DELETE_REALTIME_FIX_2026-09-09-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -1253,7 +1253,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         function makeUserKey(username) {
-            return username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
+            return username.toLowerCase().replace(new RegExp("[.#$\\x5B\\x5D/]", "g"), "_");
         }
 
         function usernameToAuthEmail(username) {
@@ -1330,6 +1330,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             } catch(err) { console.warn('Session logout update error:',err); }
             if (signOutAuth) { try { await auth.signOut(); } catch(err) {} }
             ['logged_user','logged_user_key','logged_session_id','logged_role'].forEach(k=>localStorage.removeItem(k));
+            stopAttendanceRealtimeListener();
             currentSessionId=null; currentUserKey=null; currentUserData=null;
         }
 
@@ -1721,6 +1722,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         let userNameCache = {};
         let attendanceRealtimeListenerAttached = false;
+        let attendanceRealtimeTimer = null;
+        let attendanceRealtimeBusy = false;
+        let attendanceRealtimeUnauthorized = false;
         usersRef.on('value', (snapshot) => {
             const users = snapshot.val() || {};
             userNameCache = {};
@@ -1807,7 +1811,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 all.forEach(x => {
                     const raw = String(x.a.attack_at || x.a.created_at || '');
                     const m = raw.slice(0,7);
-                    if (!/^\d{4}-\d{2}$/.test(m)) return;
+                    if (!/^[0-9]{4}-[0-9]{2}$/.test(m)) return;
                     if (!monthlyMap[m]) monthlyMap[m] = {raids:0,members:new Set(),checks:0};
                     monthlyMap[m].raids++;
                     x.checked.forEach(p=>{monthlyMap[m].checks++; if(p && p.user_id) monthlyMap[m].members.add(String(p.user_id));});
@@ -1822,27 +1826,61 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return String(value).replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
         }
 
-        function startAttendanceRealtimeListener(){
-            if (attendanceRealtimeListenerAttached || !auth.currentUser) return;
-            attendanceRealtimeListenerAttached = true;
-            raidAttendanceRef.on('value', snap => {
-                renderAttendanceDashboard(snap.val() || {});
+        async function fetchAttendanceServerSnapshot(){
+            if (!auth.currentUser || attendanceRealtimeUnauthorized) return;
+            if (attendanceRealtimeBusy) return;
+            attendanceRealtimeBusy = true;
+            try {
+                const idToken = await auth.currentUser.getIdToken(false);
+                const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+                const response = await fetch(`${apiOrigin}/api/attendance-data`, {
+                    method: 'GET',
+                    headers: { 'Authorization': `Bearer ${idToken}` },
+                    cache: 'no-store'
+                });
+                const result = await response.json().catch(() => ({}));
+                if (!response.ok || !result.success) {
+                    const err = new Error(result.error || `HTTP ${response.status}`);
+                    err.status = response.status;
+                    throw err;
+                }
+                renderAttendanceDashboard(result.raid_attendance || {});
+                window.__SKYNET_MONTHLY_REPORTS__ = result.monthly_reports || {};
                 const status = document.getElementById('attendanceRealtimeStatus');
                 if (status) {
                     status.className = 'badge bg-success status-badge';
-                    status.textContent = TRANSLATIONS[currentLang].attendanceRealtime || '🟢 Realtime';
+                    status.textContent = TRANSLATIONS[currentLang].attendanceRealtime || '🟢 Real-time';
+                    status.title = 'Server-authoritative sync';
                 }
-            }, err => {
-                console.error('[SKYNET] Attendance realtime listener:', err);
+                attendanceRealtimeUnauthorized = false;
+            } catch (err) {
+                console.error('[SKYNET] Attendance server sync:', err);
                 const status = document.getElementById('attendanceRealtimeStatus');
                 if (status) {
                     status.className = 'badge bg-danger status-badge';
-                    status.textContent = '🔴 Attendance Sync Error';
+                    status.textContent = err.status === 401 || err.status === 403 ? '🔐 Attendance Auth Error' : '🔴 Attendance Sync Error';
                 }
-            });
-            monthlyReportsRef.on('value', snap => {
-                window.__SKYNET_MONTHLY_REPORTS__ = snap.val() || {};
-            }, err => console.warn('[SKYNET] Monthly report listener:', err));
+                if (err.status === 401 || err.status === 403) attendanceRealtimeUnauthorized = true;
+            } finally {
+                attendanceRealtimeBusy = false;
+            }
+        }
+
+        function stopAttendanceRealtimeListener(){
+            if (attendanceRealtimeTimer) {
+                clearInterval(attendanceRealtimeTimer);
+                attendanceRealtimeTimer = null;
+            }
+            attendanceRealtimeListenerAttached = false;
+            attendanceRealtimeBusy = false;
+        }
+
+        function startAttendanceRealtimeListener(){
+            if (attendanceRealtimeListenerAttached || !auth.currentUser) return;
+            attendanceRealtimeListenerAttached = true;
+            attendanceRealtimeUnauthorized = false;
+            fetchAttendanceServerSnapshot();
+            attendanceRealtimeTimer = setInterval(fetchAttendanceServerSnapshot, 2000);
         }
 
         function toggleAttendancePanel(forceOpen=null) {
@@ -2040,7 +2078,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const raw = (dateStr || '').trim();
             const now = new Date();
             if (!raw) return { year: now.getFullYear(), month: now.getMonth()+1, day: now.getDate() };
-            const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            const m = raw.match(new RegExp("^([0-9]{1,2})/([0-9]{1,2})/([0-9]{4})$"));
             if (!m) return null;
             const day = parseInt(m[1],10), month = parseInt(m[2],10), year = parseInt(m[3],10);
             const test = new Date(year, month-1, day);
@@ -2133,7 +2171,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 
                 tr.innerHTML = `
                     <td class="fw-bold text-warning">${bossName}</td>
-                    <td>${(data.killDate || new Date(data.killTimeMs).toLocaleDateString('th-TH')).replace(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, '$1/$2/$3')}</td>
+                    <td>${(data.killDate || new Date(data.killTimeMs).toLocaleDateString('th-TH')).replace(new RegExp('^([0-9]{1,2})/([0-9]{1,2})/([0-9]{4})$'), '$1/$2/$3')}</td>
                     <td>${killTimeStr}</td>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
@@ -2356,6 +2394,65 @@ def firebase_config_js():
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
     return response
+
+
+
+@app.route('/api/attendance-data', methods=['GET', 'OPTIONS'])
+def attendance_data_api():
+    """Server-authoritative Attendance snapshot for Dashboard.
+
+    The standalone GitHub Pages dashboard must not depend on Firebase Web SDK
+    read rules for raid_attendance. The bot already has Admin SDK access, so
+    this endpoint returns the same data after verifying the Firebase ID token.
+    The browser polls this endpoint every 2 seconds to provide near-real-time
+    updates without changing the existing raid_attendance schema or rules.
+    """
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        origin = request.headers.get('Origin', '')
+        allowed = {
+            'https://iahcatan.github.io',
+            'https://bosstimer-ry18.onrender.com',
+            'http://localhost:5000',
+        }
+        response.headers['Access-Control-Allow-Origin'] = origin if origin in allowed else 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Type'
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    if request.method == 'OPTIONS':
+        response = _api_json({'success': True})
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
+
+    try:
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict) or profile.get('status') != 'approved':
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
+
+        root = db.reference('raid_attendance').get() or {}
+        reports = db.reference('monthly_reports').get() or {}
+        if not isinstance(root, dict):
+            root = {}
+        if not isinstance(reports, dict):
+            reports = {}
+        return _api_json({'success': True, 'raid_attendance': root, 'monthly_reports': reports, 'server_time': datetime.now(TZ_THAI).isoformat()})
+    except Exception as exc:
+        print(f"❌ /api/attendance-data failed: {exc}", flush=True)
+        traceback.print_exc()
+        return _api_json({'success': False, 'error': str(exc)}), 500
 
 
 @app.route('/api/delete-boss', methods=['POST', 'OPTIONS'])
