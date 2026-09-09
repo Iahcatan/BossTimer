@@ -387,10 +387,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .attendance-status-closed { color: #94a3b8; }
         .attendance-table td, .attendance-table th { white-space: nowrap; }
     </style>
-<style>
-.skynet-logo{width:52px;height:52px;object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,.25);box-shadow:0 4px 16px rgba(0,0,0,.35)}
-@media(max-width:576px){.skynet-logo{width:42px;height:42px}}
-</style>
 </head>
 <body>
     <div id="authContainer" class="container py-5" style="max-width: 450px;">
@@ -431,10 +427,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             <label class="form-check-label text-white" for="rememberMe" data-i18n="rememberMe">จำชื่อผู้ใช้</label>
                         </div>
                         <button type="submit" class="btn btn-primary w-100 fw-bold" data-i18n="btnLogin">🔑 เข้าสู่ระบบ</button>
-                        <div class="alert alert-dark border-danger mt-3 mb-0 py-2 small">
-                            🛡️ <strong>Admin Login</strong> — ใช้ Username/Password ของบัญชี Admin ที่สร้างใน Firebase Authentication<br>
-                            <span class="text-white-50">บัญชี Admin ต้องมี users/&lt;UID&gt; → role = admin และ status = approved</span>
-                        </div>
+                        <div id="loginDebug" class="small text-info mt-2" style="min-height:1.2em"></div>
                     </form>
                 </div>
 
@@ -461,10 +454,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <div id="mainDashboard" class="container py-4" style="display: none;">
         <div class="d-flex flex-wrap justify-content-between align-items-center mb-3 gap-2">
-            <h2 data-i18n="title" class="d-flex align-items-center gap-2">
-                <img src="https://img2.pic.in.th/85cf3cd7-b2ad-4a9d-a2a2-d94ec53dd4c3.jpeg" alt="SKYNET Logo" class="skynet-logo" onerror="this.style.display='none'">
-                <span>Boss Timer Dashboard</span>
-            </h2>
+            <h2 data-i18n="title">⚔️ Boss Timer Dashboard</h2>
             <div class="d-flex align-items-center gap-2">
                 <span class="badge bg-success status-badge" id="syncStatus" data-i18n="online">🟢 Realtime Sync Active</span>
                 <span class="badge bg-info text-dark status-badge" id="userBadge">👤 User</span>
@@ -512,11 +502,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
                 <div>
                     <h4 class="card-title text-danger mb-1" data-i18n="adminPanelTitle">🛡️ Admin • จัดการผู้ใช้งาน</h4>
-                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติ / Ban / Unban อยู่ในตารางด้านล่าง</small>
+                    <small class="text-white-50" data-i18n="adminPanelSubtitle">อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • 🟢 ออนไลน์ = มี heartbeat ภายใน 90 วินาที • ปุ่มอนุมัติอยู่ในตารางด้านล่าง</small>
+                    <div id="adminDataStatus" class="small text-white-50 mt-1">กำลังตรวจสอบข้อมูลผู้ใช้งาน...</div>
                 </div>
-                <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-outline-info btn-sm" onclick="loadAdminUsers()" data-i18n="adminRefresh">🔄 รีเฟรช</button>
+                    <button id="adminCollapseBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleAdminPanel()">▼ เปิด</button>
+                </div>
             </div>
 
+            <div id="adminPanelContent" style="display:none;">
             <div class="row g-3 mb-3">
                 <div class="col-md-4">
                     <div class="card p-3 h-100">
@@ -553,6 +548,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </thead>
                     <tbody id="adminUsersBody"></tbody>
                 </table>
+            </div>
             </div>
         </div>
 
@@ -599,6 +595,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <thead>
                         <tr>
                             <th data-i18n="thBoss">ชื่อบอส</th>
+                            <th>วันที่ตาย</th>
                             <th data-i18n="thKillTime">เวลาตาย (24 ชม.)</th>
                             <th data-i18n="thSpawnTime">เวลาเกิด (24 ชม.)</th>
                             <th data-i18n="thCountdown">นับถอยหลัง</th>
@@ -619,9 +616,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <h4 class="card-title text-warning mb-1" data-i18n="attendanceTitle">⚔️ Boss Raid Attendance</h4>
                     <small class="text-white-50" data-i18n="attendanceSubtitle">เช็คชื่อกิจกรรมโจมตีบอสแบบ Real-time จาก Discord</small>
                 </div>
-                <span class="badge bg-success status-badge" id="attendanceRealtimeStatus" data-i18n="attendanceRealtime">🟢 Realtime</span>
+                <div class="d-flex align-items-center gap-2">
+                    <span class="badge bg-success status-badge" id="attendanceRealtimeStatus" data-i18n="attendanceRealtime">🟢 Realtime</span>
+                    <button id="attendanceCollapseBtn" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendancePanel()">▼ เปิด</button>
+                </div>
             </div>
-
+            <div id="attendancePanelContent" style="display:none;">
             <div class="row g-3 mb-3">
                 <div class="col-md-4">
                     <div class="card p-3 attendance-stat h-100">
@@ -685,6 +685,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <tbody id="attendanceMonthlyBody"><tr><td colspan="4" class="text-center text-muted">-</td></tr></tbody>
                 </table>
             </div>
+            </div>
         </div>
 
         <footer class="text-center text-white mt-4">
@@ -744,25 +745,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- V8: GitHub Pages loads the authoritative Firebase Web config from Render.
+         Render reads FIREBASE_WEB_CONFIG_JSON, including the real apiKey.
+         The script tag is intentionally before Firebase initialization so the config
+         is available before signInWithEmailAndPassword() can ever run. -->
+    <script src="https://bosstimer-ry18.onrender.com/api/firebase-config.js"></script>
     <script>
-        // --- 1. ตั้งค่า FIREBASE CONFIG ---
-        const firebaseConfig = Object.assign({
-            apiKey: "AIzaSyC8-3NepDusElsH90Hp8mEUqVAFuWby094",
-            authDomain: "skynet-3ad44.firebaseapp.com",
-            databaseURL: "https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app",
-            projectId: "skynet-3ad44",
-            storageBucket: "skynet-3ad44.firebasestorage.app",
-            messagingSenderId: "7120270934",
-            appId: "1:7120270934:web:5e3db3f5dae6542352adf7",
-            measurementId: "G-N8QER5X9BN"
-        }, {{ firebase_web_config_json|safe }});
-
-        // ตรวจว่ามี Web App config จริงก่อนเริ่ม Firebase Authentication
-        if (firebaseConfig.apiKey.includes('PASTE_YOUR_') || firebaseConfig.authDomain.includes('PASTE_YOUR_') || firebaseConfig.projectId.includes('PASTE_YOUR_') || firebaseConfig.appId.includes('PASTE_YOUR_')) {
-            console.warn('Firebase Authentication ยังไม่ได้ตั้งค่า Web App config ใน firebaseConfig');
+        (function bootstrapSkynetDashboard() {
+        // --- V8: FIREBASE CONFIG FROM RENDER ---
+        // Do NOT hard-code an API key in GitHub Pages. Render is the source of truth.
+        const firebaseConfig = window.SKYNET_FIREBASE_CONFIG || {};
+        const requiredFirebaseFields = ['apiKey','authDomain','databaseURL','projectId','storageBucket','messagingSenderId','appId'];
+        const missingFirebaseFields = requiredFirebaseFields.filter(k => !firebaseConfig[k]);
+        if (missingFirebaseFields.length) {
+            console.error('[SKYNET V8] Missing Firebase Web config:', missingFirebaseFields);
+            const bootError = document.getElementById('loginDebug');
+            if (bootError) {
+                bootError.style.display = 'block';
+                bootError.textContent = '❌ Firebase Config จาก Render ไม่ครบ: ' + missingFirebaseFields.join(', ') +
+                    '\n\nตรวจ Render Environment Variable: FIREBASE_WEB_CONFIG_JSON';
+            }
+            throw new Error('FIREBASE_WEB_CONFIG_MISSING:' + missingFirebaseFields.join(','));
         }
 
-        // Initialize Firebase
+        if (firebaseConfig.projectId !== 'skynet-3ad44') {
+            console.error('[SKYNET V8] Wrong Firebase project:', firebaseConfig.projectId);
+            throw new Error('FIREBASE_WRONG_PROJECT:' + firebaseConfig.projectId);
+        }
+
+        // Initialize Firebase only after the authoritative Render config is loaded.
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
         const auth = firebase.auth();
@@ -770,12 +781,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const usersRef = db.ref('users');
         const settingsRef = db.ref('app_settings');
         const botSettingsRef = db.ref('bot_settings'); // เพิ่ม Reference สำหรับการตั้งค่าบอท
-        // API is hosted on Render while this Dashboard can be served by GitHub Pages.
-        // Override with window.SKYNET_API_ORIGIN only when deploying the backend elsewhere.
-        window.SKYNET_API_ORIGIN = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
         const sessionsRef = db.ref('dashboard_sessions');
         const raidAttendanceRef = db.ref('raid_attendance');
         const monthlyReportsRef = db.ref('monthly_reports');
+
+        // V5: bounded Firebase operations so the Login button can never remain stuck on loading.
+        function withTimeout(promise, ms, label) {
+            let timer;
+            const timeout = new Promise((_, reject) => {
+                timer = setTimeout(() => {
+                    const err = new Error(label || 'TIMEOUT');
+                    err.code = 'SKYNET_TIMEOUT';
+                    reject(err);
+                }, ms);
+            });
+            return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+        }
 
         // 🔐 Admin account
         // บัญชี Admin ต้องสร้างใน Firebase Authentication ก่อน แล้วกำหนด
@@ -797,10 +818,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         // ดึงการตั้งค่า Bot Settings ภาษาการแจ้งเตือน
         botSettingsRef.on('value', (snap) => {
             const data = snap.val() || {};
-            // ถ้าค่ายังไม่ถูกตั้งใน Database จะให้เปิดเป็น True เป็นค่าพื้นฐาน
-            document.getElementById('ttsThToggle').checked = data.tts_th_enabled !== false; 
-            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled !== false;
-            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled !== false;
+            // Firebase is authoritative. Missing values remain OFF until explicitly enabled.
+            document.getElementById('ttsThToggle').checked = data.tts_th_enabled === true;
+            document.getElementById('ttsEnToggle').checked = data.tts_en_enabled === true;
+            document.getElementById('ttsKoToggle').checked = data.tts_ko_enabled === true;
             document.getElementById('discordThToggle').checked = data.discord_notify_th_enabled !== false;
             document.getElementById('discordEnToggle').checked = data.discord_notify_en_enabled !== false;
             document.getElementById('discordKoToggle').checked = data.discord_notify_ko_enabled !== false;
@@ -868,10 +889,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 phBoss: "พิมพ์เพื่อค้นหา หรือคลิกเลือก...",
                 labelKillTime: "เวลาที่ตาย (ระบบ 24 ชม.)",
                 labelKillDate: "วันที่(วัน/เดือน/ปี)",
-                labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
                 phKillDate: "เช่น 08/09/2026",
-                phKillTime: "เช่น 17:30 หรือ 1730",
                 hintKillDate: "*เว้นว่างไว้หากใช้วันที่ปัจจุบัน",
+                labelSpTime: "เพิ่มเวลาพิเศษ (นาที)",
+                phKillTime: "เช่น 17:30 หรือ 1730",
                 hintKillTime: "*เว้นว่างไว้หากใช้เวลาปัจจุบัน",
                 labelNotice: "แจ้งเตือนล่วงหน้า (นาที)",
                 btnSave: "⚔️ บันทึกเวลา",
@@ -892,7 +913,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 secUnit: "วินาที",
                 footer: "ระบบคำนวณเวลานับถอยหลังบอส Real-time • ข้อมูลบันทึกและซิงค์ผ่าน Cloud อัตโนมัติ",
                 invalidTimeAlert: "กรุณากรอกเวลาให้ถูกต้องตามระบบ 24 ชั่วโมง (เช่น 08:30 หรือ 17:45)",
-                invalidDateAlert: "กรุณากรอกวันที่ให้ถูกต้องในรูปแบบ วัน/เดือน/ปี เช่น 08/09/2026",
                 confirmClear: "คุณต้องการล้างตารางบอสทั้งหมดใช่หรือไม่?",
                 notifyReadyTitle: "⚔️ ระบบแจ้งเตือนพร้อมทำงาน",
                 notifyReadyBody: "จะมีการแจ้งเตือนเมื่อบอสใกล้เกิดและเมื่อบอสเกิดแล้ว",
@@ -901,7 +921,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 errRegCodeInvalid: "โค้ดสำหรับสมัครไม่ถูกต้อง!",
                 errUserExists: "ชื่อผู้ใช้นี้ถูกลงทะเบียนไปแล้ว!",
                 regSuccess: "ลงทะเบียนสำเร็จ! กรุณาเข้าสู่ระบบ",
-                errLoginFailed: "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง!",
+                errLoginFailed: "เข้าสู่ระบบไม่สำเร็จ",
                 codeChangedSuccess: "เปลี่ยนโค้ดสำหรับสมัครเรียบร้อยแล้ว!",
                 spawnNotifyTitle: "⚔️ {boss} เกิดแล้ว!",
                 spawnNotifyBody: "บอส {boss} ได้เกิดแล้วในขณะนี้",
@@ -920,9 +940,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 attendanceCurrent: "กิจกรรมปัจจุบัน / ที่กำลังจะเริ่ม", attendanceHistory: "ประวัติย้อนหลัง", attendanceMonthly: "📊 รายงานประจำเดือน",
                 attendanceBoss: "บอส", attendanceDate: "วันที่", attendanceAttackTime: "เวลาโจมตี", attendanceOpenClose: "เปิด–ปิด",
                 attendanceCount: "ผู้เข้าร่วม", attendanceCreatedBy: "สร้างโดย", attendanceStatus: "สถานะ", attendanceMonth: "เดือน",
-                attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ",
+                attendanceRaids: "กิจกรรม", attendanceMembers: "สมาชิก", attendanceChecks: "เช็คชื่อ", attendanceCollapseOpen: "▼ เปิด", attendanceCollapseClose: "▲ ปิด",
                 adminPanelTitle: "🛡️ Admin • จัดการผู้ใช้งาน",
-                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติ / Ban / Unban อยู่ในตารางด้านล่าง",
+                adminPanelSubtitle: "อนุมัติผู้สมัคร ตรวจสอบประวัติ และดูผู้ที่กำลังใช้งาน • ปุ่มอนุมัติอยู่ในตารางด้านล่าง",
                 adminRefresh: "🔄 รีเฟรช",
                 adminPending: "รออนุมัติ",
                 adminActive: "กำลังใช้งาน",
@@ -936,10 +956,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 adminThAction: "จัดการ",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
-                adminDisable: "⛔ Ban",
-                adminActivate: "♻️ Unban",
-                adminBan: "แบน",
-                adminUnban: "ปลดแบน",
+                adminDisable: "ปิดใช้งาน",
+                adminActivate: "เปิดใช้งาน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
                 adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
                 adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
@@ -981,10 +999,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 phBoss: "Type to search or select...",
                 labelKillTime: "Kill Time (24h Format)",
                 labelKillDate: "Date (Day/Month/Year)",
-                labelSpTime: "Special Time (mins)",
                 phKillDate: "e.g. 08/09/2026",
-                phKillTime: "e.g. 17:30 or 1730",
                 hintKillDate: "*Leave blank to use today's date",
+                labelSpTime: "Special Time (mins)",
+                phKillTime: "e.g. 17:30 or 1730",
                 hintKillTime: "*Leave blank to use current time",
                 labelNotice: "Advance Notice (Mins)",
                 btnSave: "⚔️ Save Time",
@@ -1005,7 +1023,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 secUnit: "s",
                 footer: "Real-time Boss Countdown System • Synced with Cloud Database",
                 invalidTimeAlert: "Please enter time in valid 24-hour format (e.g. 08:30 or 17:45)",
-                invalidDateAlert: "Please enter a valid date in Day/Month/Year format, e.g. 08/09/2026",
                 confirmClear: "Are you sure you want to clear all boss timers?",
                 notifyReadyTitle: "⚔️ Notifications Active",
                 notifyReadyBody: "You will be alerted before boss spawns and when spawned.",
@@ -1014,7 +1031,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 errRegCodeInvalid: "Invalid Registration Code!",
                 errUserExists: "Username already exists!",
                 regSuccess: "Registration successful! Please login.",
-                errLoginFailed: "Invalid username or password!",
+                errLoginFailed: "Login failed",
                 codeChangedSuccess: "Registration code updated successfully!",
                 spawnNotifyTitle: "⚔️ {boss} Spawned!",
                 spawnNotifyBody: "Boss {boss} has spawned!",
@@ -1033,9 +1050,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 attendanceCurrent: "Current / Upcoming Activities", attendanceHistory: "Attendance History", attendanceMonthly: "📊 Monthly Reports",
                 attendanceBoss: "Boss", attendanceDate: "Date", attendanceAttackTime: "Attack Time", attendanceOpenClose: "Open–Close",
                 attendanceCount: "Participants", attendanceCreatedBy: "Created By", attendanceStatus: "Status", attendanceMonth: "Month",
-                attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins",
+                attendanceRaids: "Raids", attendanceMembers: "Members", attendanceChecks: "Check-ins", attendanceCollapseOpen: "▼ Open", attendanceCollapseClose: "▲ Close",
                 adminPanelTitle: "🛡️ Admin • User Management",
-                adminPanelSubtitle: "Approve registrations, review history, and see active users. Approve / Ban / Unban buttons are in the table below.",
+                adminPanelSubtitle: "Approve registrations, review history, and see active users. Approval buttons are in the table below.",
                 adminRefresh: "🔄 Refresh",
                 adminPending: "Pending",
                 adminActive: "Active Now",
@@ -1049,10 +1066,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 adminThAction: "Action",
                 adminApprove: "Approve",
                 adminReject: "Reject",
-                adminDisable: "⛔ Ban",
-                adminActivate: "♻️ Unban",
-                adminBan: "Ban",
-                adminUnban: "Unban",
+                adminDisable: "Disable",
+                adminActivate: "Activate",
                 adminNoUsers: "No users found.",
                 adminOnly: "Admin only.",
                 adminCannotChangeAdmin: "The Admin account cannot be changed."
@@ -1094,10 +1109,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 phBoss: "검색 또는 선택...",
                 labelKillTime: "처치 시간 (24시간 형식)",
                 labelKillDate: "날짜 (일/월/년)",
-                labelSpTime: "추가 시간 (분)",
                 phKillDate: "예: 08/09/2026",
-                phKillTime: "예: 17:30 또는 1730",
                 hintKillDate: "*오늘 날짜를 사용하려면 비워두세요",
+                labelSpTime: "추가 시간 (분)",
+                phKillTime: "예: 17:30 또는 1730",
                 hintKillTime: "*현재 시간을 사용하려면 비워두세요",
                 labelNotice: "사전 알림 (분)",
                 btnSave: "⚔️ 시간 저장",
@@ -1117,8 +1132,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 minUnit: "분",
                 secUnit: "초",
                 footer: "실시간 보스 카운트다운 시스템 • 클라우드 자동 동기화",
-                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 또는 17:45)",
-                invalidDateAlert: "일/월/년 형식으로 올바른 날짜를 입력해주세요. 예: 08/09/2026",
+                invalidTimeAlert: "24시간 형식에 맞게 올바른 시간을 입력해주세요. (예: 08:30 หรือ 17:45)",
                 confirmClear: "모든 보스 타이머를 삭제하시겠습니까?",
                 notifyReadyTitle: "⚔️ 알림 시스템 준비 완료",
                 notifyReadyBody: "보스 젠 임박 및 젠 완료 시 알림이 전송됩니다.",
@@ -1127,7 +1141,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 errRegCodeInvalid: "가입 코드가 올바르지 않습니다!",
                 errUserExists: "이미 존재하는 사용자 이름입니다!",
                 regSuccess: "회원가입 성공! 로그인해주세요.",
-                errLoginFailed: "사용자 이름 หรือ 비밀번호가 올바르지 않습니다!",
+                errLoginFailed: "로그인에 실패했습니다",
                 codeChangedSuccess: "가입 코드가 성공적으로 변경되었습니다!",
                 spawnNotifyTitle: "⚔️ {boss} 젠 완료!",
                 spawnNotifyBody: "보스 {boss}(이)가 지금 젠되었습니다.",
@@ -1146,7 +1160,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 attendanceCurrent: "현재 / 예정 활동", attendanceHistory: "출석 기록", attendanceMonthly: "📊 월간 보고서",
                 attendanceBoss: "보스", attendanceDate: "날짜", attendanceAttackTime: "공격 시간", attendanceOpenClose: "시작–마감",
                 attendanceCount: "참여자", attendanceCreatedBy: "생성자", attendanceStatus: "상태", attendanceMonth: "월",
-                attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석",
+                attendanceRaids: "활동", attendanceMembers: "회원", attendanceChecks: "출석", attendanceCollapseOpen: "▼ 열기", attendanceCollapseClose: "▲ 닫기",
                 adminPanelTitle: "🛡️ Admin • 사용자 관리",
                 adminPanelSubtitle: "가입 승인, 이용 기록 및 현재 접속 사용자를 확인합니다.",
                 adminRefresh: "🔄 새로고침",
@@ -1162,10 +1176,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 adminThAction: "관리",
                 adminApprove: "อนุมัติ",
                 adminReject: "ปฏิเสธ",
-                adminDisable: "⛔ Ban",
-                adminActivate: "♻️ Unban",
-                adminBan: "แบน",
-                adminUnban: "ปลดแบน",
+                adminDisable: "ปิดใช้งาน",
+                adminActivate: "เปิดใช้งาน",
                 adminNoUsers: "ยังไม่มีผู้ใช้งาน",
                 adminOnly: "คำสั่งนี้อนุญาตเฉพาะ Admin",
                 adminCannotChangeAdmin: "ไม่สามารถเปลี่ยนสถานะบัญชี Admin ได้"
@@ -1174,7 +1186,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         let currentLang = localStorage.getItem('app_lang') || 'th';
         let currentTz = localStorage.getItem('app_tz') || 'auto';
-        const browserNotified = new Set();
         let isNotifyEnabled = localStorage.getItem('notify_enabled') === 'true';
         let activeBosses = {};
 
@@ -1233,17 +1244,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         // --- 3. ระบบ Authentication & Session (Firebase Authentication) ---
         const AUTH_EMAIL_DOMAIN = "@skynet-3ad44.firebaseapp.com";
+        // Real Firebase Authentication email for the existing Admin account
+        // UID: cplvow7Vr6TAd62hREJYuX2w5e73
+        const ADMIN_AUTH_EMAIL = "m4ge999@gmail.com";
         settingsRef.child('register_code').on('value', (snap) => {
             if (snap.exists() && snap.val()) currentRegCode = snap.val();
             else settingsRef.child('register_code').set("1234");
         });
 
         function makeUserKey(username) {
-            return username.toLowerCase().replace(/[.#$\\[\\]\\/]/g, '_');
+            return username.toLowerCase().replace(/[.#$\[\]\/]/g, '_');
         }
 
         function usernameToAuthEmail(username) {
-            return `${makeUserKey(username)}${AUTH_EMAIL_DOMAIN}`;
+            const key = makeUserKey(username);
+            if (key === makeUserKey(ADMIN_DEFAULT_USERNAME)) return ADMIN_AUTH_EMAIL;
+            return `${key}${AUTH_EMAIL_DOMAIN}`;
         }
 
         function formatAdminDate(value) {
@@ -1257,21 +1273,32 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         let currentUserKey = null;
         let currentUserData = null;
         let heartbeatTimer = null;
+        let adminUsersListenerAttached = false;
+        let adminSessionsListenerAttached = false;
+        let adminRefreshTimer = null;
 
         async function createUserSession(userKey, userData) {
-            currentSessionId = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`);
             currentUserKey = userKey;
             currentUserData = userData;
             const now = new Date().toISOString();
-
-            await sessionsRef.child(currentSessionId).set({
-                userKey, username:userData.username, loginAt:now, lastSeenAt:now, active:true
-            });
-            await usersRef.child(userKey).update({
-                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null,
+            // Use a Firebase push id instead of crypto.randomUUID so every browser is supported.
+            const sessionRef = sessionsRef.push();
+            currentSessionId = sessionRef.key;
+            const sessionData = {
+                userKey, username:userData.username || '', loginAt:now, lastSeenAt:now, active:true
+            };
+            await withTimeout(sessionRef.set(sessionData), 8000, 'SESSION_WRITE_TIMEOUT');
+            // Let Firebase mark this session inactive if the browser disconnects unexpectedly.
+            try {
+                sessionRef.onDisconnect().update({
+                    lastSeenAt: new Date().toISOString(), active:false, logoutAt:new Date().toISOString()
+                });
+            } catch (e) { console.warn('[SKYNET] onDisconnect setup failed:', e); }
+            await withTimeout(usersRef.child(userKey).update({
+                lastLoginAt:now, lastSeenAt:now, lastLogoutAt:null, online:true,
                 loginCount:(Number(userData.loginCount)||0)+1
-            });
-            localStorage.setItem('logged_user', userData.username);
+            }), 8000, 'USER_WRITE_TIMEOUT');
+            localStorage.setItem('logged_user', userData.username || '');
             localStorage.setItem('logged_user_key', userKey);
             localStorage.setItem('logged_session_id', currentSessionId);
             localStorage.setItem('logged_role', userData.role || 'user');
@@ -1287,7 +1314,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const now=new Date().toISOString();
                 try {
                     await sessionsRef.child(sessionId).update({lastSeenAt:now,active:true});
-                    await usersRef.child(userKey).update({lastSeenAt:now});
+                    await usersRef.child(userKey).update({lastSeenAt:now,online:true});
                 } catch(err) { console.warn('Session heartbeat error:',err); }
             },30000);
         }
@@ -1299,7 +1326,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer=null; }
             try {
                 if (sessionId) await sessionsRef.child(sessionId).update({lastSeenAt:now,logoutAt:now,active:false});
-                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now});
+                if (userKey) await usersRef.child(userKey).update({lastSeenAt:now,lastLogoutAt:now,online:false});
             } catch(err) { console.warn('Session logout update error:',err); }
             if (signOutAuth) { try { await auth.signOut(); } catch(err) {} }
             ['logged_user','logged_user_key','logged_session_id','logged_role'].forEach(k=>localStorage.removeItem(k));
@@ -1313,7 +1340,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const firebaseUser=firebaseUserOverride || auth.currentUser;
             if(firebaseUser){
                 try{
-                    const snap=await usersRef.child(firebaseUser.uid).once('value');
+                    const snap=await withTimeout(usersRef.child(firebaseUser.uid).once('value'), 10000, 'USER_READ_TIMEOUT');
                     if(!snap.exists()) throw new Error('USER_NOT_FOUND');
                     const userData=snap.val();
                     if(userData.status!=='approved'){
@@ -1323,26 +1350,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                     currentUserData=userData;
                     currentUserKey=firebaseUser.uid;
-                    dashboardUsersCache[firebaseUser.uid] = userData;
-                    setTimeout(cacheCurrentUserProfile, 0);
                     document.getElementById('authContainer').style.display='none';
                     document.getElementById('mainDashboard').style.display='block';
                     document.getElementById('userBadge').innerText=`👤 ${userData.username || firebaseUser.email}${userData.role==='admin'?' • 🛡️ Admin':''}`;
+                    startAttendanceRealtimeListener();
                     const adminPanel=document.getElementById('adminPanel');
                     const adminOnlyButtons=document.querySelectorAll('[data-admin-only]');
                     const adminMenu=document.getElementById('adminPanelMenuBtn');
                     if(userData.role==='admin'){
                         adminPanel.style.display='block';
+                        startAdminRealtimeListeners();
                         adminOnlyButtons.forEach(el=>el.style.display='');
                         if(adminMenu) adminMenu.style.display='inline-block';
-                        await loadAdminUsers();
+                        // Never block login on the admin list. It is non-critical UI data.
+                        loadAdminUsers().catch(err => { console.error('[SKYNET] Admin list load failed:', err); const el=document.getElementById('adminDataStatus'); if(el){el.className='small text-danger mt-1';el.textContent=`❌ ${err.code || err.message || err}`;} });
                     }else{
                         adminPanel.style.display='none';
                         adminOnlyButtons.forEach(el=>el.style.display='none');
                         if(adminMenu) adminMenu.style.display='none';
                     }
-                    if(!currentSessionId) await createUserSession(firebaseUser.uid,userData);
-                    else startSessionHeartbeat();
+                    if(!currentSessionId) {
+                        createUserSession(firebaseUser.uid,userData).catch(err => console.warn('[SKYNET] Session sync skipped:', err));
+                    } else startSessionHeartbeat();
                     return true;
                 }catch(err){
                     if(err.message==='ACCOUNT_PENDING') alert(TRANSLATIONS[currentLang].errPendingApproval);
@@ -1384,32 +1413,107 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             }catch(err){
                 console.error(err);
                 if(err.code==='auth/email-already-in-use') alert(TRANSLATIONS[currentLang].errUserExists);
-                else showAuthError(err);
+                else alert(TRANSLATIONS[currentLang].errLoginFailed);
             }
         });
 
-        document.getElementById('loginForm').addEventListener('submit',async(e)=>{
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const username=document.getElementById('loginUser').value.trim();
-            const password=document.getElementById('loginPass').value;
-            const rememberMe=document.getElementById('rememberMe').checked;
-            if(!username || !password){alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
-            try{
-                const cred=await auth.signInWithEmailAndPassword(usernameToAuthEmail(username),password);
-                const snap=await usersRef.child(cred.user.uid).once('value');
-                if(!snap.exists()){await auth.signOut();alert(TRANSLATIONS[currentLang].errLoginFailed);return;}
-                const userData=snap.val();
-                if(userData.status==='pending'){await auth.signOut();alert(TRANSLATIONS[currentLang].errPendingApproval);return;}
-                if(userData.status==='rejected'||userData.status==='disabled'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountRejected);return;}
-                if(userData.status!=='approved'){await auth.signOut();alert(TRANSLATIONS[currentLang].errAccountNotApproved);return;}
-                if(rememberMe)localStorage.setItem('saved_username',username);else localStorage.removeItem('saved_username');
-                await createUserSession(cred.user.uid,userData);
-                await checkAuthSession(cred.user);
-            }catch(err){
-                console.error('Firebase Authentication login error:',err);
-                const code = err && err.code ? err.code : 'unknown';
-                const detail = err && err.message ? err.message : '';
-                alert(`${TRANSLATIONS[currentLang].errLoginFailed}\n\nFirebase: ${code}${detail ? '\n' + detail : ''}`);
+            e.stopPropagation();
+            const username = document.getElementById('loginUser').value.trim();
+            const password = document.getElementById('loginPass').value;
+            const rememberMe = document.getElementById('rememberMe').checked;
+            const submitBtn = e.currentTarget.querySelector('button[type=submit]');
+            const debug = document.getElementById('loginDebug');
+            const show = (msg) => {
+                if (debug) { debug.textContent = msg; debug.style.display = 'block'; }
+                console.log('[SKYNET LOGIN]', msg);
+            };
+            const fail = (msg) => {
+                show('❌ ' + msg);
+                alert(msg);
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '🔑 เข้าสู่ระบบ'; }
+            };
+            if (!username || !password) { fail('กรุณากรอกชื่อผู้ใช้และรหัสผ่าน'); return; }
+            if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = '⏳ กำลังเข้าสู่ระบบ...'; }
+            let authEmail = username.includes('@') ? username.toLowerCase() : usernameToAuthEmail(username);
+            if (makeUserKey(username) === 'admin') authEmail = ADMIN_AUTH_EMAIL;
+            show('1/4 Firebase Config จาก Render พร้อม — กำลังเชื่อมต่อ Authentication: ' + authEmail);
+
+            try {
+                // Verify that the Firebase Auth SDK is actually ready before sending credentials.
+                if (!window.firebase || !firebase.auth) throw new Error('Firebase Authentication SDK โหลดไม่สำเร็จ');
+                if (!firebase.apps || !firebase.apps.length) throw new Error('Firebase App ยังไม่ได้ initialize');
+
+                // Important: use a real timer race. This prevents a browser/network hang from leaving the button stuck.
+                const loginPromise = auth.signInWithEmailAndPassword(authEmail, password);
+                const cred = await Promise.race([
+                    loginPromise,
+                    new Promise((_, reject) => setTimeout(() => {
+                        const er = new Error('Firebase Auth request timeout'); er.code = 'AUTH_TIMEOUT'; reject(er);
+                    }, 8000))
+                ]);
+
+                show('2/4 Firebase Authentication สำเร็จ — UID: ' + cred.user.uid);
+                const snap = await Promise.race([
+                    usersRef.child(cred.user.uid).once('value'),
+                    new Promise((_, reject) => setTimeout(() => {
+                        const er = new Error('Database user read timeout'); er.code = 'DB_TIMEOUT'; reject(er);
+                    }, 8000))
+                ]);
+                if (!snap.exists()) {
+                    await auth.signOut().catch(() => {});
+                    fail('ล็อกอิน Firebase สำเร็จ แต่ไม่พบ users/' + cred.user.uid + ' ใน Realtime Database');
+                    return;
+                }
+                const userData = snap.val() || {};
+                show('3/4 ตรวจสอบสิทธิ์: username=' + (userData.username || '-') + ' | role=' + (userData.role || '-') + ' | status=' + (userData.status || '-'));
+                if (userData.status !== 'approved') {
+                    await auth.signOut().catch(() => {});
+                    fail('บัญชีนี้ยังไม่ได้รับอนุมัติ (status=' + (userData.status || 'ไม่มี') + ')');
+                    return;
+                }
+                if (userData.role !== 'admin' && makeUserKey(username) === 'admin') {
+                    await auth.signOut().catch(() => {});
+                    fail('บัญชี Firebase นี้ไม่ใช่ Admin (role=' + (userData.role || 'ไม่มี') + ')');
+                    return;
+                }
+                if (rememberMe) localStorage.setItem('saved_username', username); else localStorage.removeItem('saved_username');
+                currentUserData = userData;
+                currentUserKey = cred.user.uid;
+                localStorage.setItem('logged_user', userData.username || username);
+                localStorage.setItem('logged_user_key', cred.user.uid);
+                localStorage.setItem('logged_role', userData.role || 'user');
+                show('4/4 เข้าสู่ Dashboard สำเร็จ');
+                document.getElementById('authContainer').style.display = 'none';
+                document.getElementById('mainDashboard').style.display = 'block';
+                document.getElementById('userBadge').innerText = `👤 ${userData.username || cred.user.email}${userData.role === 'admin' ? ' • 🛡️ Admin' : ''}`;
+                const adminPanel = document.getElementById('adminPanel');
+                const adminMenu = document.getElementById('adminPanelMenuBtn');
+                if (userData.role === 'admin') {
+                    if (adminPanel) adminPanel.style.display = 'block';
+                    startAdminRealtimeListeners();
+                    document.querySelectorAll('[data-admin-only]').forEach(el => el.style.display = '');
+                    if (adminMenu) adminMenu.style.display = 'inline-block';
+                    loadAdminUsers().catch(err => console.warn('[SKYNET] admin list:', err));
+                }
+                createUserSession(cred.user.uid, userData).catch(err => console.warn('[SKYNET] session sync:', err));
+                if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = '🔑 เข้าสู่ระบบ'; }
+            } catch (err) {
+                console.error('[SKYNET] Login error', err);
+                let msg = 'เข้าสู่ระบบไม่สำเร็จ';
+                if (err.code === 'auth/invalid-credential') msg = 'Email หรือรหัสผ่านไม่ถูกต้อง (Firebase: auth/invalid-credential)';
+                else if (err.code === 'auth/wrong-password') msg = 'รหัสผ่านไม่ถูกต้อง';
+                else if (err.code === 'auth/user-not-found') msg = 'ไม่พบบัญชี ' + authEmail + ' ใน Firebase Authentication';
+                else if (err.code === 'auth/too-many-requests') msg = 'Firebase ล็อกการลอง Login ชั่วคราว เพราะลองหลายครั้งเกินไป';
+                else if (err.code === 'auth/operation-not-allowed') msg = 'Firebase ยังไม่ได้เปิด Email/Password Authentication';
+                else if (err.code === 'auth/network-request-failed') msg = 'เชื่อมต่อ Firebase ไม่สำเร็จ';
+                else if (err.code === 'auth/api-key-not-valid' || /api-key-not-valid/i.test(err.message || '')) msg = 'Firebase API Key จาก Render ไม่ถูกต้อง — ตรวจ FIREBASE_WEB_CONFIG_JSON บน Render';
+                else if (err.code === 'auth/requests-from-referer-https://iahcatan.github.io-are-blocked') msg = 'Firebase API Key ยังบล็อก iahcatan.github.io';
+                else if (err.code === 'AUTH_TIMEOUT') msg = 'Firebase Authentication ไม่ตอบภายใน 8 วินาที — ปัญหาอยู่ที่การเชื่อมต่อ/API Key ไม่ใช่ฐานข้อมูล';
+                else if (err.code === 'DB_TIMEOUT') msg = 'Authentication ผ่านแล้ว แต่ Realtime Database ไม่ตอบภายใน 8 วินาที';
+                else if (err.message) msg += ': ' + err.message;
+                fail(msg + '\n\nบัญชีที่ใช้: ' + authEmail);
             }
         });
 
@@ -1438,58 +1542,63 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         async function loadAdminUsers() {
-            if (!currentUserKey) currentUserKey = localStorage.getItem('logged_user_key');
-            if (!currentUserKey) return;
+            const uid = auth.currentUser && auth.currentUser.uid;
+            if (!uid) return;
+            currentUserKey = uid;
 
-            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminSnap = await withTimeout(usersRef.child(uid).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
             const adminData = adminSnap.val();
-
             if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
-                document.getElementById('adminPanel').style.display = 'none';
+                const panel=document.getElementById('adminPanel'); if(panel) panel.style.display='none';
                 return;
             }
-
             currentUserData = adminData;
 
-            const usersSnap = await usersRef.once('value');
+            const [usersSnap, sessionsSnap] = await Promise.all([
+                withTimeout(usersRef.once('value'), 8000, 'ADMIN_USERS_READ_TIMEOUT'),
+                withTimeout(sessionsRef.once('value'), 8000, 'ADMIN_SESSIONS_READ_TIMEOUT')
+            ]);
             const users = usersSnap.val() || {};
-            const sessionsSnap = await sessionsRef.once('value');
             const sessions = sessionsSnap.val() || {};
             const nowMs = Date.now();
+            const statusEl = document.getElementById('adminDataStatus');
+            if (statusEl) {
+                statusEl.className = 'small text-success mt-1';
+                statusEl.textContent = `🟢 Firebase Users: ${Object.keys(users).length} | Sessions: ${Object.keys(sessions).length} | อัปเดต ${new Date().toLocaleTimeString('th-TH')}`;
+            }
 
             const userRows = Object.entries(users).map(([key, user]) => {
                 const userSessions = Object.values(sessions).filter(s => s && s.userKey === key);
-                const latestSession = userSessions.sort((a, b) =>
+                const latestSession = userSessions.slice().sort((a,b) =>
                     new Date(b.lastSeenAt || b.loginAt || 0) - new Date(a.lastSeenAt || a.loginAt || 0)
                 )[0];
-
                 const lastSeen = user.lastSeenAt || (latestSession && latestSession.lastSeenAt);
-                const active = userSessions.some(session => {
+                const userOnline = user.online === true || user.online === 'true';
+                const userSeenMs = new Date(user.lastSeenAt || 0).getTime();
+                const userHeartbeatActive = userOnline && Number.isFinite(userSeenMs) && (nowMs - userSeenMs) >= 0 && (nowMs - userSeenMs) <= ACTIVE_SESSION_TIMEOUT_MS;
+                const sessionActive = userSessions.some(session => {
                     if (!session || session.active === false || !session.lastSeenAt) return false;
-                    const age = nowMs - new Date(session.lastSeenAt).getTime();
-                    return age >= 0 && age <= ACTIVE_SESSION_TIMEOUT_MS;
+                    const seenMs = new Date(session.lastSeenAt).getTime();
+                    return Number.isFinite(seenMs) && (nowMs - seenMs) >= 0 && (nowMs - seenMs) <= ACTIVE_SESSION_TIMEOUT_MS;
                 });
-
-                return { key, user, active };
+                const active = userHeartbeatActive || sessionActive;
+                return {key, user, active, lastSeen};
             });
 
             const pendingCount = userRows.filter(x => x.user.status === 'pending').length;
             const activeCount = userRows.filter(x => x.active && x.user.status === 'approved').length;
-
             document.getElementById('adminPendingCount').innerText = pendingCount;
             document.getElementById('adminActiveCount').innerText = activeCount;
             document.getElementById('adminTotalCount').innerText = userRows.length;
 
             const tbody = document.getElementById('adminUsersBody');
             tbody.innerHTML = '';
-
-            userRows.sort((a, b) => {
-                const order = { pending: 0, approved: 1, rejected: 2, disabled: 3 };
-                return (order[a.user.status] ?? 9) - (order[b.user.status] ?? 9) ||
-                       (new Date(b.user.createdAt || 0) - new Date(a.user.createdAt || 0));
+            userRows.sort((a,b) => {
+                const order={pending:0,approved:1,rejected:2,disabled:3};
+                return (order[a.user.status] ?? 9)-(order[b.user.status] ?? 9) ||
+                    (new Date(b.lastSeen || b.user.createdAt || 0)-new Date(a.lastSeen || a.user.createdAt || 0));
             });
-
-            userRows.forEach(({ key, user, active }) => {
+            userRows.forEach(({key,user,active,lastSeen}) => {
                 const statusBadge = user.role === 'admin'
                     ? '<span class="badge bg-danger">🛡️ ADMIN</span>'
                     : user.status === 'pending'
@@ -1498,42 +1607,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                             ? `<span class="badge ${active ? 'bg-success' : 'bg-primary'}">${active ? '🟢 Active' : '✅ Approved'}</span>`
                             : user.status === 'rejected'
                                 ? '<span class="badge bg-danger">❌ Rejected</span>'
-                                : '<span class="badge bg-secondary">⛔ Banned</span>';
-
-                let actionHtml = '-';
-                if (user.role !== 'admin') {
-                    if (user.status === 'pending') {
-                        actionHtml = `
-                            <div class="d-flex gap-1 flex-wrap">
-                                <button class="btn btn-sm btn-success" onclick="setUserStatus('${key}', 'approved')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button>
-                                <button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}', 'disabled')">❌ ${TRANSLATIONS[currentLang].adminReject}</button>
-                            </div>`;
-                    } else if (user.status === 'approved') {
-                        actionHtml = `<button class="btn btn-sm btn-outline-danger" onclick="setUserStatus('${key}', 'disabled')">⛔ ${TRANSLATIONS[currentLang].adminBan || 'Ban'}</button>`;
-                    } else if (user.status === 'disabled' || user.status === 'rejected') {
-                        actionHtml = `<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}', 'approved')">♻️ ${TRANSLATIONS[currentLang].adminUnban || 'Unban'}</button>`;
-                    }
+                                : '<span class="badge bg-secondary">⛔ Disabled</span>';
+                let actionHtml='-';
+                if(user.role!=='admin'){
+                    if(user.status==='pending') actionHtml=`<div class="d-flex gap-1 flex-wrap"><button class="btn btn-sm btn-success" onclick="setUserStatus('${key}','approved')">✅ ${TRANSLATIONS[currentLang].adminApprove}</button><button class="btn btn-sm btn-danger" onclick="setUserStatus('${key}','rejected')">❌ ${TRANSLATIONS[currentLang].adminReject}</button></div>`;
+                    else if(user.status==='approved') actionHtml=`<button class="btn btn-sm btn-outline-warning" onclick="setUserStatus('${key}','disabled')">⛔ ${TRANSLATIONS[currentLang].adminDisable}</button>`;
+                    else actionHtml=`<button class="btn btn-sm btn-outline-success" onclick="setUserStatus('${key}','approved')">♻️ ${TRANSLATIONS[currentLang].adminActivate}</button>`;
                 }
-
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td>
-                        <div class="fw-bold text-info">${escapeHtml(user.username || key)}</div>
-                        <small class="text-white-50">${user.role === 'admin' ? 'Admin' : 'User'}</small>
-                    </td>
-                    <td>${statusBadge}</td>
-                    <td><small>${formatAdminDate(user.createdAt)}</small></td>
-                    <td><small>${formatAdminDate(user.lastLoginAt)}</small></td>
-                    <td><small>${formatAdminDate(user.lastSeenAt)}</small></td>
-                    <td>${Number(user.loginCount) || 0}</td>
-                    <td>${actionHtml}</td>
-                `;
+                const tr=document.createElement('tr');
+                tr.innerHTML=`<td><div class="fw-bold text-info">${escapeHtml(user.username||key)}</div><small class="text-white-50">${user.role==='admin'?'Admin':'User'}</small></td><td>${statusBadge}</td><td><small>${formatAdminDate(user.createdAt)}</small></td><td><small>${formatAdminDate(user.lastLoginAt)}</small></td><td><small>${formatAdminDate(lastSeen)}</small></td><td>${Number(user.loginCount)||0}</td><td>${actionHtml}</td>`;
                 tbody.appendChild(tr);
             });
+            if(!userRows.length) tbody.innerHTML=`<tr><td colspan="8" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
+        }
 
-            if (!userRows.length) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${TRANSLATIONS[currentLang].adminNoUsers}</td></tr>`;
-            }
+        function startAdminRealtimeListeners(){
+            if(adminUsersListenerAttached || adminSessionsListenerAttached) return;
+            const refresh=()=>{
+                if(currentUserData && currentUserData.role==='admin' && auth.currentUser){
+                    loadAdminUsers().catch(err=>{
+                        console.error('[SKYNET] Admin realtime refresh:',err);
+                        const el=document.getElementById('adminDataStatus');
+                        if(el){el.className='small text-danger mt-1';el.textContent=`❌ อ่านข้อมูลผู้ใช้ไม่สำเร็จ: ${err.code || err.message || err}`;}
+                    });
+                }
+            };
+            usersRef.on('value', refresh);
+            sessionsRef.on('value', refresh);
+            adminUsersListenerAttached=true;
+            adminSessionsListenerAttached=true;
+            if(adminRefreshTimer) clearInterval(adminRefreshTimer);
+            adminRefreshTimer=setInterval(refresh,15000);
         }
 
         function escapeHtml(value) {
@@ -1545,7 +1649,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         async function setUserStatus(userKey, newStatus) {
             if (!currentUserKey) return;
 
-            const adminSnap = await usersRef.child(currentUserKey).once('value');
+            const adminSnap = await withTimeout(usersRef.child(currentUserKey).once('value'), 8000, 'ADMIN_SELF_READ_TIMEOUT');
             const adminData = adminSnap.val();
             if (!adminData || adminData.role !== 'admin' || adminData.status !== 'approved') {
                 alert(TRANSLATIONS[currentLang].adminOnly);
@@ -1614,35 +1718,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         // --- 4. ระบบ Real-time Sync จาก Firebase ---
-        const dashboardUsersCache = {};
 
-        async function cacheCurrentUserProfile() {
-            try {
-                const u = auth.currentUser;
-                if (!u) return;
-                const snap = await usersRef.child(u.uid).once('value');
-                if (snap.exists()) dashboardUsersCache[u.uid] = snap.val();
-                renderTable();
-            } catch (err) {
-                console.warn('Could not cache current user profile:', err);
-            }
-        }
-
-        function resolveRecordedBy(item) {
-            const display = item.recordedByDisplayName || item.recorded_by_display_name || '';
-            if (display && !['unknown','unknow','ไม่ระบุ'].includes(String(display).trim().toLowerCase())) return display;
-            const raw = item.recordedBy || item.recorded_by || '';
-            const uid = item.recordedByUserId || item.recorded_by_user_id || '';
-            const profile = uid ? dashboardUsersCache[uid] : null;
-            if (profile && profile.username) return profile.username;
-            const authUser = auth.currentUser;
-            if (uid && authUser && uid === authUser.uid) {
-                if (currentUserData && currentUserData.username) return currentUserData.username;
-                return authUser.email || 'สมาชิก';
-            }
-            if (raw && !['unknown','unknow','ไม่ระบุ'].includes(String(raw).trim().toLowerCase())) return raw;
-            return 'ไม่ระบุ';
-        }
+        let userNameCache = {};
+        let attendanceRealtimeListenerAttached = false;
+        usersRef.on('value', (snapshot) => {
+            const users = snapshot.val() || {};
+            userNameCache = {};
+            Object.entries(users).forEach(([uid, u]) => {
+                if (u && typeof u === 'object') userNameCache[uid] = u.username || u.email || uid;
+            });
+        });
 
         bossRef.on('value', (snapshot) => {
             const rawData = snapshot.val() || {};
@@ -1663,10 +1748,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     noticeMinutes: item.noticeMinutes || (BOSS_DATABASE[bossName] ? BOSS_DATABASE[bossName].notice : 5),
                     notifiedNotice: item.notified_advance || item.notifiedNotice || false,
                     notifiedSpawn: item.notifiedSpawn || false,
-                    recordedBy: item.recordedBy || item.recorded_by || 'ไม่ระบุ',
-                    recordedByDisplayName: item.recordedByDisplayName || item.recorded_by_display_name || '',
-                    resolvedRecordedBy: resolveRecordedBy(item),
-                    recordedByUserId: item.recordedByUserId || item.recorded_by_user_id || ''
+                    killDate: item.killDate || (item.killTimeMs ? new Date(item.killTimeMs).toLocaleDateString('th-TH') : ''),
+                    recordedBy: (item.recordedBy && item.recordedBy !== 'Unknown' ? item.recordedBy : (item.recordedByUserId && userNameCache[item.recordedByUserId]) || item.recorded_by || item.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ')
                 };
             });
             renderTable();
@@ -1724,7 +1807,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 all.forEach(x => {
                     const raw = String(x.a.attack_at || x.a.created_at || '');
                     const m = raw.slice(0,7);
-                    if (!/^\\d{4}-\\d{2}$/.test(m)) return;
+                    if (!/^\d{4}-\d{2}$/.test(m)) return;
                     if (!monthlyMap[m]) monthlyMap[m] = {raids:0,members:new Set(),checks:0};
                     monthlyMap[m].raids++;
                     x.checked.forEach(p=>{monthlyMap[m].checks++; if(p && p.user_id) monthlyMap[m].members.add(String(p.user_id));});
@@ -1740,11 +1823,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         function startAttendanceRealtimeListener(){
-            raidAttendanceRef.on('value', snap => renderAttendanceDashboard(snap.val() || {}));
-            monthlyReportsRef.on('value', snap => {
-                // Server-generated monthly reports remain in Firebase; the live activity table is the primary dashboard view.
-                window.__SKYNET_MONTHLY_REPORTS__ = snap.val() || {};
+            if (attendanceRealtimeListenerAttached || !auth.currentUser) return;
+            attendanceRealtimeListenerAttached = true;
+            raidAttendanceRef.on('value', snap => {
+                renderAttendanceDashboard(snap.val() || {});
+                const status = document.getElementById('attendanceRealtimeStatus');
+                if (status) {
+                    status.className = 'badge bg-success status-badge';
+                    status.textContent = TRANSLATIONS[currentLang].attendanceRealtime || '🟢 Realtime';
+                }
+            }, err => {
+                console.error('[SKYNET] Attendance realtime listener:', err);
+                const status = document.getElementById('attendanceRealtimeStatus');
+                if (status) {
+                    status.className = 'badge bg-danger status-badge';
+                    status.textContent = '🔴 Attendance Sync Error';
+                }
             });
+            monthlyReportsRef.on('value', snap => {
+                window.__SKYNET_MONTHLY_REPORTS__ = snap.val() || {};
+            }, err => console.warn('[SKYNET] Monthly report listener:', err));
+        }
+
+        function toggleAttendancePanel(forceOpen=null) {
+            const content = document.getElementById('attendancePanelContent');
+            const btn = document.getElementById('attendanceCollapseBtn');
+            if (!content) return;
+            const shouldOpen = forceOpen === null ? content.style.display !== 'block' : !!forceOpen;
+            content.style.display = shouldOpen ? 'block' : 'none';
+            if (btn) {
+                const key = shouldOpen ? 'attendanceCollapseClose' : 'attendanceCollapseOpen';
+                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? '▲ ปิด' : '▼ เปิด');
+            }
+            localStorage.setItem('attendance_panel_open', shouldOpen ? '1' : '0');
         }
 
         function applyLanguage() {
@@ -1925,64 +2036,57 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return d;
         }
 
+        function parseInputDate(dateStr) {
+            const raw = (dateStr || '').trim();
+            const now = new Date();
+            if (!raw) return { year: now.getFullYear(), month: now.getMonth()+1, day: now.getDate() };
+            const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+            if (!m) return null;
+            const day = parseInt(m[1],10), month = parseInt(m[2],10), year = parseInt(m[3],10);
+            const test = new Date(year, month-1, day);
+            if (test.getFullYear() !== year || test.getMonth() !== month-1 || test.getDate() !== day) return null;
+            return { year, month, day };
+        }
+
         document.getElementById('bossForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             if (!await requireApprovedUser()) return;
             const bossInput = document.getElementById('bossSelect').value.trim();
-            const dateInput = document.getElementById('killDate').value.trim();
             const timeInput = document.getElementById('killTime').value.trim();
+            const dateInput = document.getElementById('killDate').value.trim();
             const noticeMin = parseInt(document.getElementById('noticeMinutes').value, 10) || 5;
             const spTimeMin = parseInt(document.getElementById('spTime').value, 10) || 0;
             if (!bossInput) return;
-            if (dateInput && !(new RegExp("^[0-9]{1,2}/[0-9]{1,2}/[0-9]{4}$")).test(dateInput)) {
-                alert(TRANSLATIONS[currentLang].invalidDateAlert);
-                return;
-            }
+            const parsedDate = parseInputDate(dateInput);
+            if (!parsedDate) { alert('❌ วันที่ไม่ถูกต้อง กรุณาใช้รูปแบบ DD/MM/YYYY เช่น 29/08/2026'); return; }
+            if (timeInput && !parseInputTime(timeInput)) { alert(TRANSLATIONS[currentLang].invalidTimeAlert); return; }
 
             try {
                 const idToken = await auth.currentUser.getIdToken(true);
-                // Dashboard may be hosted on GitHub Pages, while the API runs on Render.
-                // Use the Render API origin explicitly so recording works from either host.
                 const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
                 const response = await fetch(`${apiOrigin}/api/record-boss`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${idToken}`
-                    },
-                    body: JSON.stringify({
-                        bossName: bossInput,
-                        killDate: dateInput,
-                        killTime: timeInput,
-                        noticeMinutes: noticeMin,
-                        spTimeMinutes: spTimeMin,
-                        channelId: null
-                    })
+                    headers: {'Content-Type':'application/json','Authorization':`Bearer ${idToken}`},
+                    body: JSON.stringify({ bossName: bossInput, killTime: timeInput, killDate: dateInput, noticeMinutes: noticeMin, spTimeMinutes: spTimeMin })
                 });
                 const result = await response.json().catch(() => ({}));
-                if (!response.ok || !result.success) {
-                    throw new Error(result.error || `HTTP ${response.status}`);
-                }
+                if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
                 document.getElementById('bossForm').reset();
                 document.getElementById('noticeMinutes').value = 5;
-                // Update the UI immediately from the authoritative backend response.
                 if (result.bossName) {
-                    const fallbackKill = Number(result.killTimeMs) || Date.now();
-                    const fallbackSpawn = Number(result.spawnTimeMs) || fallbackKill;
                     activeBosses[result.bossName] = {
-                        spawnTimeMs: fallbackSpawn,
-                        killTimeMs: fallbackKill,
+                        spawnTimeMs: Number(result.spawnTimeMs), killTimeMs: Number(result.killTimeMs),
+                        killDate: result.killDate || `${parsedDate.year}-${String(parsedDate.month).padStart(2,'0')}-${String(parsedDate.day).padStart(2,'0')}`,
                         noticeMinutes: noticeMin,
-                        notifiedNotice: !!result.alreadyPassed,
-                        notifiedSpawn: !!result.alreadyPassed,
+                        notifiedNotice: !!result.alreadyPassed, notifiedSpawn: !!result.alreadyPassed,
                         recordedBy: result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ',
                         recordedByDisplayName: result.recordedByDisplayName || result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ',
-                        recordedByUserId: result.recordedByUserId || auth.currentUser?.uid || '',
-                        resolvedRecordedBy: result.recordedBy || (currentUserData && currentUserData.username) || auth.currentUser?.email || 'ไม่ระบุ'
+                        recordedByUserId: result.recordedByUserId || auth.currentUser?.uid || ''
                     };
                     renderTable();
                 }
-                console.log(`✅ Boss recorded: ${result.bossName} | by ${result.recordedBy} | uid=${result.recordedByUserId} | confirmation=${result.confirmationRequestId}`);
+                console.log(`✅ Dashboard boss recorded: ${result.bossName} | by ${result.recordedBy} | confirmation=${result.confirmationRequestId} | voice=${result.confirmationSuccess}`);
+                if (result.confirmationSuccess === false) alert('⚠️ บันทึกบอสสำเร็จ แต่ Bot ยังยืนยัน Voice ไม่สำเร็จ กรุณาตรวจห้อง /setvoice และ Render Log');
             } catch (err) {
                 console.error('Dashboard boss record failed:', err);
                 alert(`❌ บันทึกเวลาบอสไม่สำเร็จ\n${err.message || err}`);
@@ -1991,7 +2095,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         async function deleteBoss(bossName) {
             if (!await requireApprovedUser()) return;
-            await bossRef.child(bossName).remove();
+            if (!bossName) throw new Error('ไม่พบชื่อบอสที่ต้องการลบ');
+            const idToken = await auth.currentUser.getIdToken(true);
+            const apiOrigin = window.SKYNET_API_ORIGIN || 'https://bosstimer-ry18.onrender.com';
+            const response = await fetch(`${apiOrigin}/api/delete-boss`, {
+                method: 'POST',
+                headers: {'Content-Type':'application/json','Authorization':`Bearer ${idToken}`},
+                body: JSON.stringify({ bossName })
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.success) throw new Error(result.error || `HTTP ${response.status}`);
         }
 
         document.getElementById('clearAllBtn').addEventListener('click', async () => {
@@ -2008,7 +2121,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const sortedBosses = Object.keys(activeBosses).sort((a, b) => activeBosses[a].spawnTimeMs - activeBosses[b].spawnTimeMs);
 
             if (sortedBosses.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-3">${langData.emptyMsg}</td></tr>`;
                 return;
             }
 
@@ -2019,12 +2132,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const spawnTimeStr = format24h(new Date(data.spawnTimeMs));
                 
                 tr.innerHTML = `
-                    <td class="fw-bold text-warning">${escapeHtml(bossName)}</td>
+                    <td class="fw-bold text-warning">${bossName}</td>
+                    <td>${(data.killDate || new Date(data.killTimeMs).toLocaleDateString('th-TH')).replace(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/, '$1/$2/$3')}</td>
                     <td>${killTimeStr}</td>
                     <td class="text-info">${spawnTimeStr}</td>
                     <td id="cd-${bossName}" class="fw-bold">--:--:--</td>
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
-                    <td><span class="badge bg-secondary">${escapeHtml(resolveRecordedBy(data) || data.recordedBy || 'ไม่ระบุ')}</span></td>
+                    <td><span class="badge bg-secondary">${data.recordedBy}</span></td>
                     <td>
                         <button class="btn btn-sm btn-danger" onclick='deleteBoss(${JSON.stringify(bossName)})'>${langData.btnDelete}</button>
                     </td>
@@ -2047,12 +2161,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                 if (diffMs <= 0) {
                     cdCell.innerHTML = `<span class="text-success">${TRANSLATIONS[currentLang].spawned}</span>`;
-                    if (!browserNotified.has(`${bossName}|${data.spawnTimeMs}|spawn`)) {
+                    if (!data.notifiedSpawn) {
                         playAlertSound('spawn');
                         const title = (TRANSLATIONS[currentLang].spawnNotifyTitle || "⚔️ {boss} Spawned!").replace('{boss}', bossName);
                         const body = (TRANSLATIONS[currentLang].spawnNotifyBody || "Boss {boss} has spawned!").replace('{boss}', bossName);
                         sendBrowserNotification(title, body);
-                        browserNotified.add(`${bossName}|${data.spawnTimeMs}|spawn`);
+                        bossRef.child(bossName).update({ notifiedSpawn: true });
                     }
                 } else {
                     const totalSec = Math.floor(diffMs / 1000);
@@ -2063,12 +2177,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     cdCell.innerText = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
                     
                     const noticeMs = data.noticeMinutes * 60 * 1000;
-                    if (diffMs <= noticeMs && diffMs > noticeMs - 5000 && !browserNotified.has(`${bossName}|${data.spawnTimeMs}|notice`)) {
+                    if (diffMs <= noticeMs && diffMs > noticeMs - 5000 && !data.notifiedNotice) {
                          playAlertSound('notice');
                          const title = (TRANSLATIONS[currentLang].noticeNotifyTitle || "⏳ {boss} Spawning Soon!").replace('{boss}', bossName);
                          const body = (TRANSLATIONS[currentLang].noticeNotifyBody || "Boss {boss} will spawn in {min} mins").replace('{boss}', bossName).replace('{min}', data.noticeMinutes);
                          sendBrowserNotification(title, body);
-                         browserNotified.add(`${bossName}|${data.spawnTimeMs}|notice`);
+                         bossRef.child(bossName).update({ notifiedNotice: true });
                     }
                 }
             });
@@ -2076,10 +2190,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         function initApp() {
             const dataList = document.getElementById('bossOptions');
+            const allNames = new Set();
             Object.keys(BOSS_DATABASE).sort().forEach(boss => {
+                allNames.add(boss);
                 const option = document.createElement('option');
                 option.value = boss;
                 dataList.appendChild(option);
+            });
+            db.ref('custom_bosses').on('value', (snap) => {
+                const custom = snap.val() || {};
+                Object.keys(custom).sort().forEach(boss => {
+                    if (allNames.has(boss)) return;
+                    allNames.add(boss);
+                    const option = document.createElement('option');
+                    option.value = boss;
+                    dataList.appendChild(option);
+                });
             });
 
             document.getElementById('langSelect').value = currentLang;
@@ -2089,14 +2215,55 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             document.getElementById('tzSelect').value = currentTz;
             
             applyLanguage();
-            auth.onAuthStateChanged(() => checkAuthSession());
+            toggleAttendancePanel(localStorage.getItem('attendance_panel_open') === '1');
             checkAuthSession();
 
             setInterval(updateCountdowns, 1000);
             setInterval(() => {
-                if (currentUserData && currentUserData.role === 'admin') loadAdminUsers();
+                if (currentUserData && currentUserData.role === 'admin') loadAdminUsers().catch(err => console.warn('[SKYNET] admin interval:', err));
             }, 30000);
         }
+
+        function toggleAdminPanel(forceOpen=null) {
+            const content=document.getElementById('adminPanelContent');
+            const btn=document.getElementById('adminCollapseBtn');
+            if(!content) return;
+            const shouldOpen = forceOpen === null ? content.style.display !== 'block' : !!forceOpen;
+            content.style.display = shouldOpen ? 'block' : 'none';
+            if(btn) btn.innerText = shouldOpen ? '▲ ปิด' : '▼ เปิด';
+            localStorage.setItem('admin_panel_open', shouldOpen ? '1' : '0');
+            if(shouldOpen) loadAdminUsers().catch(()=>{});
+        }
+
+        // V8 FIX: HTML uses inline onclick handlers, while the dashboard is wrapped in an IIFE.
+        // Publish the UI functions explicitly so every button remains callable.
+        Object.assign(window, {
+            openBotSettingsModal,
+            scrollToAdminPanel,
+            openChangeCodeModal,
+            logout,
+            loadAdminUsers,
+            startAdminRealtimeListeners,
+            setUserStatus,
+            changeLanguage,
+            changeTimezone,
+            toggleNotifications,
+            deleteBoss,
+            requireApprovedUser,
+            requireAdmin,
+            toggleAdminPanel,
+            toggleAttendancePanel
+        });
+
+        // Keep delete failures visible to the user.
+        window.deleteBoss = async function (bossName) {
+            try {
+                await deleteBoss(bossName);
+            } catch (err) {
+                console.error('[SKYNET] Delete boss failed:', err);
+                alert('ลบบอสไม่สำเร็จ: ' + (err && err.message ? err.message : err));
+            }
+        };
 
         window.addEventListener('beforeunload', () => {
             const sessionId = localStorage.getItem('logged_session_id');
@@ -2110,10 +2277,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         window.addEventListener('DOMContentLoaded', initApp);
+        })();
     </script>
 </body>
-</html>
-"""
+</html>"""
 
 @app.route('/')
 def dashboard():
@@ -2189,6 +2356,56 @@ def firebase_config_js():
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Cache-Control'] = 'no-store'
     return response
+
+
+@app.route('/api/delete-boss', methods=['POST', 'OPTIONS'])
+def delete_boss_api():
+    """Delete one Boss Timer record from Dashboard using Firebase Admin SDK."""
+    def _api_json(payload, status=200):
+        response = jsonify(payload)
+        response.status_code = status
+        response.headers['Access-Control-Allow-Origin'] = 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Type'
+        return response
+    if request.method == 'OPTIONS':
+        response = _api_json({'success': True})
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response, 204
+    try:
+        payload = request.get_json(silent=True) or {}
+        auth_header = request.headers.get('Authorization', '').strip()
+        if not auth_header.lower().startswith('bearer '):
+            return _api_json({'success': False, 'error': 'Missing Firebase ID token'}), 401
+        id_token = auth_header.split(' ', 1)[1].strip()
+        decoded = firebase_auth.verify_id_token(id_token)
+        uid = str(decoded.get('uid') or '').strip()
+        if not uid:
+            return _api_json({'success': False, 'error': 'Invalid Firebase ID token'}), 401
+        profile = db.reference(f'users/{uid}').get() or {}
+        if not isinstance(profile, dict) or profile.get('status') != 'approved':
+            return _api_json({'success': False, 'error': 'Account is not approved'}), 403
+        boss_name = str(payload.get('bossName') or '').strip()
+        if not boss_name:
+            return _api_json({'success': False, 'error': 'Boss name is required'}), 400
+        matched_key = None
+        with schedule_lock:
+            for key in boss_schedule.keys():
+                if str(key).casefold() == boss_name.casefold():
+                    matched_key = key
+                    break
+        target_key = matched_key or boss_name
+        print(f"🗑️ DASHBOARD DELETE REQUEST | boss={target_key} | uid={uid}", flush=True)
+        db.reference(f'boss_schedule/{target_key}').delete()
+        with schedule_lock:
+            boss_schedule.pop(target_key, None)
+        print(f"✅ DASHBOARD DELETE COMPLETE | boss={target_key} | uid={uid}", flush=True)
+        return _api_json({'success': True, 'bossName': target_key})
+    except Exception as exc:
+        print(f"❌ /api/delete-boss failed: {exc}", flush=True)
+        traceback.print_exc()
+        return _api_json({'success': False, 'error': str(exc)}), 500
 
 
 @app.route('/api/record-boss', methods=['POST', 'OPTIONS'])
@@ -7339,9 +7556,31 @@ def _attendance_now_iso():
     return datetime.now(TZ_THAI).isoformat()
 
 
-def _attendance_parse_local(date_text: str, time_text: str) -> datetime | None:
+def _attendance_normalize_time_text(time_text: str) -> str | None:
+    """Accept Attendance time as HH:MM or HHMM and return canonical HH:MM."""
+    raw = str(time_text or "").strip().replace(".", ":")
+    if not raw:
+        return None
     try:
-        dt = datetime.strptime(f"{date_text} {time_text}", "%d/%m/%Y %H:%M")
+        if re.fullmatch(r"\d{1,2}:\d{2}", raw):
+            hour_text, minute_text = raw.split(":", 1)
+        elif re.fullmatch(r"\d{3,4}", raw):
+            hour_text, minute_text = (raw[0], raw[1:]) if len(raw) == 3 else (raw[:2], raw[2:])
+        else:
+            return None
+        hour, minute = int(hour_text), int(minute_text)
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return f"{hour:02d}:{minute:02d}"
+    except (TypeError, ValueError):
+        return None
+
+def _attendance_parse_local(date_text: str, time_text: str) -> datetime | None:
+    normalized = _attendance_normalize_time_text(time_text)
+    if not normalized:
+        return None
+    try:
+        dt = datetime.strptime(f"{date_text} {normalized}", "%d/%m/%Y %H:%M")
         return dt.replace(tzinfo=TZ_THAI)
     except Exception:
         return None
@@ -7510,9 +7749,9 @@ class RaidAttendanceCreateModal(discord.ui.Modal, title="⚔️ Create Boss Raid
         super().__init__(timeout=300)
         self.boss_name = discord.ui.TextInput(label="Boss", default=boss_name[:100], max_length=100, required=True)
         self.activity_date = discord.ui.TextInput(label="วันที่ (DD/MM/YYYY)", placeholder="09/09/2026", max_length=10, required=True)
-        self.attack_time = discord.ui.TextInput(label="เวลาโจมตี (HH:MM)", placeholder="20:30", max_length=5, required=True)
-        self.checkin_open = discord.ui.TextInput(label="เปิดเช็คชื่อ (HH:MM)", placeholder="20:15", max_length=5, required=True)
-        self.checkin_close = discord.ui.TextInput(label="ปิดเช็คชื่อ (HH:MM)", placeholder="20:45", max_length=5, required=True)
+        self.attack_time = discord.ui.TextInput(label="เวลาโจมตี (HH:MM หรือ HHMM)", placeholder="20:30 หรือ 2030", max_length=5, required=True)
+        self.checkin_open = discord.ui.TextInput(label="เปิดเช็คชื่อ (HH:MM หรือ HHMM)", placeholder="20:15 หรือ 2015", max_length=5, required=True)
+        self.checkin_close = discord.ui.TextInput(label="ปิดเช็คชื่อ (HH:MM หรือ HHMM)", placeholder="20:45 หรือ 2045", max_length=5, required=True)
         for item in (self.boss_name, self.activity_date, self.attack_time, self.checkin_open, self.checkin_close):
             self.add_item(item)
 
@@ -7522,13 +7761,16 @@ class RaidAttendanceCreateModal(discord.ui.Modal, title="⚔️ Create Boss Raid
             return
         await _safe_interaction_ack(interaction, ephemeral=True)
         date_text = str(self.activity_date.value).strip()
-        attack_text = str(self.attack_time.value).strip()
-        open_text = str(self.checkin_open.value).strip()
-        close_text = str(self.checkin_close.value).strip()
-        attack_dt = _attendance_parse_local(date_text, attack_text)
-        open_dt = _attendance_parse_local(date_text, open_text)
-        close_dt = _attendance_parse_local(date_text, close_text)
-        if not attack_dt or not open_dt or not close_dt or not (open_dt <= attack_dt <= close_dt):
+        attack_input = str(self.attack_time.value).strip()
+        open_input = str(self.checkin_open.value).strip()
+        close_input = str(self.checkin_close.value).strip()
+        attack_text = _attendance_normalize_time_text(attack_input)
+        open_text = _attendance_normalize_time_text(open_input)
+        close_text = _attendance_normalize_time_text(close_input)
+        attack_dt = _attendance_parse_local(date_text, attack_input)
+        open_dt = _attendance_parse_local(date_text, open_input)
+        close_dt = _attendance_parse_local(date_text, close_input)
+        if not attack_dt or not open_dt or not close_dt or not attack_text or not open_text or not close_text or not (open_dt <= attack_dt <= close_dt):
             await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ วันที่/เวลาไม่ถูกต้อง หรือช่วงเปิด-ปิดไม่ครอบคลุมเวลาโจมตี", ephemeral=True)
             return
         cfg = _attendance_config_snapshot(interaction.guild.id)
