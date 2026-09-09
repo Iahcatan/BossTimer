@@ -69,7 +69,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V76_VOICE_SPAWN_HARDEN_DATE_I18N_2026-09-09"
+NOTICE_BF_PATCH_VERSION = "V77_BOSS_SCHEDULER_LOOP_DATE_I18N_FIX_2026-09-09"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -1566,6 +1566,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         });
 
         // --- UI & Control Functions ---
+        function applyKillDateLanguage() {
+            const langData = TRANSLATIONS[currentLang];
+            if (!langData) return;
+            const label = document.querySelector('label[data-i18n="labelKillDate"]');
+            const input = document.getElementById('killDate');
+            const hint = document.querySelector('[data-i18n="hintKillDate"]');
+            if (label && langData.labelKillDate) label.textContent = langData.labelKillDate;
+            if (input && langData.phKillDate) input.placeholder = langData.phKillDate;
+            if (hint && langData.hintKillDate) hint.textContent = langData.hintKillDate;
+        }
+
         function applyLanguage() {
             const langData = TRANSLATIONS[currentLang];
             document.querySelectorAll('[data-i18n]').forEach(el => {
@@ -1578,6 +1589,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
             
             updateNotifyButtonUI();
+            applyKillDateLanguage();
             renderTable();
         }
 
@@ -6029,6 +6041,7 @@ async def _run_boss_voice_stage(boss_name: str, stage: str, notice_minutes: int,
         _boss_voice_stage_inflight.discard(key)
 
 
+@tasks.loop(seconds=15)
 async def check_boss_notifications():
     try:
         now = datetime.now(TZ_THAI)
