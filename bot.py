@@ -70,7 +70,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V82_ATTENDANCE_MONTHLY_DELETE_FIX_2026-09-09-R1"
+NOTICE_BF_PATCH_VERSION = "V83_DASHBOARD_DELETE_MONTHLY_COLLAPSE_2026-09-09-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -686,11 +686,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 </table>
             </div>
             <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mt-4">
-                <h5 class="text-warning mb-0" data-i18n="attendanceMemberMonthly">👤 สรุปรายสมาชิกสะสมรายเดือน</h5>
+                <div class="d-flex align-items-center gap-2">
+                    <h5 class="text-warning mb-0" data-i18n="attendanceMemberMonthly">👤 สรุปรายสมาชิกสะสมรายเดือน</h5>
+                    <button id="attendanceMemberMonthlyCollapseBtn" type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleAttendanceMemberMonthlyPanel()">▼ เปิด</button>
+                </div>
                 <select id="attendanceMemberMonthSelect" class="form-select form-select-sm bg-dark text-light border-secondary" style="max-width:220px;">
                     <option value="all" data-i18n="attendanceAllMonths">ทุกเดือน</option>
                 </select>
             </div>
+            <div id="attendanceMemberMonthlyPanelContent" style="display:none;">
             <div class="table-responsive mt-2">
                 <table class="table table-dark table-hover align-middle attendance-table mb-0">
                     <thead><tr>
@@ -702,6 +706,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </tr></thead>
                     <tbody id="attendanceMemberMonthlyBody"><tr><td colspan="5" class="text-center text-muted">-</td></tr></tbody>
                 </table>
+            </div>
             </div>
             </div>
         </div>
@@ -1854,6 +1859,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 }
                 window.__SKYNET_ATTENDANCE_MONTHLY_MEMBERS__ = monthlyMembers;
                 renderAttendanceMemberMonthly(monthSelect ? monthSelect.value : 'all');
+                toggleAttendanceMemberMonthlyPanel(localStorage.getItem('attendance_member_monthly_open') === '1');
             } catch (e) { console.warn('[SKYNET] attendance dashboard render:', e); }
         }
 
@@ -1955,6 +1961,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? '▲ ปิด' : '▼ เปิด');
             }
             localStorage.setItem('attendance_panel_open', shouldOpen ? '1' : '0');
+        }
+
+        function toggleAttendanceMemberMonthlyPanel(forceOpen=null) {
+            const content = document.getElementById('attendanceMemberMonthlyPanelContent');
+            const btn = document.getElementById('attendanceMemberMonthlyCollapseBtn');
+            if (!content) return;
+            const shouldOpen = forceOpen === null ? content.style.display !== 'block' : !!forceOpen;
+            content.style.display = shouldOpen ? 'block' : 'none';
+            if (btn) {
+                const key = shouldOpen ? 'attendanceCollapseClose' : 'attendanceCollapseOpen';
+                btn.textContent = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key]) || (shouldOpen ? '▲ ปิด' : '▼ เปิด');
+            }
+            localStorage.setItem('attendance_member_monthly_open', shouldOpen ? '1' : '0');
         }
 
         function applyLanguage() {
@@ -2357,6 +2376,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             requireAdmin,
             toggleAdminPanel,
             toggleAttendancePanel
+            ,toggleAttendanceMemberMonthlyPanel
         });
 
         // Keep delete failures visible to the user.
@@ -2571,9 +2591,24 @@ def delete_boss_api():
             return _api_json({'success': False, 'error': f'ไม่พบบอส `{boss_name}` ใน boss_schedule'}), 404
         target_key = matched_key
         print(f"🗑️ DASHBOARD DELETE REQUEST | boss={target_key} | uid={uid}", flush=True)
-        db.reference(f'boss_schedule/{target_key}').delete()
-        with schedule_lock:
-            boss_schedule.pop(target_key, None)
+        # Mirror the proven /delboss mutation semantics while pausing the root listener
+        # so a stale SSE snapshot cannot reinsert this record during deletion.
+        global is_updating_from_bot
+        is_updating_from_bot = True
+        try:
+            db.reference(f'boss_schedule/{target_key}').delete()
+            with schedule_lock:
+                boss_schedule.pop(target_key, None)
+            remaining = {}
+            with schedule_lock:
+                for name, data in boss_schedule.items():
+                    try:
+                        remaining[name] = _schedule_record_to_firebase(name, data)
+                    except Exception as build_exc:
+                        print(f"⚠️ DASHBOARD DELETE skip serialization | boss={name}: {build_exc}", flush=True)
+            db.reference('boss_schedule').set(remaining)
+        finally:
+            is_updating_from_bot = False
         print(f"✅ DASHBOARD DELETE COMPLETE | boss={target_key} | uid={uid}", flush=True)
         return _api_json({'success': True, 'bossName': target_key})
     except Exception as exc:
