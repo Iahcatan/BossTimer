@@ -69,7 +69,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V75_VOICE_CONFIRMATION_QUEUE_CLEANUP_2026-09-09"
+NOTICE_BF_PATCH_VERSION = "V76_VOICE_SPAWN_HARDEN_DATE_I18N_2026-09-09"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -5832,6 +5832,7 @@ def get_notification_mentions(guild: discord.Guild) -> str:
 
 
 boss_notification_diag_last_ts = {}
+_boss_voice_stage_inflight = set()
 
 def _queue_boss_rest_notification(
     boss_name: str,
@@ -5951,6 +5952,83 @@ async def save_boss_notification_flags(boss_name: str, **flags):
 
 
 @tasks.loop(seconds=15)
+async def _run_boss_voice_stage(boss_name: str, stage: str, notice_minutes: int, target_guilds):
+    """Run one Boss Voice announcement without blocking the Boss scheduler loop.
+
+    The previous V75 scheduler awaited Voice/TTS directly. A slow advance announcement
+    could therefore delay the scheduler past the real spawn time, after which the stale
+    guard could mark voice_spawn_sent=True without ever speaking the spawn announcement.
+    This helper keeps the same occupancy and Voice/TTS rules but runs independently.
+    """
+    key = (str(boss_name), str(stage))
+    try:
+        spoken_name = get_boss_pronunciation(boss_name)
+        all_ok = True
+        spoken_rooms = 0
+        for guild in list(target_guilds):
+            configured_rooms = get_configured_voice_channels(guild)
+            rooms = [r for r in configured_rooms if any(not m.bot for m in r.members)]
+            print(
+                f"🔎 Boss VOICE {stage.upper()} targets | guild={guild.name} | "
+                f"configured={len(configured_rooms)} | occupied={len(rooms)}",
+                flush=True,
+            )
+            if not rooms:
+                print(
+                    f"⏭️ Boss VOICE WAIT | guild={guild.name} | configured={len(configured_rooms)} | "
+                    f"occupied=0 | stage={stage}",
+                    flush=True,
+                )
+                continue
+
+            for room in rooms:
+                try:
+                    if stage == "advance":
+                        text_th = f"บอส {spoken_name} จะเกิดในอีก {notice_minutes} นาทีค่ะ"
+                        text_en = f"Boss {boss_name} will spawn in {notice_minutes} minutes."
+                        text_ko = f"보스 {boss_name}가 {notice_minutes}분 후에 나타납니다."
+                    else:
+                        text_th = f"บอส {spoken_name} เกิดแล้วค่ะ"
+                        text_en = f"Boss {boss_name} has spawned."
+                        text_ko = f"보스 {boss_name}가 나타났습니다."
+
+                    result = await asyncio.wait_for(
+                        speak_in_guild(
+                            guild,
+                            text_th=text_th,
+                            text_en=text_en,
+                            text_ko=text_ko,
+                            target_channel=room,
+                        ),
+                        timeout=180,
+                    )
+                    if result:
+                        spoken_rooms += 1
+                    else:
+                        all_ok = False
+                except Exception as exc:
+                    all_ok = False
+                    print(
+                        f"⚠️ {stage.title()} TTS failed ({boss_name}/{guild.name}/{room.name}): {exc}",
+                        flush=True,
+                    )
+
+        print(
+            f"🔊 Boss VOICE {stage.upper()} RESULT | boss={boss_name} | "
+            f"spoken_rooms={spoken_rooms} | all_ok={all_ok}",
+            flush=True,
+        )
+        if spoken_rooms > 0 and all_ok:
+            if stage == "advance":
+                await save_boss_notification_flags(boss_name, voice_notice_sent=True)
+                print(f"🔊 Advance TTS sent: {boss_name} -> {spoken_rooms} occupied room(s)", flush=True)
+            else:
+                await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
+                print(f"🔊 Spawn TTS sent: {boss_name} -> {spoken_rooms} occupied room(s)", flush=True)
+    finally:
+        _boss_voice_stage_inflight.discard(key)
+
+
 async def check_boss_notifications():
     try:
         now = datetime.now(TZ_THAI)
@@ -6099,36 +6177,18 @@ async def check_boss_notifications():
                 # The queue owns the text send and flag update. Do not call Discord REST here.
 
             if 0 < time_left <= notice_seconds and not voice_advance:
-                spoken_name = get_boss_pronunciation(boss_name)
-                all_ok = True
-                spoken_rooms = 0
-                for guild in target_guilds:
-                    configured_rooms = get_configured_voice_channels(guild)
-                    rooms = [r for r in configured_rooms if any(not m.bot for m in r.members)]
-                    if not rooms:
-                        print(f"⏭️ Boss VOICE WAIT | guild={guild.name} | configured={len(configured_rooms)} | occupied=0 | stage=advance")
-                    for room in rooms:
-                        try:
-                            result = await asyncio.wait_for(
-                                speak_in_guild(
-                                    guild,
-                                    text_th=f"บอส {spoken_name} จะเกิดในอีก {notice_minutes} นาทีค่ะ",
-                                    text_en=f"Boss {boss_name} will spawn in {notice_minutes} minutes.",
-                                    text_ko=f"보스 {boss_name}가 {notice_minutes}분 후에 나타납니다.",
-                                    target_channel=room
-                                ),
-                                timeout=180
-                            )
-                            spoken_rooms += 1
-                            if result is False:
-                                all_ok = False
-                        except Exception as e:
-                            all_ok = False
-                            print(f"⚠️ Advance TTS failed ({boss_name}/{guild.name}/{room.name}): {e}")
-                if spoken_rooms > 0 and all_ok:
-                    await save_boss_notification_flags(boss_name, voice_notice_sent=True)
-                    voice_advance = True
-                    print(f"🔊 Advance TTS sent: {boss_name} -> {spoken_rooms} occupied room(s)")
+                voice_key = (str(boss_name), "advance")
+                if voice_key not in _boss_voice_stage_inflight:
+                    _boss_voice_stage_inflight.add(voice_key)
+                    print(
+                        f"📢 Schedule Boss VOICE ADVANCE task | boss={boss_name} | "
+                        f"left={time_left:.1f}s | notice={notice_minutes}m",
+                        flush=True,
+                    )
+                    asyncio.create_task(
+                        _run_boss_voice_stage(boss_name, "advance", notice_minutes, target_guilds),
+                        name=f"boss-voice-advance-{boss_name}",
+                    )
 
             # Spawn: only notify at the actual crossing. Old schedules >60s late
             # are marked complete instead of replaying after every deploy/reload.
@@ -6150,36 +6210,18 @@ async def check_boss_notifications():
                 # The queue owns the text send and flag update. Do not call Discord REST here.
 
             if -120 <= time_left <= 0 and not voice_spawn:
-                spoken_name = get_boss_pronunciation(boss_name)
-                all_ok = True
-                spoken_rooms = 0
-                for guild in target_guilds:
-                    configured_rooms = get_configured_voice_channels(guild)
-                    rooms = [r for r in configured_rooms if any(not m.bot for m in r.members)]
-                    if not rooms:
-                        print(f"⏭️ Boss VOICE WAIT | guild={guild.name} | configured={len(configured_rooms)} | occupied=0 | stage=spawn")
-                    for room in rooms:
-                        try:
-                            result = await asyncio.wait_for(
-                                speak_in_guild(
-                                    guild,
-                                    text_th=f"บอส {spoken_name} เกิดแล้วค่ะ",
-                                    text_en=f"Boss {boss_name} has spawned.",
-                                    text_ko=f"보스 {boss_name}가 나타났습니다.",
-                                    target_channel=room
-                                ),
-                                timeout=180
-                            )
-                            spoken_rooms += 1
-                            if result is False:
-                                all_ok = False
-                        except Exception as e:
-                            all_ok = False
-                            print(f"⚠️ Spawn TTS failed ({boss_name}/{guild.name}/{room.name}): {e}")
-                if spoken_rooms > 0 and all_ok:
-                    await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
-                    voice_spawn = True
-                    print(f"🔊 Spawn TTS sent: {boss_name} -> {spoken_rooms} occupied room(s)")
+                voice_key = (str(boss_name), "spawn")
+                if voice_key not in _boss_voice_stage_inflight:
+                    _boss_voice_stage_inflight.add(voice_key)
+                    print(
+                        f"📢 Schedule Boss VOICE SPAWN task | boss={boss_name} | "
+                        f"left={time_left:.1f}s | guilds={len(target_guilds)}",
+                        flush=True,
+                    )
+                    asyncio.create_task(
+                        _run_boss_voice_stage(boss_name, "spawn", notice_minutes, target_guilds),
+                        name=f"boss-voice-spawn-{boss_name}",
+                    )
             elif time_left < -120 and not voice_spawn:
                 await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
                 print(f"⏭️ Legacy expired boss marked complete: {boss_name} (left={time_left:.1f}s)")
