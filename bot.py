@@ -2026,7 +2026,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     <td>${data.noticeMinutes} ${langData.minUnit}</td>
                     <td><span class="badge bg-secondary">${escapeHtml(resolveRecordedBy(data) || data.recordedBy || 'ไม่ระบุ')}</span></td>
                     <td>
-                        <button class="btn btn-sm btn-danger" onclick="deleteBoss('${bossName}')">${langData.btnDelete}</button>
+                        <button class="btn btn-sm btn-danger" onclick='deleteBoss(${JSON.stringify(bossName)})'>${langData.btnDelete}</button>
                     </td>
                 `;
                 tbody.appendChild(tr);
@@ -3694,6 +3694,7 @@ AUDIT_ACTION_TRANSLATIONS = {
     "เพิ่มบอส (/addboss)":{"th":"เพิ่มบอส (/addboss)","en":"Add Boss (/addboss)","ko":"보스 추가 (/addboss)"},
     "ลบบอส (/delboss)":{"th":"ลบบอส (/delboss)","en":"Delete Boss (/delboss)","ko":"보스 삭제 (/delboss)"},
     "สร้าง Live Embed (/setlive)":{"th":"สร้าง Live Embed (/setlive)","en":"Create Live Embed (/setlive)","ko":"Live Embed 생성 (/setlive)"},
+    "ประกาศ Code / Item ของบอส":{"th":"ประกาศ Code / Item ของบอส","en":"Boss Code / Item Announcement","ko":"보스 코드 / 아이템 공지"},
     "ประกาศเช็คชื่อบอส":{"th":"ประกาศเช็คชื่อบอส","en":"Boss Attendance Announcement","ko":"보스 출석 공지"},
 }
 
@@ -3721,8 +3722,8 @@ def _translate_audit_details(action: str, details: str, lang: str) -> str:
         if m: return f"🗑️ Deleted boss: `{m.group(1)}`" if lang=="en" else f"🗑️ 삭제된 보스: `{m.group(1)}`"
     if action=="สร้าง Live Embed (/setlive)":
         return text.replace("ช่อง:","Channel:") if lang=="en" else text.replace("ช่อง:","채널:").replace("Message ID:","메시지 ID:")
-    if action=="ประกาศเช็คชื่อบอส":
-        return text.replace("ผู้ประกาศ","Announcer" if lang=="en" else "공지자").replace("ชื่อบอส","Boss" if lang=="en" else "보스").replace("โค้ด (Code)","Code").replace("ไอเทมดรอป","Drop Item" if lang=="en" else "드롭 아이템")
+    if action in {"ประกาศเช็คชื่อบอส", "ประกาศ Code / Item ของบอส"}:
+        return text.replace("ผู้ประกาศ", "Announcer" if lang=="en" else "공지자").replace("ชื่อบอส", "Boss" if lang=="en" else "보스").replace("โค้ด (Code)", "Code").replace("ไอเทมดรอป", "Drop Item" if lang=="en" else "드롭 아이템")
     return text
 
 def _build_audit_embed(user: discord.User, action: str, details: str, color: discord.Color, *, languages=None):
@@ -7834,74 +7835,95 @@ async def attendance_monthly_report_loop():
             print(f"⚠️ Monthly Attendance report send failed | guild={guild.name}: {e}", flush=True)
 
 
-@bot.tree.command(name="attendance", description="แจ้งเตือนเช็คชื่อบอสพร้อมโค้ดและไอเทมดรอป")
+@bot.tree.command(name="code", description="ประกาศ Code และ Drop Item ของบอส")
 @app_commands.describe(
-    boss_name="ชื่อบอสที่ต้องการเช็คชื่อ",
+    boss_name="ชื่อบอส",
     code="โค้ดสำหรับเช็คชื่อ (Code)",
     drop_item="ไอเทมที่ดรอป (Drop Item)"
 )
 @has_allowed_role()
-async def attendance_command(interaction: discord.Interaction, boss_name: str, code: Optional[str] = None, drop_item: Optional[str] = None):
-    # Backward-compatible: supplying code + drop_item keeps the original attendance announcement.
-    # Omitting both opens the new Admin/Owner Boss Raid Activity creator.
-    if code is None and drop_item is None:
-        if not interaction.guild or not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
-            await interaction.response.send_message("❌ การสร้างกิจกรรม Attendance อนุญาตเฉพาะ Admin หรือ Server Owner", ephemeral=True)
-            return
-        try:
-            await interaction.response.send_modal(RaidAttendanceCreateModal(boss_name))
-        except Exception as e:
-            print(f"❌ เปิด Activity creation modal ไม่สำเร็จ: {e}", flush=True)
-        return
-    if not code or not drop_item:
-        await interaction.response.send_message("❌ สำหรับการประกาศ Attendance แบบเดิม ต้องระบุทั้ง Code และ Drop Item หรือเว้นทั้งสองช่องเพื่อสร้างกิจกรรมใหม่", ephemeral=True)
-        return
+async def code_command(interaction: discord.Interaction, boss_name: str, code: str, drop_item: str):
+    """Original /attendance announcement flow, moved to /code so /attendance is attendance-only."""
     await _safe_interaction_ack(interaction, ephemeral=False)
-    
+
     await refresh_discord_notification_languages()
-    enabled=get_enabled_discord_notification_languages() or ["th"]
-    primary=enabled[0]
-    title_map={"th":"📢 แจ้งเตือนเช็คชื่อบอส (Attendance)","en":"📢 Boss Attendance Announcement","ko":"📢 보스 출석 공지"}
-    embed=discord.Embed(title=title_map[primary],color=discord.Color.green(),timestamp=datetime.now(TZ_THAI))
-    labels={"th":("👾 ชื่อบอส","🔑 โค้ด (Code)","🎁 ไอเทมดรอป"),"en":("👾 Boss","🔑 Code","🎁 Drop Item"),"ko":("👾 보스","🔑 코드","🎁 드롭 아이템")}
+    enabled = get_enabled_discord_notification_languages() or ["th"]
+    primary = enabled[0]
+    title_map = {
+        "th": "📢 ประกาศ Code / Item ของบอส",
+        "en": "📢 Boss Code / Item Announcement",
+        "ko": "📢 보스 코드 / 아이템 공지",
+    }
+    embed = discord.Embed(title=title_map[primary], color=discord.Color.green(), timestamp=datetime.now(TZ_THAI))
+    labels = {
+        "th": ("👾 ชื่อบอส", "🔑 โค้ด (Code)", "🎁 ไอเทมดรอป"),
+        "en": ("👾 Boss", "🔑 Code", "🎁 Drop Item"),
+        "ko": ("👾 보스", "🔑 코드", "🎁 드롭 아이템"),
+    }
     for lang in enabled:
-        prefix={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]
-        lb,lc,ld=labels[lang]
-        embed.add_field(name=f"{prefix} • {lb}",value=f"`{boss_name}`",inline=True)
-        embed.add_field(name=lc,value=f"**{code}**",inline=True)
-        embed.add_field(name=ld,value=f"`{drop_item}`",inline=False)
+        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+        lb, lc, ld = labels[lang]
+        embed.add_field(name=f"{prefix} • {lb}", value=f"`{boss_name}`", inline=True)
+        embed.add_field(name=lc, value=f"**{code}**", inline=True)
+        embed.add_field(name=ld, value=f"`{drop_item}`", inline=False)
     embed.set_footer(text=f"ประกาศโดย {interaction.user.display_name}")
-    
-    await guarded_interaction_followup_send(interaction, "interaction-followup", content="✅ ส่งประกาศเช็คชื่อสำเร็จ!", embed=embed)
-    
+
+    await guarded_interaction_followup_send(
+        interaction, "interaction-followup", content="✅ ส่งประกาศ Code / Item สำเร็จ!", embed=embed
+    )
+
     canonical_name = get_boss_canonical_name(boss_name)
     spoken_name = get_boss_pronunciation(canonical_name)
-    
-    spoken_th = f"ประกาศเช็คชื่อบอส {spoken_name} โค้ดคือ {code} ไอเทมที่ดรอปคือ {drop_item} ค่ะ"
-    spoken_en = f"Attendance for boss {boss_name}. The code is {code}. Drop item is {drop_item}."
-    spoken_ko = f"보스 {boss_name} 출석 체크입니다. 코드는 {code} 이며, 드롭 아이템은 {drop_item} 입니다."
-    
+    spoken_th = f"ประกาศข้อมูลบอส {spoken_name} โค้ดคือ {code} ไอเทมที่ดรอปคือ {drop_item} ค่ะ"
+    spoken_en = f"Boss {boss_name}. The code is {code}. Drop item is {drop_item}."
+    spoken_ko = f"보스 {boss_name} 정보입니다. 코드는 {code} 이며, 드롭 아이템은 {drop_item} 입니다."
     asyncio.create_task(speak_in_guild(interaction.guild, text_th=spoken_th, text_en=spoken_en, text_ko=spoken_ko))
-    
+
     if interaction.guild:
         attendance_channel = discord.utils.get(interaction.guild.text_channels, name="boss-attendance")
         if attendance_channel:
             await refresh_discord_notification_languages()
-            enabled=get_enabled_discord_notification_languages() or ["th"]
-            primary=enabled[0]
-            log_embed=discord.Embed(title=f"📝 Audit Log: {_translate_audit_action('ประกาศเช็คชื่อบอส',primary)}",color=discord.Color.green(),timestamp=datetime.now(TZ_THAI))
-            labels={"th":("ผู้ประกาศ","ชื่อบอส","โค้ด (Code)","ไอเทมดรอป"),"en":("Announcer","Boss","Code","Drop Item"),"ko":("공지자","보스","코드","드롭 아이템")}
+            enabled = get_enabled_discord_notification_languages() or ["th"]
+            primary = enabled[0]
+            log_embed = discord.Embed(
+                title=f"📝 Audit Log: {_translate_audit_action('ประกาศ Code / Item ของบอส', primary)}",
+                color=discord.Color.green(),
+                timestamp=datetime.now(TZ_THAI),
+            )
+            labels = {
+                "th": ("ผู้ประกาศ", "ชื่อบอส", "โค้ด (Code)", "ไอเทมดรอป"),
+                "en": ("Announcer", "Boss", "Code", "Drop Item"),
+                "ko": ("공지자", "보스", "코드", "드롭 아이템"),
+            }
             for lang in enabled:
-                prefix={"th":"🇹🇭 ไทย","en":"🇺🇸 English","ko":"🇰🇷 한국어"}[lang]; la,lb,lc,ld=labels[lang]
-                log_embed.add_field(name=f"{prefix} • 👤 {la}",value=f"{interaction.user.mention} (`{interaction.user.name}`)",inline=False)
-                log_embed.add_field(name=f"👾 {lb}",value=f"`{boss_name}`",inline=True)
-                log_embed.add_field(name=f"🔑 {lc}",value=f"**{code}**",inline=True)
-                log_embed.add_field(name=f"🎁 {ld}",value=f"`{drop_item}`",inline=False)
+                prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
+                la, lb, lc, ld = labels[lang]
+                log_embed.add_field(name=f"{prefix} • 👤 {la}", value=f"{interaction.user.mention} (`{interaction.user.name}`)", inline=False)
+                log_embed.add_field(name=f"👾 {lb}", value=f"`{boss_name}`", inline=True)
+                log_embed.add_field(name=f"🔑 {lc}", value=f"**{code}**", inline=True)
+                log_embed.add_field(name=f"🎁 {ld}", value=f"`{drop_item}`", inline=False)
             log_embed.set_footer(text=f"User ID: {interaction.user.id}")
             try:
-                await guarded_channel_send(attendance_channel, context="audit:boss-attendance", embed=log_embed)
+                await guarded_channel_send(attendance_channel, context="audit:boss-code", embed=log_embed)
             except Exception as e:
                 print(f"❌ ส่ง Audit Log ใน boss-attendance ไม่สำเร็จ: {e}")
+
+
+@bot.tree.command(name="attendance", description="สร้างและจัดการกิจกรรมเช็คชื่อการโจมตีบอส")
+@app_commands.describe(boss_name="ชื่อบอสสำหรับสร้างกิจกรรม Attendance")
+async def attendance_command(interaction: discord.Interaction, boss_name: str):
+    """Create a Boss Raid Attendance activity; creation is Admin/Server Owner only."""
+    if not interaction.guild or not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
+        await interaction.response.send_message(
+            "❌ การสร้างกิจกรรม Attendance อนุญาตเฉพาะ Admin หรือ Server Owner", ephemeral=True
+        )
+        return
+    try:
+        await interaction.response.send_modal(RaidAttendanceCreateModal(boss_name))
+    except Exception as e:
+        print(f"❌ เปิด Activity creation modal ไม่สำเร็จ: {e}", flush=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ ไม่สามารถเปิดแบบฟอร์มสร้างกิจกรรมได้ กรุณาลองใหม่", ephemeral=True)
 
 # ==========================================
 # 🚀 11. Run Bot Entry Point
@@ -8175,12 +8197,12 @@ def validate_runtime_integrity():
     if missing:
         raise RuntimeError("V46 integrity check failed; missing functions: " + ", ".join(missing))
     direct = [cmd.name for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Command)]
-    if len(direct) != 16:
-        raise RuntimeError(f"V46 integrity check failed; expected 16 direct slash commands, found {len(direct)}")
+    if len(direct) != 18:
+        raise RuntimeError(f"V79 integrity check failed; expected 18 direct slash commands, found {len(direct)}")
     group = next((cmd for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Group) and cmd.name == "add"), None)
     if group is None or not any(sub.name == "boss" for sub in group.commands):
-        raise RuntimeError("V46 integrity check failed; /add boss subcommand missing")
-    print("✅ V46 integrity check passed | 16 direct + /add boss = 17 command paths", flush=True)
+        raise RuntimeError("V79 integrity check failed; /add boss subcommand missing")
+    print("✅ V79 integrity check passed | 18 direct + /add boss = 19 command paths", flush=True)
 
 
 async def run_bot_with_backoff(token: str):
@@ -8336,6 +8358,7 @@ REQUIRED_PATCH_FUNCTIONS = (
 EXPECTED_SLASH_COMMANDS = {
     "add boss",
     "attendance",
+    "code",
     "delboss",
     "disconnect",
     "join",
@@ -8428,11 +8451,11 @@ def _run_v47_command_integrity_check():
     if missing:
         print(f"❌ V50 integrity failure | missing symbols: {missing}", flush=True)
         raise RuntimeError(f"V50 integrity failure: {missing}")
-    if len(direct_names) != 17:
-        print(f"⚠️ V73 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
+    if len(direct_names) != 18:
+        print(f"⚠️ V79 command count unexpected at import time | direct={len(direct_names)} | commands={direct_names}", flush=True)
     else:
         print(
-            f"✅ V73 command integrity check passed | 17 direct + /add boss = 18 command paths | "
+            f"✅ V79 command integrity check passed | 18 direct + /add boss = 19 command paths | "
             f"direct={', '.join(direct_names)}",
             flush=True,
         )
