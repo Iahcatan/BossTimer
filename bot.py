@@ -71,7 +71,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V93_AUTO_ATTENDANCE_LIBRARY_SCHEDULE_FIX_2026-09-10-R1"
+NOTICE_BF_PATCH_VERSION = "V95_AUTO_ATTENDANCE_GUARD_EXCLUSION_FIX_2026-09-10-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -977,6 +977,52 @@ voice_config = {}
 notification_channels = {}
 
 attendance_config = {}  # guild_id -> {summary_channel_id, ...}
+
+# Bosses that must NOT create automatic Attendance activities.
+# Comparison is case-insensitive and ignores surrounding whitespace.
+AUTO_ATTENDANCE_EXCLUDED_BOSSES = {
+    name.casefold() for name in (
+        "Elemental Queen",
+        "Tank",
+        "Swirl Flame",
+        "Maelstrom",
+        "Twister",
+        "Chief Magief",
+        "Apapa",
+        "Corrupt Forest Keeper",
+        "Recluse",
+        "Blackskull",
+        "Sleepy Kooii",
+        "Awaken Kooii",
+        "Eeheehee",
+        "Ooheeheek",
+        "Oohehe",
+        "Guardian Imp",
+        "Blackjuno",
+        "Blacksky",
+        "Red Fox",
+        "7tailfox",
+        "777Tailfox",
+        "Sunrise Flower",
+        "Magma Senior Thief",
+        "Bbinikjoe",
+        "Bigmouse",
+        "Poison Root Flower",
+        "Contaminated Queen Bee",
+        "Rotten Pudding",
+        "Swamp Flower Monster",
+        "Glucose",
+        "Overload",
+        "Shaaack",
+        "Suuuk",
+        "Sususuk",
+        "sandgrave",
+        "Elder Beholder",
+    )
+}
+
+def is_auto_attendance_excluded_boss(boss_name: str) -> bool:
+    return str(boss_name or "").strip().casefold() in AUTO_ATTENDANCE_EXCLUDED_BOSSES
 attendance_lifecycle_lock = asyncio.Lock()
 custom_bosses = {}
 last_voice_connect_attempt = {}
@@ -1848,9 +1894,9 @@ async def guarded_discord_call(
             raise
 
 
-async def guarded_channel_send(channel, *, context: str, content=None, embed=None, background: bool | None = None):
+async def guarded_channel_send(channel, *, context: str, content=None, embed=None, view=None, background: bool | None = None):
     return await guarded_discord_call(
-        lambda: channel.send(content=content, embed=embed),
+        lambda: channel.send(content=content, embed=embed, view=view),
         context=context,
         background=background,
     )
@@ -6391,6 +6437,10 @@ async def _autoattendance_find_or_create_for_schedule(
     exact spawn timestamp, so repeated lifecycle ticks/restarts remain idempotent.
     """
     if not _autoattendance_enabled_for_guild(guild.id):
+        return False
+
+    # User-configured exclusion list: do not create or retry Auto Attendance for these bosses.
+    if is_auto_attendance_excluded_boss(boss_name):
         return False
 
     spawn_dt = parse_to_thai_datetime(schedule.get("spawn_time") or schedule.get("spawnTimeMs"))
