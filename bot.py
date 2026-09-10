@@ -71,7 +71,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V88_ATTENDANCE_CHANGE_EVENT_SYNC_2026-09-10-R1"
+NOTICE_BF_PATCH_VERSION = "V89_ATTENDANCE_STREAM_FIX_2026-09-10-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -557,9 +557,18 @@ def attendance_data_api():
         return _api_json({'success': False, 'error': str(exc)}), 500
 
 
-@app.route('/api/attendance-stream', methods=['GET'])
+@app.route('/api/attendance-stream', methods=['GET', 'OPTIONS'])
 def attendance_stream_api():
     """Authenticated SSE stream. Payloads are emitted only when Attendance changes."""
+    origin = request.headers.get('Origin', '')
+    allowed = {'https://iahcatan.github.io', 'https://bosstimer-ry18.onrender.com', 'http://localhost:5000'}
+    if request.method == 'OPTIONS':
+        response = Response(status=204)
+        response.headers['Access-Control-Allow-Origin'] = origin if origin in allowed else 'https://iahcatan.github.io'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+        response.headers['Access-Control-Max-Age'] = '600'
+        return response
     auth_header = request.headers.get('Authorization', '').strip()
     if not auth_header.lower().startswith('bearer '):
         return jsonify({'success': False, 'error': 'Missing Firebase ID token'}), 401
@@ -583,13 +592,13 @@ def attendance_stream_api():
     def generate():
         try:
             if current is not None:
-                yield f"data: {json.dumps(current, ensure_ascii=False, separators=(',', ':'))}\\n\\n"
+                yield f"data: {json.dumps(current, ensure_ascii=False, separators=(',', ':'))}\n\n"
             while True:
                 try:
-                    payload = client_queue.get(timeout=300)
-                    yield f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\\n\\n"
+                    payload = client_queue.get(timeout=25)
+                    yield f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
                 except queue.Empty:
-                    yield ": keepalive\\n\\n"
+                    yield ": keepalive\n\n"
         finally:
             with _attendance_stream_clients_lock:
                 _attendance_stream_clients.discard(client_queue)
@@ -597,8 +606,11 @@ def attendance_stream_api():
     origin = request.headers.get('Origin', '')
     allowed = {'https://iahcatan.github.io', 'https://bosstimer-ry18.onrender.com', 'http://localhost:5000'}
     response.headers['Access-Control-Allow-Origin'] = origin if origin in allowed else 'https://iahcatan.github.io'
-    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Authorization, Content-Type'
+    response.headers['Cache-Control'] = 'no-cache, no-transform'
     response.headers['X-Accel-Buffering'] = 'no'
+    response.headers['Vary'] = 'Origin'
     response.headers['Connection'] = 'keep-alive'
     return response
 
