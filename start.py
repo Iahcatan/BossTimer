@@ -92,7 +92,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V66 global-command dedup (single CommandTree)")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V92 command sync (single CommandTree) with Auto Attendance")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
@@ -102,7 +102,7 @@ async def sync_commands_once():
         log(f"📋 Local commands: {len(command_names)}")
         log("📋 " + ", ".join(command_names))
 
-        required = {"status", "kill", "setvoice"}
+        required = {"status", "kill", "setvoice", "autoattendance"}
         missing_local = sorted(required - set(command_names))
         if missing_local:
             log("❌ Required commands missing locally: " + ", ".join(missing_local))
@@ -179,7 +179,7 @@ async def sync_commands_once():
                 if missing_remote:
                     log("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
                 else:
-                    log("🟢 Required commands verified: /status /kill /setvoice")
+                    log("🟢 Required commands verified: /status /kill /setvoice /autoattendance")
                 successful += 1
             except Exception as exc:
                 log(f"❌ Guild Sync failed: {guild.name} ({guild.id}): {exc!r}")

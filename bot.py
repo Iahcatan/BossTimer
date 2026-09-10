@@ -11,6 +11,7 @@ import shutil
 import traceback
 import logging
 import re
+import hashlib
 import uuid
 import sqlite3
 import queue
@@ -71,7 +72,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V90_ATTENDANCE_STREAM_WAITRESS_FIX_R2_2026-09-10"
+NOTICE_BF_PATCH_VERSION = "V92_AUTO_ATTENDANCE_LIBRARY_SCHEDULE_2026-09-10-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -978,6 +979,8 @@ notification_channels = {}
 
 attendance_config = {}  # guild_id -> {summary_channel_id, ...}
 attendance_lifecycle_lock = asyncio.Lock()
+auto_attendance_inflight = set()
+AUTO_ATTENDANCE_WINDOW_SECONDS = 30 * 60
 custom_bosses = {}
 last_voice_connect_attempt = {}
 last_channel_fetch_attempt = {}
@@ -1848,9 +1851,9 @@ async def guarded_discord_call(
             raise
 
 
-async def guarded_channel_send(channel, *, context: str, content=None, embed=None, background: bool | None = None):
+async def guarded_channel_send(channel, *, context: str, content=None, embed=None, view=None, background: bool | None = None):
     return await guarded_discord_call(
-        lambda: channel.send(content=content, embed=embed),
+        lambda: channel.send(content=content, embed=embed, view=view),
         context=context,
         background=background,
     )
@@ -4768,1487 +4771,222 @@ async def _run_boss_voice_stage(boss_name: str, stage: str, notice_minutes: int,
         _boss_voice_stage_inflight.discard(key)
 
 
-@tasks.loop(seconds=15)
-async def check_boss_notifications():
-    try:
-        now = datetime.now(TZ_THAI)
+async def ensure_library_boss_schedule():
+    """Keep the next fixed daily Library Boss timers in the canonical boss_schedule.
+
+    The existing Library Boss 08:50/20:50 notifier remains untouched. These records
+    are marked with completed notification flags so the generic Boss notification
+    loop does not duplicate that legacy Library notification path.
+    """
+    now = datetime.now(TZ_THAI)
+    target_slots = [(9, 0), (21, 0)]
+    changed_records = {}
+
+    with schedule_lock:
+        current = {k: dict(v) for k, v in boss_schedule.items() if isinstance(v, dict)}
+
+    for hour, minute in target_slots:
+        spawn = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if spawn <= now:
+            spawn += timedelta(days=1)
+        key = f"Library Boss {hour:02d}:{minute:02d}"
+        existing = current.get(key)
+        existing_spawn = parse_to_thai_datetime((existing or {}).get("spawn_time") or (existing or {}).get("spawnTimeMs"))
+        if existing_spawn and abs((existing_spawn - spawn).total_seconds()) < 1:
+            continue
+
+        record = {
+            "spawn_time": spawn,
+            "noticeMinutes": 5,
+            "notified_advance": True,
+            "notified_spawn": True,
+            "voice_notice_sent": True,
+            "voice_spawn_sent": True,
+            "auto_attendance_only": True,
+            "library_boss_fixed_time": f"{hour:02d}:{minute:02d}",
+            "recorded_by": "SKYNET-AUTO-LIBRARY",
+            "recordedByDisplayName": "SKYNET Auto Library Boss",
+            "recordedByUserId": "",
+        }
+        changed_records[key] = record
+
+    if not changed_records:
+        return
+
+    for key, record in changed_records.items():
         with schedule_lock:
-            schedule_copy = {boss: dict(data) for boss, data in boss_schedule.items() if isinstance(data, dict)}
+            boss_schedule[key] = record
+        try:
+            firebase_record = _schedule_record_to_firebase(key, record)
+            firebase_record["auto_attendance_only"] = True
+            firebase_record["library_boss_fixed_time"] = record["library_boss_fixed_time"]
+            await asyncio.wait_for(
+                asyncio.to_thread(db.reference(f"boss_schedule/{key}").set, firebase_record), timeout=8
+            )
+        except Exception as exc:
+            print(f"⚠️ Library Boss schedule write failed safely | key={key} | {exc}", flush=True)
+            continue
+
+    try:
+        with schedule_lock:
+            local_snapshot = {
+                boss_name: _schedule_record_to_firebase(boss_name, data)
+                for boss_name, data in boss_schedule.items()
+                if isinstance(data, dict)
+            }
+        await asyncio.to_thread(save_json_local, DATA_FILE, local_snapshot)
+    except Exception as exc:
+        print(f"⚠️ Library Boss local schedule snapshot failed safely: {exc}", flush=True)
+
+    print(
+        "📚 Library Boss schedule ensured | "
+        + ", ".join(f"{key}={record['spawn_time'].isoformat()}" for key, record in changed_records.items()),
+        flush=True,
+    )
+
+def _auto_attendance_activity_id(boss_name: str, spawn_dt: datetime) -> str:
+    seed = f"{boss_name}|{spawn_dt.astimezone(TZ_THAI).isoformat()}".encode("utf-8")
+    return "auto_" + hashlib.sha256(seed).hexdigest()[:24]
+
+
+async def _attendance_find_auto_activity(guild_id: int, activity_id: str):
+    return await _attendance_fetch_activity(guild_id, activity_id)
+
+
+async def ensure_auto_attendance_activities():
+    """Create one 30-minute check-in window for every enabled guild/boss spawn.
+
+    Source is the existing boss_schedule used by Dashboard and Discord. Firebase
+    activity IDs are deterministic, so the 30-second lifecycle loop cannot create
+    duplicate Attendance activities for the same scheduled spawn.
+    """
+    now = datetime.now(TZ_THAI)
+    with schedule_lock:
+        schedule_copy = {boss: dict(data) for boss, data in boss_schedule.items() if isinstance(data, dict)}
+        config_copy = {str(k): dict(v) for k, v in (attendance_config or {}).items() if isinstance(v, dict)}
+
+    for guild in list(bot.guilds):
+        cfg = config_copy.get(str(guild.id), {})
+        if not parse_bool(cfg.get("auto_attendance_enabled", False)):
+            continue
+        summary_id = cfg.get("summary_channel_id")
+        try:
+            summary_id = int(summary_id or 0)
+        except (TypeError, ValueError):
+            summary_id = 0
+        channel = guild.get_channel(summary_id) if summary_id else None
+        if not isinstance(channel, discord.TextChannel):
+            channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
+        if not isinstance(channel, discord.TextChannel):
+            channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+        if not isinstance(channel, discord.TextChannel):
+            print(f"⚠️ Auto Attendance skipped | guild={guild.name} | no text channel", flush=True)
+            continue
 
         for boss_name, data in schedule_copy.items():
-            spawn_time = parse_to_thai_datetime(data.get("spawn_time") or data.get("spawnTimeMs"))
-            if not spawn_time:
-                print(f"⚠️ Boss notification skip: {boss_name} has invalid spawn time")
+            spawn_dt = parse_to_thai_datetime(data.get("spawn_time") or data.get("spawnTimeMs"))
+            if not spawn_dt:
+                continue
+            open_dt = spawn_dt - timedelta(seconds=AUTO_ATTENDANCE_WINDOW_SECONDS)
+            if now < open_dt or now >= spawn_dt:
                 continue
 
-            time_left = (spawn_time - now).total_seconds()
-            try:
-                notice_minutes = max(1, int(data.get("noticeMinutes") or get_boss_advance_notice_seconds(boss_name) / 60))
-            except (TypeError, ValueError):
-                notice_minutes = max(1, int(get_boss_advance_notice_seconds(boss_name) / 60))
-            notice_seconds = notice_minutes * 60
-            notified_advance = parse_bool(data.get("notified_advance", data.get("notifiedNotice", False)))
-            notified_spawn = parse_bool(data.get("notified_spawn", data.get("notifiedSpawn", False)))
-            voice_advance = parse_bool(data.get("voice_notice_sent", data.get("voiceNoticeSent", False)))
-            voice_spawn = parse_bool(data.get("voice_spawn_sent", data.get("voiceSpawnSent", False)))
-
-            # Never replay an old boss after a Render restart/deploy.
-            # A schedule more than 120 seconds past spawn is considered stale.
-            # Mark every notification flag complete before continuing.
-            if time_left < -120:
-                if not (notified_advance and notified_spawn and voice_advance and voice_spawn):
-                    await save_boss_notification_flags(
-                        boss_name,
-                        notified_advance=True,
-                        notified_spawn=True,
-                        voice_notice_sent=True,
-                        voice_spawn_sent=True,
-                    )
-                    print(f"⏭️ Stale boss suppressed: {boss_name} | left={time_left:.1f}s")
+            activity_id = _auto_attendance_activity_id(boss_name, spawn_dt)
+            lock_key = (guild.id, activity_id)
+            if lock_key in auto_attendance_inflight:
                 continue
-
-            # Do not spam Render logs every 5 seconds while nothing is changing.
-            # Log only when a real notification action is due.
-            # Report only when a notification state can actually change. During a
-            # global REST cooldown, a pending text notification is expected to remain
-            # false; do not flood logs every scheduler tick while Voice has already
-            # succeeded.
-            rest_blocked = _discord_rest_rate_limit_remaining() > 0
-            advance_text_due = (0 < time_left <= notice_seconds and not notified_advance)
-            advance_voice_due = (0 < time_left <= notice_seconds and not voice_advance)
-            spawn_text_due = (time_left <= 0 and not notified_spawn)
-            spawn_voice_due = (-120 <= time_left <= 0 and not voice_spawn)
-            notification_action_due = advance_text_due or advance_voice_due or spawn_text_due or spawn_voice_due
-
-            if notification_action_due:
-                # Throttle informational "action due" lines to once per boss/stage per
-                # 60 seconds. This does not alter the actual send/retry behavior.
-                stage_key = (
-                    "advance" if advance_voice_due or advance_text_due
-                    else "spawn" if spawn_voice_due or spawn_text_due
-                    else "none"
-                )
-                diag_key = (boss_name, stage_key)
-                now_mono = time.monotonic()
-                last_diag = boss_notification_diag_last_ts.get(diag_key, 0.0)
-                if now_mono - last_diag >= 60.0:
-                    boss_notification_diag_last_ts[diag_key] = now_mono
-                    print(
-                        f"🔎 Boss notification action due: {boss_name} | spawn={spawn_time.isoformat()} | "
-                        f"left={time_left:.1f}s | notice={notice_minutes}m | advance={notified_advance} | "
-                        f"spawn_sent={notified_spawn} | voice_advance={voice_advance} | voice_spawn={voice_spawn}"
-                    )
-
-            # Text notification targets are now persisted in Firebase under
-            # notification_channels and are read immediately before a Boss event.
-            # This preserves the old per-boss/fallback behavior only when no explicit
-            # notification channels are configured yet.
-            configured_notification_ids = await get_notification_channel_ids_from_database()
-            channels_to_notify = []
-            seen_channel_ids = set()
-            for target_channel_id in configured_notification_ids:
-                try:
-                    target_channel_id = int(target_channel_id)
-                except (TypeError, ValueError):
+            auto_attendance_inflight.add(lock_key)
+            try:
+                existing = await _attendance_find_auto_activity(guild.id, activity_id)
+                if isinstance(existing, dict):
+                    msg_id = existing.get("panel_message_id")
+                    if not msg_id:
+                        await _auto_attendance_post_panel(guild, channel, existing)
                     continue
-                if target_channel_id in seen_channel_ids:
+
+                activity_date = spawn_dt.strftime("%d/%m/%Y")
+                attack_text = spawn_dt.strftime("%H:%M")
+                open_text = open_dt.strftime("%H:%M")
+                activity = {
+                    "activity_id": activity_id,
+                    "guild_id": guild.id,
+                    "boss_name": str(boss_name),
+                    "activity_date": activity_date,
+                    "attack_time": attack_text,
+                    "checkin_open": open_text,
+                    "checkin_close": attack_text,
+                    "open_at": open_dt.isoformat(),
+                    "close_at": spawn_dt.isoformat(),
+                    "attack_at": spawn_dt.isoformat(),
+                    "status": "open",
+                    "created_by": "SKYNET-AUTO",
+                    "created_by_name": "SKYNET Auto Attendance",
+                    "created_at": _attendance_now_iso(),
+                    "panel_channel_id": channel.id,
+                    "panel_message_id": None,
+                    "summary_channel_id": channel.id,
+                    "participants": {},
+                    "source": "auto_boss_schedule",
+                    "boss_schedule_name": str(boss_name),
+                    "boss_schedule_spawn_time": spawn_dt.isoformat(),
+                }
+                path = _attendance_activity_path(guild.id, activity_id)
+                try:
+                    await asyncio.wait_for(asyncio.to_thread(db.reference(path).set, activity), timeout=8)
+                except Exception as exc:
+                    print(f"⚠️ Auto Attendance Firebase create failed | guild={guild.name} | boss={boss_name} | {exc}", flush=True)
                     continue
-                ch = bot.get_channel(target_channel_id)
-                if ch is None:
-                    try:
-                        ch = await guarded_fetch_channel(target_channel_id, context=f"boss-notify:fetch-configured-channel:{boss_name}")
-                    except Exception:
-                        ch = None
-                if isinstance(ch, discord.TextChannel):
-                    if ch.id not in seen_channel_ids:
-                        channels_to_notify.append(ch)
-                        seen_channel_ids.add(ch.id)
-
-            if not channels_to_notify:
-                # Backward-compatible fallback for deployments that have not run
-                # /set-notification yet. Do not remove the existing boss channel/fallback.
-                channel = None
-                channel_id = data.get("channel_id") or data.get("channelId")
-                if channel_id:
-                    try:
-                        channel = bot.get_channel(int(channel_id))
-                        if channel is None:
-                            channel = await guarded_fetch_channel(int(channel_id), context=f"boss-notify:fetch-channel:{boss_name}")
-                    except Exception:
-                        channel = None
-                if channel:
-                    channels_to_notify.append(channel)
-
-                if not channels_to_notify:
-                    for guild in bot.guilds:
-                        fb_channel = discord.utils.get(guild.text_channels, name=LIVE_CHANNEL_NAME)
-                        if not fb_channel:
-                            fb_channel = guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
-                        if fb_channel and fb_channel.id not in seen_channel_ids:
-                            channels_to_notify.append(fb_channel)
-                            seen_channel_ids.add(fb_channel.id)
-
-            # Voice notifications must not depend on text-channel resolution or REST availability.
-            # Always evaluate configured /setvoice targets directly from the READY guild cache.
-            target_guilds = set(bot.guilds)
-
-            # Advance: text and voice are independent one-shot states.
-            advance_stage_queued = False
-            spawn_stage_queued = False
-            with pending_boss_rest_lock:
-                advance_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "advance" for item in pending_boss_rest_notifications)
-                spawn_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "spawn" for item in pending_boss_rest_notifications)
-
-            if 0 < time_left <= notice_seconds and not notified_advance and not advance_stage_queued:
-                await refresh_discord_notification_languages()
-                embed = build_boss_discord_notification(boss_name, "advance", spawn_time, notice_minutes)
-                for ch in channels_to_notify:
-                    try:
-                        mentions = get_notification_mentions(getattr(ch, "guild", None))
-                        _queue_boss_rest_notification(
-                            boss_name,
-                            "advance",
-                            ch,
-                            content=mentions or None,
-                            embed=embed,
-                        )
-                    except Exception as e:
-                        print(f"⚠️ Queue advance notification failed ({boss_name}): {e}", flush=True)
-                # The queue owns the text send and flag update. Do not call Discord REST here.
-
-            if 0 < time_left <= notice_seconds and not voice_advance:
-                voice_key = (str(boss_name), "advance")
-                if voice_key not in _boss_voice_stage_inflight:
-                    _boss_voice_stage_inflight.add(voice_key)
-                    print(
-                        f"📢 Schedule Boss VOICE ADVANCE task | boss={boss_name} | "
-                        f"left={time_left:.1f}s | notice={notice_minutes}m",
-                        flush=True,
-                    )
-                    asyncio.create_task(
-                        _run_boss_voice_stage(boss_name, "advance", notice_minutes, target_guilds),
-                        name=f"boss-voice-advance-{boss_name}",
-                    )
-
-            # Spawn: only notify at the actual crossing. Old schedules >60s late
-            # are marked complete instead of replaying after every deploy/reload.
-            if time_left <= 0 and not notified_spawn and not spawn_stage_queued:
-                await refresh_discord_notification_languages()
-                embed = build_boss_discord_notification(boss_name, "spawn", spawn_time, notice_minutes)
-                for ch in channels_to_notify:
-                    try:
-                        mentions = get_notification_mentions(getattr(ch, "guild", None))
-                        _queue_boss_rest_notification(
-                            boss_name,
-                            "spawn",
-                            ch,
-                            content=mentions or None,
-                            embed=embed,
-                        )
-                    except Exception as e:
-                        print(f"⚠️ Queue spawn notification failed ({boss_name}): {e}", flush=True)
-                # The queue owns the text send and flag update. Do not call Discord REST here.
-
-            if -120 <= time_left <= 0 and not voice_spawn:
-                voice_key = (str(boss_name), "spawn")
-                if voice_key not in _boss_voice_stage_inflight:
-                    _boss_voice_stage_inflight.add(voice_key)
-                    print(
-                        f"📢 Schedule Boss VOICE SPAWN task | boss={boss_name} | "
-                        f"left={time_left:.1f}s | guilds={len(target_guilds)}",
-                        flush=True,
-                    )
-                    asyncio.create_task(
-                        _run_boss_voice_stage(boss_name, "spawn", notice_minutes, target_guilds),
-                        name=f"boss-voice-spawn-{boss_name}",
-                    )
-            elif time_left < -120 and not voice_spawn:
-                await save_boss_notification_flags(boss_name, voice_spawn_sent=True)
-                print(f"⏭️ Legacy expired boss marked complete: {boss_name} (left={time_left:.1f}s)")
-
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_boss_notifications': {e}")
-
-
-@tasks.loop(seconds=60)
-async def update_live_embed():
-    global cached_live_message
-    try:
-        if not live_message_config: return
-        channel_id = live_message_config.get("channel_id")
-        message_id = live_message_config.get("message_id")
-        if not channel_id or not message_id: return
-
-        if cached_live_message is None or cached_live_message.id != message_id:
-            channel = bot.get_channel(channel_id)
-            if not channel:
-                try: channel = await guarded_fetch_channel(channel_id, context="live:fetch-channel")
-                except Exception: return
-            try: cached_live_message = await guarded_fetch_message(channel, message_id, context="live:fetch-message")
-            except Exception: return
-
-        now = datetime.now(TZ_THAI)
-        embed = discord.Embed(title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time", description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.teal())
-
-        with schedule_lock:
-            schedule_copy = boss_schedule.copy()
-
-        if not schedule_copy:
-            embed.add_field(name="📌 สถานะ", value="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ", inline=False)
-        else:
-            sorted_bosses = sorted(
-                schedule_copy.items(), 
-                key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now
-            )
-            
-            display_bosses = sorted_bosses[:20]
-            for boss, data in display_bosses:
-                spawn_time = parse_to_thai_datetime(data["spawn_time"])
-                if not spawn_time: continue
-                time_left_sec = (spawn_time - now).total_seconds()
-                
-                if time_left_sec <= 0: time_left_str = "เกิดแล้ว!"
-                else:
-                    m, s = divmod(int(time_left_sec), 60)
-                    h, m = divmod(m, 60)
-                    if h > 0: time_left_str = f"อีก {h} ชม. {m} นาที"
-                    else: time_left_str = f"อีก {m} นาที {s} วินาที"
-
-                notice_text = get_boss_advance_notice_text(boss)
-                rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-                embed.add_field(
-                    name=f"👾 {boss}",
-                    value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*",
-                    inline=False
+                await _auto_attendance_post_panel(guild, channel, activity)
+                print(
+                    f"⚔️ AUTO ATTENDANCE CREATED | guild={guild.name} | boss={boss_name} | "
+                    f"open={open_dt.isoformat()} | close={spawn_dt.isoformat()} | activity={activity_id}",
+                    flush=True,
                 )
-            
-            if len(sorted_bosses) > 20:
-                embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
-
-        embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
-        try: await guarded_message_edit(cached_live_message, context="live:edit", embed=embed)
-        except Exception as e: print(f"❌ อัปเดต Live Embed ไม่สำเร็จ: {e}")
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดใน Task 'update_live_embed': {e}")
+            finally:
+                auto_attendance_inflight.discard(lock_key)
 
 
-@tasks.loop(seconds=60)
-async def check_auto_disconnect():
+async def _auto_attendance_post_panel(guild: discord.Guild, channel: discord.TextChannel, activity: dict):
+    """Post the normal RaidAttendanceView panel using the same Attendance UI."""
+    activity_id = str(activity.get("activity_id") or "")
+    if not activity_id or not isinstance(channel, discord.TextChannel):
+        return None
+    view = RaidAttendanceView(activity_id)
     try:
-        now = datetime.now(TZ_THAI)
-        for guild in bot.guilds:
-            vc = guild.voice_client
-            if vc and vc.is_connected() and vc.channel and not vc.is_playing():
-                human_members = [m for m in vc.channel.members if not m.bot]
-                if len(human_members) == 0:
-                    if guild.id not in voice_empty_start:
-                        voice_empty_start[guild.id] = now
-                    else:
-                        elapsed = (now - voice_empty_start[guild.id]).total_seconds()
-                        if elapsed >= 180:
-                            try:
-                                await vc.disconnect()
-                                print(f"🔌 Auto-disconnected จาก {vc.channel.name} เนื่องจากไม่มีสมาชิกอยู่ในห้องเกิน 3 นาที")
-                            except Exception as e: print(f"❌ ตัดสายไม่สำเร็จ: {e}")
-                            del voice_empty_start[guild.id]
-                else:
-                    if guild.id in voice_empty_start:
-                        del voice_empty_start[guild.id]
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดใน Task 'check_auto_disconnect': {e}")
-
-
-@bot.tree.command(name="notice", description="ประกาศข้อความเสียงไปยังทุกห้องสนทนาที่มีคนอยู่")
-@app_commands.describe(message="ข้อความที่ต้องการให้บอทประกาศ")
-@has_allowed_role()
-async def notice_command(interaction: discord.Interaction, message: str):
-    global NOTICE_LAST_RUN_TS
-    # Serialize /notice calls so one operator cannot create a REST/Voice burst.
-    if NOTICE_COMMAND_LOCK.locked():
-        try:
-            await _safe_interaction_send_message(interaction, "⏳ /notice กำลังทำงานอยู่ กรุณารอสักครู่", ephemeral=True)
-        except discord.HTTPException as exc:
-            print(f"⚠️ /notice busy response failed: {exc}", flush=True)
-        return
-
-    if time.monotonic() - NOTICE_LAST_RUN_TS < 2.0:
-        try:
-            await _safe_interaction_send_message(interaction, "⏳ /notice เพิ่งถูกเรียกไป กรุณารอสักครู่", ephemeral=True)
-        except discord.HTTPException as exc:
-            print(f"⚠️ /notice cooldown response failed: {exc}", flush=True)
-        return
-
-    async with NOTICE_COMMAND_LOCK:
-        NOTICE_LAST_RUN_TS = time.monotonic()
-        ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
-        if not ack_ok:
-            # Do NOT discard the actual work merely because the initial interaction callback
-            # hit a transient/global 429.  Run the notice anyway; if Discord REST is available
-            # the Voice path can still complete.  The command UI may still show a timeout when
-            # Discord blocks the acknowledgement endpoint itself, which cannot be fixed client-side.
-            print("⚠️ /notice ACK unavailable due to Discord 429; continuing Voice notice attempt", flush=True)
-
-        if not message.strip():
-            if ack_ok:
-                try:
-                    await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ กรุณาระบุข้อความที่ต้องการประกาศครับ", ephemeral=True)
-                except discord.HTTPException as exc:
-                    print(f"⚠️ /notice empty-message response failed: {exc}", flush=True)
-            return
-
-        # Global notice: every occupied Voice channel in the current guild.
-        occupied = []
-        for vc in interaction.guild.voice_channels:
-            humans = [m for m in vc.members if not m.bot]
-            if humans:
-                occupied.append(vc)
-
-        if not occupied:
-            if ack_ok:
-                try:
-                    await guarded_interaction_followup_send(interaction, "interaction-followup", "⚠️ ขณะนี้ไม่มีสมาชิกอยู่ในห้อง Voice ใดเลย", ephemeral=True)
-                except discord.HTTPException as exc:
-                    print(f"⚠️ /notice empty-room response failed: {exc}", flush=True)
-            else:
-                print(f"⚠️ /notice no occupied Voice rooms | guild={interaction.guild.name}", flush=True)
-            return
-
-        names = ", ".join(f"**{vc.name}**" for vc in occupied)
-        if ack_ok:
-            try:
-                await guarded_interaction_edit_original(interaction, "interaction-edit-original", 
-                    content=f"📢 เริ่มประกาศใน **{len(occupied)} ห้อง**: {names}\nบอทจะเข้า → พูด → ออกทีละห้อง"
-                )
-            except discord.HTTPException as exc:
-                print(f"⚠️ /notice progress update failed: {exc}", flush=True)
-
-        results = []
-        for vc in occupied:
-            try:
-                ok = await asyncio.wait_for(
-                    speak_in_guild(
-                        interaction.guild,
-                        text_th=message,
-                        text_en=message,
-                        text_ko=message,
-                        target_channel=vc,
-                    ),
-                    timeout=180,
-                )
-                results.append((vc.name, bool(ok)))
-            except Exception as exc:
-                print(f"❌ /notice TTS failed in {vc.name}: {exc}", flush=True)
-                results.append((vc.name, False))
-
-        ok_count = sum(1 for _, ok in results if ok)
-        print(f"📢 /notice GLOBAL complete: {ok_count}/{len(results)} rooms", flush=True)
-
-        if ack_ok:
-            failed = [name for name, ok in results if not ok]
-            try:
-                if failed:
-                    await guarded_interaction_edit_original(interaction, "interaction-edit-original", 
-                        content=(
-                            f"⚠️ ประกาศเสียงสำเร็จ {ok_count}/{len(results)} ห้อง\n"
-                            f"❌ ห้องที่ไม่สำเร็จ: {', '.join(failed)}"
-                        )
-                    )
-                else:
-                    await guarded_interaction_edit_original(interaction, "interaction-edit-original", 
-                        content=f"✅ /notice ประกาศสำเร็จ {ok_count}/{len(results)} ห้อง"
-                    )
-            except discord.HTTPException as exc:
-                print(f"⚠️ /notice final response update failed: {exc}", flush=True)
-        else:
-            # Best-effort text audit only.  This does not fix a Discord interaction callback 429,
-            # but gives Render logs a deterministic completion result.
-            print(
-                f"📣 /notice completed without interaction ACK | success={ok_count}/{len(results)} | "
-                f"guild={interaction.guild.name}",
-                flush=True,
-            )
-
-def generate_boss_time_summary():
-    """Build the /time embed and the multilingual TTS summary from current boss_schedule."""
-    now = datetime.now(TZ_THAI)
-    with schedule_lock:
-        schedule_copy = boss_schedule.copy()
-
-    if not schedule_copy:
-        return (
-            None,
-            "ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบครับ",
-            None,
-            None,
+        message = await guarded_channel_send(
+            channel,
+            context=f"attendance:auto:{activity_id}",
+            embed=build_raid_activity_embed(activity, [], closed=False),
+            view=view,
+            background=True,
         )
-
-    sorted_bosses = sorted(
-        schedule_copy.items(),
-        key=lambda x: parse_to_thai_datetime(x[1].get("spawn_time")) or now,
-    )
-    embed = discord.Embed(
-        title="⌛ สรุปเวลาที่เหลือของบอสทุกตัว (เรียงจากน้อยไปมาก)",
-        description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`",
-        color=discord.Color.purple(),
-    )
-
-    tts_lines_th = ["สรุปเวลาบอสเรียงจากน้อยไปมากค่ะ"]
-    tts_lines_en = ["Boss time summary from earliest to latest."]
-    tts_lines_ko = ["보스 스폰 시간 요약입니다."]
-
-    for boss, data in sorted_bosses[:20]:
-        spawn_time = parse_to_thai_datetime(data.get("spawn_time"))
-        if not spawn_time:
-            continue
-
-        time_left_sec = (spawn_time - now).total_seconds()
-        spoken_name = get_boss_pronunciation(boss)
-        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-
-        if time_left_sec <= 0:
-            time_left_str = "เกิดแล้ว!"
-            tts_lines_th.append(f"บอส {spoken_name} เกิดแล้วค่ะ")
-            tts_lines_en.append(f"Boss {boss} has spawned.")
-            tts_lines_ko.append(f"보스 {boss}가 나타났습니다.")
-        else:
-            total_seconds = max(0, int(time_left_sec))
-            m, s = divmod(total_seconds, 60)
-            h, m = divmod(m, 60)
-
-            parts = []
-            if h > 0:
-                parts.append(f"{h} ชม.")
-            if m > 0 or h > 0:
-                parts.append(f"{m} นาที")
-            parts.append(f"{s} วินาที")
-            time_left_str = f"อีก {' '.join(parts)}"
-
-            if h > 0:
-                tts_time_th = f"{h} ชั่วโมง {m} นาที"
-                tts_time_en = f"{h} hours and {m} minutes"
-                tts_time_ko = f"{h}시간 {m}분" if m > 0 else f"{h}시간"
-            elif m > 0:
-                tts_time_th = f"{m} นาที"
-                tts_time_en = f"{m} minutes"
-                tts_time_ko = f"{m}분"
-            else:
-                tts_time_th = f"{s} วินาที"
-                tts_time_en = f"{s} seconds"
-                tts_time_ko = f"{s}초"
-
-            tts_lines_th.append(f"บอส {spoken_name} เหลืออีก {tts_time_th}")
-            tts_lines_en.append(f"Boss {boss} in {tts_time_en}.")
-            tts_lines_ko.append(f"보스 {boss}가 {tts_time_ko} 남았습니다.")
-
-        embed.add_field(
-            name=f"👾 {boss}",
-            value=(
-                f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | "
-                f"นับถอยหลัง: **{time_left_str}**\n"
-                f"*(บันทึกโดย: {rec_by})*"
-            ),
-            inline=False,
-        )
-
-    if len(sorted_bosses) > 20:
-        embed.add_field(
-            name="📌 หมายเหตุ",
-            value=f"*ยังมีบอสอีก {len(sorted_bosses) - 20} ตัว สามารถดูเพิ่มเติมได้บน Dashboard*",
-            inline=False,
-        )
-
-    return (
-        embed,
-        " ".join(tts_lines_th),
-        " ".join(tts_lines_en),
-        " ".join(tts_lines_ko),
-    )
-
-async def _time_channel_fallback(interaction: discord.Interaction, *, embed=None, content=None):
-    """Fallback for /time when Discord rejects the interaction callback.
-
-    This is a normal channel message, not an interaction response, so it is only
-    used after the one allowed initial interaction callback has already failed.
-    It is bounded to a few seconds and goes through the existing REST guard so
-    we never create a retry storm during a Discord restriction.
-    """
-    channel = getattr(interaction, "channel", None)
-    if channel is None:
-        print("⚠️ /time channel fallback unavailable: interaction.channel is None", flush=True)
-        return False
-
-    try:
-        message = await asyncio.wait_for(
-            guarded_discord_call(
-                lambda: channel.send(
-                    content=content,
-                    embed=embed,
-                ),
-                context="time-channel-fallback",
-                # Do not sleep for a Discord global/IP block. The command must remain
-                # non-blocking; the audit/result queue handles recovery after cooldown.
-                wait_for_cooldown=False,
-            ),
-            timeout=4.0,
-        )
-        if message is not None:
-            print("✅ /time channel fallback sent successfully", flush=True)
-            return True
-        _queue_channel_result(
-            interaction.channel_id,
-            content=content,
-            embed=embed,
-            context="time-channel-fallback-queued",
-        )
-        print("⏸️ /time result queued for automatic delivery after Discord REST cooldown", flush=True)
-        return False
-    except asyncio.TimeoutError:
-        _queue_channel_result(
-            interaction.channel_id,
-            content=content,
-            embed=embed,
-            context="time-channel-fallback-queued",
-        )
-        print("⚠️ /time channel fallback timed out safely | result queued", flush=True)
-        return False
-    except discord.HTTPException as exc:
-        _queue_channel_result(
-            interaction.channel_id,
-            content=content,
-            embed=embed,
-            context="time-channel-fallback-queued",
-        )
-        print(
-            f"⚠️ /time channel fallback failed | status={getattr(exc, 'status', None)} | {exc} | result queued",
-            flush=True,
-        )
-        return False
     except Exception as exc:
-        _queue_channel_result(
-            interaction.channel_id,
-            content=content,
-            embed=embed,
-            context="time-channel-fallback-queued",
-        )
-        print(f"⚠️ /time channel fallback failed unexpectedly: {exc!r} | result queued", flush=True)
-        return False
-
-
-@bot.tree.command(name="time", description="คำนวณเวลาที่เหลือของบอสทุกตัว เรียงจากน้อยไปมาก และส่งเสียงอ่าน TTS ในห้องเสียง")
-async def boss_time_slash(interaction: discord.Interaction):
-    # Discord requires the initial interaction callback to be acknowledged promptly.
-    # Defer FIRST, then build the summary, and edit the original response afterward.
-    # This preserves the existing /time result and Voice/TTS behavior while avoiding
-    # a preventable timeout caused by doing work before the initial ACK.
-    ack_ok = False
-    fallback_sent = False
-    response_content = None
-    response_embed = None
-    tts_text_th = tts_text_en = tts_text_ko = ""
-    try:
-        ack_ok = await _safe_interaction_ack(interaction, ephemeral=True)
-
-        embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
-        response_content = None if embed is not None else tts_text_th
-        response_embed = embed if embed is not None else None
-
-        if ack_ok:
-            edited = await guarded_interaction_edit_original(
-                interaction,
-                "time-interaction-result",
-                content=response_content,
-                embed=response_embed,
-            )
-            if edited is None:
-                print("⚠️ /time initial ACK succeeded but original response edit was unavailable", flush=True)
-        else:
-            print(
-                "⚠️ /time ACK unavailable; using one bounded normal-channel fallback safely",
-                flush=True,
-            )
-            fallback_sent = await _time_channel_fallback(
-                interaction,
-                content=response_content,
-                embed=response_embed,
-            )
-
-        if embed is not None:
-            print("✅ /time summary prepared and response delivery attempted", flush=True)
-        else:
-            print("ℹ️ /time summary generated without embed", flush=True)
-
-        # Keep the original Voice/TTS behavior unchanged.
-        if interaction.guild is not None:
-            asyncio.create_task(
-                speak_in_guild(
-                    interaction.guild,
-                    text_th=tts_text_th,
-                    text_en=tts_text_en,
-                    text_ko=tts_text_ko,
-                )
-            )
-
-        # Audit remains independent from the interaction callback.  The existing
-        # guard/queue policy is preserved for REST restrictions.
-        await send_audit_log(
-            interaction.guild,
-            interaction.user,
-            "เช็กเวลาบอสพร้อม TTS (/time)",
-            (
-                "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย"
-                if ack_ok
-                else "คำนวณสรุปเวลาบอสสำเร็จ แต่ Discord ปฏิเสธ interaction callback; "
-                     f"ส่งผลลัพธ์ผ่านข้อความในห้อง = {'สำเร็จ' if fallback_sent else 'ไม่สำเร็จ'}"
-            ),
-            discord.Color.purple(),
-        )
-        if not ack_ok and not fallback_sent:
-            print("⚠️ /time result could not be posted to Discord; audit attempt completed safely", flush=True)
-    except Exception as exc:
-        print(f"❌ /time command failed safely: {exc!r}", flush=True)
-        if ack_ok:
-            try:
-                await guarded_interaction_edit_original(
-                    interaction,
-                    "time-interaction-error",
-                    content="⚠️ ไม่สามารถสร้าง/ส่งผลลัพธ์ /time กลับไปใน Discord ได้ในขณะนี้",
-                    embed=None,
-                )
-            except Exception as response_exc:
-                print(f"⚠️ /time error response failed: {response_exc!r}", flush=True)
-
-@bot.command(name="time")
-async def boss_time_prefix(ctx: commands.Context):
-    embed, tts_text_th, tts_text_en, tts_text_ko = generate_boss_time_summary()
-    if embed is None:
-        await guarded_context_send(ctx, tts_text_th, context="prefix-time")
-        return
-    await guarded_context_send(ctx, context="prefix-time", embed=embed)
-    asyncio.create_task(speak_in_guild(ctx.guild, text_th=tts_text_th, text_en=tts_text_en, text_ko=tts_text_ko))
-    await send_audit_log(ctx.guild, ctx.author, "เช็กเวลาบอสพร้อม TTS (!time)", "คำนวณสรุปเวลาบอสเรียงจากน้อยไปมากและส่งเสียงอ่านเรียบร้อย", discord.Color.purple())
-
-async def boss_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
-    """Discord autocomplete must finish fast and return <=25 valid choices."""
-    try:
-        needle = (current or "").strip().casefold()
-        names = sorted(
-            {str(x).strip() for x in BOSS_RESPAWN_TIMES.keys() if str(x).strip()},
-            key=str.casefold,
-        )
-        if needle:
-            names = [x for x in names if needle in x.casefold()]
-        result = []
-        for boss in names[:25]:
-            value = boss[:100]
-            label = boss[:100]
-            result.append(app_commands.Choice(name=label, value=value))
-        return result
-    except Exception as e:
-        print(f"⚠️ boss autocomplete error: {e}")
-        return []
-
-@bot.tree.command(name="kill", description="บันทึกเวลาที่บอสตายเพื่อเริ่มคำนวณเวลานับถอยหลัง")
-@app_commands.describe(
-    boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการบันทึกเวลา",
-    kill_time="ระบุเวลาที่บอสตาย (เช่น 17:30 หรือ 1730) ถ้าไม่ระบุจะใช้เวลาปัจจุบัน",
-    kill_date="วันที่ (DD/MM/YYYY) (เว้นว่าง = วันนี้)"
-)
-
-@has_allowed_role()
-async def kill_boss(interaction: discord.Interaction, boss_name: str, kill_time: str = None, kill_date: str = None):
-    # Acknowledge immediately.  /kill intentionally has NO autocomplete callback
-    # so typing the boss name cannot trigger a separate autocomplete interaction.
-    ack_ok = False
-    try:
-        ack_ok = await _safe_interaction_ack(interaction, ephemeral=False)
-    except Exception as e:
-        print(f"❌ /kill initial ACK failed: {e}", flush=True)
-        return
-
-    try:
-        canonical_name = get_boss_canonical_name(boss_name)
-        now = datetime.now(TZ_THAI)
-
-        try:
-            selected_date = parse_date_input(kill_date, now)
-            if kill_time and kill_time.strip():
-                parsed_time = parse_time_input(kill_time, now)
-                boss_died_at = datetime(selected_date.year, selected_date.month, selected_date.day, parsed_time.hour, parsed_time.minute, parsed_time.second, tzinfo=TZ_THAI)
-            else:
-                boss_died_at = datetime(selected_date.year, selected_date.month, selected_date.day, now.hour, now.minute, now.second, tzinfo=TZ_THAI)
-        except ValueError:
-            if ack_ok:
-                await guarded_interaction_followup_send(interaction, "interaction-followup",
-                    "❌ วันที่/เวลาไม่ถูกต้อง! วันที่ใช้รูปแบบ **DD/MM/YYYY** เช่น **29/08/2026** และเวลาใช้ **17:30** หรือ **1730**",
-                    ephemeral=True
-                )
-            else:
-                print("⚠️ /kill input validation failed but interaction ACK was unavailable; followup skipped safely", flush=True)
-            return
-
-        respawn_time = get_boss_respawn_time(canonical_name)
-        next_spawn = boss_died_at + respawn_time
-        is_already_past = next_spawn <= now
-        user_name = interaction.user.display_name
-
-        record = {
-            "spawn_time": next_spawn.isoformat(),
-            "killTimeMs": int(boss_died_at.timestamp() * 1000),
-            "killDate": boss_died_at.strftime("%Y-%m-%d"),
-            "channelId": interaction.channel_id,
-            "notifiedNotice": is_already_past,
-            "notifiedSpawn": is_already_past,
-            "voiceNoticeSent": is_already_past,
-            "voiceSpawnSent": is_already_past,
-            "noticeMinutes": int(get_boss_advance_notice_seconds(canonical_name) / 60),
-            "recordedBy": user_name,
-            "recordedByDisplayName": user_name,
-            "recordedByUserId": str(interaction.user.id),
-            "spawnTimeMs": int(next_spawn.timestamp() * 1000),
-            "confirmationRequestId": (uuid.uuid4().hex),
-            "confirmationRequestedAt": datetime.now(TZ_THAI).isoformat(),
-            "confirmationStatus": "pending"
-        }
-
-        with schedule_lock:
-            boss_schedule[canonical_name] = {
-                "spawn_time": next_spawn,
-                "killTimeMs": record["killTimeMs"],
-                "killDate": record["killDate"],
-                "channel_id": interaction.channel_id,
-                "notified_advance": is_already_past,
-                "notified_spawn": is_already_past,
-                "voice_notice_sent": is_already_past,
-                "voice_spawn_sent": is_already_past,
-                "noticeMinutes": record["noticeMinutes"],
-                "recorded_by": user_name,
-                "recordedByUserId": str(interaction.user.id),
-                "confirmationRequestId": record["confirmationRequestId"],
-                "confirmationRequestedAt": record["confirmationRequestedAt"],
-                "confirmationStatus": "pending"
-            }
-
-        cd_text = get_boss_cd_text(canonical_name)
-
-        embed = discord.Embed(title="⚔️ บันทึกเวลาบอสตายสำเร็จ", color=discord.Color.red())
-        embed.add_field(name="👾 ชื่อบอส", value=f"`{canonical_name}`", inline=True)
-        embed.add_field(name="⏱️ เวลาที่ตาย", value=boss_died_at.strftime("%H:%M:%S น."), inline=True)
-        embed.add_field(name="⏳ ระยะเวลาเกิด (CD)", value=cd_text, inline=True)
-        embed.add_field(name="👤 ผู้บันทึก", value=f"`{user_name}`", inline=True)
-        embed.add_field(name="🔔 บอสจะเกิดเวลา", value=f"**{next_spawn.strftime('%H:%M:%S น.')}**", inline=False)
-        embed.set_footer(text=f"บันทึกโดย {user_name}")
-
-        # Only send a followup when the initial interaction ACK succeeded.
-        # If Discord rejected the initial callback (for example HTTP 429), a followup
-        # would be invalid and would create avoidable REST traffic during the restriction.
-        if ack_ok:
-            await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
-        else:
-            print(
-                f"⚠️ /kill saved locally but initial interaction ACK was unavailable | "
-                f"boss={canonical_name} | followup skipped safely",
-                flush=True,
-            )
-
-        async def persist_kill():
-            try:
-                with schedule_lock:
-                    current = dict(boss_schedule.get(canonical_name, {}))
-                firebase_record = _schedule_record_to_firebase(canonical_name, current)
-                await asyncio.wait_for(
-                    asyncio.to_thread(db.reference(f"boss_schedule/{canonical_name}").set, firebase_record),
-                    timeout=10
-                )
-                print(f"💾 /kill saved: {canonical_name} | kill={boss_died_at.strftime("%d/%m/%Y %H:%M:%S")} | spawn={next_spawn.isoformat()}")
-                try:
-                    with schedule_lock:
-                        confirm_data = dict(boss_schedule.get(canonical_name, {}))
-                    await _voice_confirm_boss_recording(canonical_name, confirm_data)
-                except Exception as confirmation_error:
-                    print(f"⚠️ /kill confirmation failed: {confirmation_error}")
-            except Exception as e:
-                print(f"❌ /kill Firebase save failed: {e}")
-                traceback.print_exc()
-
-            try:
-                await send_audit_log(
-                    interaction.guild,
-                    interaction.user,
-                    "บันทึกเวลาบอสตาย (/kill)",
-                    f"👾 บอส: `{canonical_name}`\n"
-                    f"👤 ผู้บันทึก: `{user_name}`\n"
-                    f"🔔 เวลาเกิดถัดไป: {next_spawn.strftime('%H:%M:%S น.')}",
-                    discord.Color.red()
-                )
-            except Exception as e:
-                print(f"⚠️ /kill audit log failed: {e}")
-
-        asyncio.create_task(persist_kill())
-
-    except Exception as e:
-        print(f"❌ /kill unexpected error: {e}", flush=True)
-        traceback.print_exc()
-        if ack_ok:
-            try:
-                await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ /kill เกิดข้อผิดพลาด: `{e}`", ephemeral=True)
-            except Exception:
-                pass
-        else:
-            print("⚠️ /kill error response skipped because initial interaction ACK was unavailable", flush=True)
-
-add_group = app_commands.Group(name="add", description="คำสั่งจัดการข้อมูลบอส")
-bot.tree.add_command(add_group)
-
-@add_group.command(name="boss", description="เพิ่มบอสใหม่เข้าไปในระบบ (ไม่สร้าง Timer)")
-@app_commands.describe(
-    name="ชื่อบอสใหม่",
-    hours="คูลดาวน์ชั่วโมง (ใช้กำหนดค่าให้ /kill; ไม่สร้าง Timer)",
-    minutes="คูลดาวน์นาที",
-    seconds="คูลดาวน์วินาที",
-    notice_minutes="แจ้งเตือนล่วงหน้ากี่นาที"
-)
-@has_allowed_role()
-async def add_boss(interaction: discord.Interaction, name: str, hours: int = 0, minutes: int = 30, seconds: int = 0, notice_minutes: int = 5):
-    # Initial interaction ACK is time-critical and intentionally isolated from
-    # background REST cooldown.  If Discord rejects it (for example during a
-    # temporary API restriction), we still complete the Firebase write but do
-    # not generate additional followup/audit REST traffic that is known to fail.
-    # Critical initial response: use a direct message rather than defer(), then
-    # update the original response after Firebase persistence. This is still
-    # subject to Discord's interaction callback rate limits; no retry storm is
-    # attempted when Discord returns HTTP 429.
-    ack_ok = await _safe_interaction_send_message(
-        interaction,
-        "⏳ กำลังเพิ่มบอสเข้า Boss Definition...",
-        ephemeral=False,
-    )
-    name = (name or "").strip()
-    if not name:
-        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ กรุณาระบุชื่อบอส", ephemeral=True)
-        return
-    if any(c in name for c in "/\\.#$[]"):
-        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ ชื่อบอสมีอักขระที่ Firebase ไม่อนุญาต (/ . # $ [ ])", ephemeral=True)
-        return
-    total_seconds = hours * 3600 + minutes * 60 + seconds
-    if total_seconds <= 0 or notice_minutes < 1:
-        await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ CD ต้องมากกว่า 0 วินาที และ notice ต้องอย่างน้อย 1 นาที", ephemeral=True)
-        return
-    canonical = get_boss_canonical_name(name)
-    if canonical in BOSS_RESPAWN_TIMES and canonical in DEFAULT_BOSS_NAMES:
-        await guarded_interaction_followup_send(interaction, "interaction-followup", f"⚠️ บอส **{canonical}** มีอยู่ในระบบแล้ว — /addboss ใช้เพิ่มชื่อบอสใหม่เท่านั้น ไม่สร้าง Timer", ephemeral=True)
-        return
-    if "wadangka" in canonical.lower() or "วาดังการ์" in canonical:
-        notice_minutes = 30
-    BOSS_RESPAWN_TIMES[canonical] = timedelta(seconds=total_seconds)
-    BOSS_CD_TEXT[canonical] = (f"{hours} ชั่วโมง " if hours else "") + (f"{minutes} นาที " if minutes else "") + (f"{seconds} วินาที" if seconds else "")
-    BOSS_CD_TEXT[canonical] = BOSS_CD_TEXT[canonical].strip() or "0 วินาที"
-    ADVANCE_NOTICE_SECONDS[canonical] = notice_minutes * 60
-    ADVANCE_NOTICE_TEXT[canonical] = f"{notice_minutes} นาที"
-    BOSS_PRONUNCIATION.setdefault(canonical, canonical)
-    now_iso = datetime.now(TZ_THAI).isoformat()
-    custom_bosses[canonical] = {
-        "respawnSeconds": int(total_seconds),
-        "noticeMinutes": int(notice_minutes),
-        "cdText": BOSS_CD_TEXT[canonical],
-        "pronunciation": BOSS_PRONUNCIATION[canonical],
-        "createdAt": custom_bosses.get(canonical, {}).get("createdAt", now_iso),
-        "updatedAt": now_iso,
-        "createdBy": str(interaction.user.display_name),
-        "createdById": str(interaction.user.id)
-    }
-    saved_ok = await save_custom_bosses_to_github()
-    if not saved_ok:
-        if ack_ok:
-            await guarded_interaction_edit_original(
-                interaction,
-                "interaction-edit",
-                content="❌ เพิ่มบอสไม่สำเร็จในการบันทึก Firebase — ไม่ถือว่าสำเร็จจนกว่าจะบันทึกได้",
-            )
-        else:
-            print(f"⚠️ /add boss Firebase save failed and interaction ACK unavailable | boss={canonical}", flush=True)
-        return
-    # IMPORTANT: /addboss never writes boss_schedule.
-    success_text = (
-        f"✅ เพิ่มบอส **{canonical}** เข้า Boss Definition สำเร็จ\n"
-        f"⏳ CD สำหรับ /kill: **{BOSS_CD_TEXT[canonical]}**\n"
-        f"🔔 แจ้งเตือนล่วงหน้า: **{notice_minutes} นาที**\n"
-        f"📌 ยังไม่ได้สร้าง Timer — ใช้ `/kill {canonical}` เมื่อบอสตาย"
-    )
-    if ack_ok:
-        await guarded_interaction_edit_original(
-            interaction,
-            "interaction-edit",
-            content=success_text,
-        )
-    else:
-        # Firebase persistence is still completed, but do not send followups/audit
-        # while Discord has rejected the interaction callback.  This avoids creating
-        # another guaranteed-failing REST request during the active restriction.
-        print(
-            f"⚠️ /add boss saved successfully but Discord interaction ACK unavailable | "
-            f"boss={canonical} | followup skipped safely",
-            flush=True,
-        )
-        return
-    await send_audit_log(interaction.guild, interaction.user, "เพิ่มบอส (/addboss)", f"➕ `{canonical}` | CD {BOSS_CD_TEXT[canonical]} | ไม่มีการสร้าง boss_schedule", discord.Color.green())
-
-@bot.tree.command(name="delboss", description="ลบบอสออกจากตารางนับถอยหลัง")
-@app_commands.describe(boss_name="เลือกหรือพิมพ์ชื่อบอสที่ต้องการลบ")
-@app_commands.autocomplete(boss_name=boss_autocomplete)
-@has_allowed_role()
-async def del_boss(interaction: discord.Interaction, boss_name: str):
-    await _safe_interaction_ack(interaction, ephemeral=False)
-    matched_key = None
-    with schedule_lock:
-        for k in list(boss_schedule.keys()):
-            if k.lower() == boss_name.lower():
-                matched_key = k
-                break
-        if matched_key: del boss_schedule[matched_key]
-
-    if matched_key:
-        try: await asyncio.to_thread(db.reference(f'boss_schedule/{matched_key}').delete)
-        except Exception: pass
-        await save_boss_data()
-        
-        embed = discord.Embed(title="🗑️ ลบบอสสำเร็จ", description=f"ทำการลบข้อมูลเวลาของบอส **{matched_key}** ออกจากระบบเรียบร้อยแล้ว", color=discord.Color.orange())
-        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
-        await send_audit_log(interaction.guild, interaction.user, "ลบบอส (/delboss)", f"🗑️ ลบบอส: `{matched_key}`", discord.Color.orange())
-    else:
-        await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ ไม่พบบอส **{boss_name}** ในตารางนับถอยหลังขณะนี้", ephemeral=True)
-
-@bot.tree.command(name="status", description="เช็กสถานะเวลาบอสทั้งหมดที่กำลังนับถอยหลัง")
-async def boss_status(interaction: discord.Interaction):
-    await _safe_interaction_ack(interaction, ephemeral=False)
-    with schedule_lock: schedule_copy = boss_schedule.copy()
-    if not schedule_copy:
-        embed = discord.Embed(title="📜 ตารางเวลาบอส", description="ขณะนี้ยังไม่มีการบันทึกเวลาบอสใดๆ ในระบบ\nใช้คำสั่ง `/kill [ชื่อบอส]` เพื่อเริ่มบันทึกเวลาได้เลยครับ", color=discord.Color.blue())
-        await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
-        return
-
-    now = datetime.now(TZ_THAI)
-    embed = discord.Embed(title="📜 ตารางเวลาบอสเกิดทั้งหมด", description=f"อัปเดต ณ เวลา: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.blue())
-    sorted_bosses = sorted(schedule_copy.items(), key=lambda x: parse_to_thai_datetime(x[1]["spawn_time"]) or now)
-    
-    display_bosses = sorted_bosses[:20]
-    for boss, data in display_bosses:
-        spawn_time = parse_to_thai_datetime(data["spawn_time"])
-        if not spawn_time: continue
-        time_left_sec = (spawn_time - now).total_seconds()
-        
-        if time_left_sec <= 0: time_left_str = "เกิดแล้ว!"
-        else:
-            m, s = divmod(int(time_left_sec), 60)
-            h, m = divmod(m, 60)
-            if h > 0: time_left_str = f"อีก {h} ชม. {m} นาที"
-            else: time_left_str = f"อีก {m} นาที {s} วินาที"
-
-        notice_text = get_boss_advance_notice_text(boss)
-        rec_by = data.get("recorded_by") or data.get("recordedBy") or "-"
-        embed.add_field(name=f"👾 {boss}", value=f"เวลาเกิด: `{spawn_time.strftime('%H:%M:%S น.')}` | นับถอยหลัง: **{time_left_str}**\n*(ผู้บันทึก: {rec_by} | เตือนล่วงหน้า {notice_text})*", inline=False)
-
-    if len(sorted_bosses) > 20:
-        embed.add_field(name="📌 หมายเหตุ", value=f"*และยังมีบอสอีก {len(sorted_bosses) - 20} ตัวในคิว*", inline=False)
-    await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
-
-@bot.tree.command(name="setlive", description="ตั้งค่าป้ายไฟนับถอยหลังเวลาบอสเกิด Real-time ในช่องนี้")
-@has_allowed_role()
-async def set_live(interaction: discord.Interaction):
-    await _safe_interaction_ack(interaction, ephemeral=False)
-    now = datetime.now(TZ_THAI)
-    embed = discord.Embed(title="📌 [LIVE] ตารางนับถอยหลังเวลาบอสเกิด Real-time", description=f"อัปเดตล่าสุดเมื่อ: `{now.strftime('%H:%M:%S น.')}`", color=discord.Color.teal())
-    embed.add_field(name="📌 สถานะ", value="กำลังเริ่มต้นระบบ...", inline=False)
-    embed.set_footer(text="ป้ายไฟนับถอยหลังอัตโนมัติ • อัปเดตทุกๆ 1 นาที")
-
-    msg = await guarded_interaction_followup_send(interaction, "interaction-followup", embed=embed)
-    if msg is None:
-        print("⏭️ /setlive skipped while Discord REST global cooldown is active", flush=True)
-        return
-    global live_message_config, cached_live_message
-    live_message_config = {"channel_id": interaction.channel_id, "message_id": msg.id}
-    cached_live_message = msg
-    await save_live_config()
-    await send_audit_log(interaction.guild, interaction.user, "สร้าง Live Embed (/setlive)", f"📌 ช่อง: <#{interaction.channel_id}>\nMessage ID: `{msg.id}`", discord.Color.teal())
-
-
-# ==========================================
-# ⚔️ BOSS RAID ATTENDANCE SYSTEM (V78)
-# ใช้ Firebase root ใหม่ raid_attendance แยกจาก boss_schedule
-# ==========================================
-
-def is_guild_admin_or_owner(member: discord.Member) -> bool:
-    if not isinstance(member, discord.Member) or not member.guild:
-        return False
-    return bool(member.id == member.guild.owner_id or member.guild_permissions.administrator)
-
-
-def _attendance_config_snapshot(guild_id: int):
-    with schedule_lock:
-        cfg = dict(attendance_config.get(str(guild_id), {}) or {})
-    return cfg
-
-
-async def save_attendance_config():
-    with schedule_lock:
-        data = {str(k): dict(v) for k, v in (attendance_config or {}).items()}
+        print(f"⚠️ Auto Attendance panel send failed | guild={guild.name} | activity={activity_id} | {exc}", flush=True)
+        return None
+    if message is None:
+        return None
     try:
         await asyncio.wait_for(
-            asyncio.to_thread(db.reference("attendance_config").set, data), timeout=8
+            asyncio.to_thread(
+                db.reference(_attendance_activity_path(guild.id, activity_id)).update,
+                {"panel_message_id": int(message.id)},
+            ),
+            timeout=8,
         )
-    except Exception as e:
-        print(f"⚠️ บันทึก attendance_config ลง Firebase ไม่สำเร็จ: {e}", flush=True)
-    await asyncio.to_thread(set_db_value, "attendance_config", data)
-    await asyncio.to_thread(save_json_local, "attendance_config.json", data)
-
-
-async def load_attendance_config():
-    global attendance_config
-    data = None
-    try:
-        data = await asyncio.to_thread(db.reference("attendance_config").get)
-    except Exception as e:
-        print(f"⚠️ โหลด attendance_config จาก Firebase ไม่สำเร็จ: {e}", flush=True)
-    if not isinstance(data, dict) or not data:
-        data = get_db_value("attendance_config", None)
-    normalized = {}
-    if isinstance(data, dict):
-        for guild_id, cfg in data.items():
-            if not isinstance(cfg, dict):
-                continue
-            cid = cfg.get("summary_channel_id")
-            try:
-                cid = int(cid)
-            except (TypeError, ValueError):
-                continue
-            try:
-                gid = int(cfg.get("guild_id", guild_id))
-            except (TypeError, ValueError):
-                continue
-            normalized[str(gid)] = {
-                "guild_id": gid,
-                "summary_channel_id": cid,
-                "channel_name": str(cfg.get("channel_name") or ""),
-                "updated_by": str(cfg.get("updated_by") or ""),
-                "updated_at": str(cfg.get("updated_at") or ""),
-            }
-    attendance_config = normalized
-    print(f"✅ load_attendance_config สำเร็จ ({len(attendance_config)} server(s))", flush=True)
-    return attendance_config
-
-
-def _attendance_now_iso():
-    return datetime.now(TZ_THAI).isoformat()
-
-
-def _attendance_normalize_time_text(time_text: str) -> str | None:
-    """Accept Attendance time as HH:MM or HHMM and return canonical HH:MM."""
-    raw = str(time_text or "").strip().replace(".", ":")
-    if not raw:
-        return None
-    try:
-        if re.fullmatch(r"\d{1,2}:\d{2}", raw):
-            hour_text, minute_text = raw.split(":", 1)
-        elif re.fullmatch(r"\d{3,4}", raw):
-            hour_text, minute_text = (raw[0], raw[1:]) if len(raw) == 3 else (raw[:2], raw[2:])
-        else:
-            return None
-        hour, minute = int(hour_text), int(minute_text)
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            return None
-        return f"{hour:02d}:{minute:02d}"
-    except (TypeError, ValueError):
-        return None
-
-def _attendance_parse_local(date_text: str, time_text: str) -> datetime | None:
-    normalized = _attendance_normalize_time_text(time_text)
-    if not normalized:
-        return None
-    try:
-        dt = datetime.strptime(f"{date_text} {normalized}", "%d/%m/%Y %H:%M")
-        return dt.replace(tzinfo=TZ_THAI)
-    except Exception:
-        return None
-
-
-def _attendance_activity_path(guild_id: int, activity_id: str) -> str:
-    return f"raid_attendance/{int(guild_id)}/{activity_id}"
-
-
-def _attendance_member_display(member: discord.Member | discord.User) -> str:
-    return clean_display_name(getattr(member, "display_name", getattr(member, "name", "member")))
-
-
-def _attendance_language_blocks(activity: dict, participants: list[dict], *, closed=False):
-    enabled = get_enabled_discord_notification_languages()
-    if not enabled:
-        enabled = ["th"]
-    count = sum(1 for p in participants if str(p.get("status")) == "checked_in")
-    cancelled = sum(1 for p in participants if str(p.get("status")) == "cancelled")
-    boss = str(activity.get("boss_name") or "Boss")
-    attack = str(activity.get("attack_time") or "-")
-    date_text = str(activity.get("activity_date") or "-")
-    status = str(activity.get("status") or "scheduled")
-    title_by_lang = {
-        "th": "🔒 BOSS RAID ปิดเช็คชื่อ" if closed else "⚔️ BOSS RAID ATTENDANCE",
-        "en": "🔒 BOSS RAID CHECK-IN CLOSED" if closed else "⚔️ BOSS RAID ATTENDANCE",
-        "ko": "🔒 보스 레이드 출석 마감" if closed else "⚔️ 보스 레이드 출석",
-    }
-    line_by_lang = {
-        "th": f"⚔️ บอส: **{boss}**\n📅 วันที่: **{date_text}**\n⏰ เวลาโจมตี: **{attack} น.**\n👥 ผู้เข้าร่วม: **{count} คน**",
-        "en": f"⚔️ Boss: **{boss}**\n📅 Date: **{date_text}**\n⏰ Attack Time: **{attack}**\n👥 Checked in: **{count}**",
-        "ko": f"⚔️ 보스: **{boss}**\n📅 날짜: **{date_text}**\n⏰ 공격 시간: **{attack}**\n👥 참석: **{count}명**",
-    }
-    return enabled, title_by_lang, line_by_lang, count, cancelled, status
-
-
-def build_raid_activity_embed(activity: dict, participants: list[dict], *, closed=False):
-    enabled, title_map, body_map, count, cancelled, status = _attendance_language_blocks(activity, participants, closed=closed)
-    primary = enabled[0]
-    embed = discord.Embed(title=title_map[primary], color=discord.Color.red() if closed else discord.Color.blurple(), timestamp=datetime.now(TZ_THAI))
-    for lang in enabled:
-        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
-        embed.add_field(name=prefix, value=body_map[lang], inline=False)
-    if not closed:
-        open_text = str(activity.get("checkin_open") or "-")
-        close_text = str(activity.get("checkin_close") or "-")
-        extra = {
-            "th": f"🟢 เปิดเช็คชื่อ: **{open_text} น.**\n🔴 ปิดเช็คชื่อ: **{close_text} น.**",
-            "en": f"🟢 Check-in opens: **{open_text}**\n🔴 Check-in closes: **{close_text}**",
-            "ko": f"🟢 출석 시작: **{open_text}**\n🔴 출석 마감: **{close_text}**",
-        }
-        for lang in enabled:
-            prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
-            embed.add_field(name=f"{prefix} • Schedule", value=extra[lang], inline=False)
-    else:
-        extra = {
-            "th": f"✅ เช็กชื่อ: **{count}**\n❌ ยกเลิก: **{cancelled}**",
-            "en": f"✅ Checked in: **{count}**\n❌ Cancelled: **{cancelled}**",
-            "ko": f"✅ 출석: **{count}명**\n❌ 취소: **{cancelled}명**",
-        }
-        for lang in enabled:
-            prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
-            embed.add_field(name=f"{prefix} • Result", value=extra[lang], inline=False)
-    embed.set_footer(text=f"Activity ID: {activity.get('activity_id', '-')} | Status: {status}")
-    return embed
-
-
-def build_raid_summary_embed(activity: dict, participants: list[dict]):
-    enabled, title_map, body_map, count, cancelled, _ = _attendance_language_blocks(activity, participants, closed=True)
-    primary = enabled[0]
-    embed = discord.Embed(title=title_map[primary], color=discord.Color.green(), timestamp=datetime.now(TZ_THAI))
-    for lang in enabled:
-        prefix = {"th": "🇹🇭 ไทย", "en": "🇺🇸 English", "ko": "🇰🇷 한국어"}[lang]
-        embed.add_field(name=prefix, value=body_map[lang], inline=False)
-    checked = [p for p in participants if p.get("status") == "checked_in"]
-    names = []
-    for idx, p in enumerate(checked, 1):
-        names.append(f"{idx}. {p.get('display_name') or p.get('username') or p.get('user_id')}")
-    name_text = "\n".join(names) if names else "-"
-    if len(name_text) > 3900:
-        name_text = name_text[:3890] + "\n…"
-    labels = {"th": "📋 รายชื่อสมาชิก", "en": "📋 Participants", "ko": "📋 참석자"}
-    embed.add_field(name=labels[primary], value=name_text, inline=False)
-    return embed
-
-
-async def _attendance_fetch_activity(guild_id: int, activity_id: str):
-    try:
-        data = await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(guild_id, activity_id)).get), timeout=8)
-        return data if isinstance(data, dict) else None
-    except Exception as e:
-        print(f"⚠️ อ่าน Attendance activity ไม่สำเร็จ: {guild_id}/{activity_id}: {e}", flush=True)
-        return None
-
-
-async def _attendance_fetch_participants(guild_id: int, activity_id: str):
-    activity = await _attendance_fetch_activity(guild_id, activity_id)
-    if not activity:
-        return None, []
-    participants = activity.get("participants") if isinstance(activity.get("participants"), dict) else {}
-    rows = []
-    for uid, p in participants.items():
-        if not isinstance(p, dict):
-            continue
-        row = dict(p)
-        row.setdefault("user_id", str(uid))
-        rows.append(row)
-    rows.sort(key=lambda p: str(p.get("checked_in_at") or p.get("updated_at") or ""))
-    return activity, rows
-
-
-async def _attendance_refresh_panel(guild: discord.Guild, activity: dict, participants: list[dict], *, closed=False):
-    try:
-        channel_id = int(activity.get("panel_channel_id") or 0)
-        message_id = int(activity.get("panel_message_id") or 0)
-    except (TypeError, ValueError):
-        return
-    if not channel_id or not message_id:
-        return
-    channel = guild.get_channel(channel_id)
-    if not isinstance(channel, discord.TextChannel):
-        return
-    try:
-        message = channel.get_partial_message(message_id)
-        view = RaidAttendanceView(str(activity.get("activity_id"))) if not closed else RaidAttendanceView(str(activity.get("activity_id")), disabled=True)
-        await guarded_message_edit(message, context=f"attendance:panel-edit:{activity.get('activity_id')}", embed=build_raid_activity_embed(activity, participants, closed=closed), view=view, background=False)
-    except Exception as e:
-        print(f"⚠️ อัปเดต Attendance panel ไม่สำเร็จ: {e}", flush=True)
-
-
-async def close_raid_activity(guild: discord.Guild, activity_id: str, *, reason="scheduled-close"):
-    async with attendance_lifecycle_lock:
-        activity, participants = await _attendance_fetch_participants(guild.id, activity_id)
-        if not activity or str(activity.get("status")) == "closed":
-            return False
-        activity["status"] = "closed"
-        activity["closed_at"] = _attendance_now_iso()
-        activity["closed_reason"] = reason
+        activity["panel_message_id"] = int(message.id)
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(db.reference(_attendance_activity_path(guild.id, activity_id)).update, {
-                    "status": "closed",
-                    "closed_at": activity["closed_at"],
-                    "closed_reason": reason,
-                }), timeout=8
-            )
-        except Exception as e:
-            print(f"⚠️ ปิด Attendance activity ไม่สำเร็จ: {guild.id}/{activity_id}: {e}", flush=True)
-            return False
-        await _attendance_refresh_panel(guild, activity, participants, closed=True)
-        cfg = _attendance_config_snapshot(guild.id)
-        summary_id = cfg.get("summary_channel_id")
-        channel = guild.get_channel(int(summary_id)) if summary_id else None
-        if isinstance(channel, discord.TextChannel):
-            try:
-                embed = build_raid_summary_embed(activity, participants)
-                await guarded_channel_send(channel, context=f"attendance:summary:{activity_id}", embed=embed, background=True)
-            except Exception as e:
-                print(f"⚠️ ส่ง Attendance summary ไม่สำเร็จ: {guild.name}: {e}", flush=True)
-        print(f"📊 Attendance activity closed | guild={guild.name} | activity={activity_id} | participants={sum(1 for p in participants if p.get('status')=='checked_in')}", flush=True)
-        return True
-
-
-class RaidAttendanceCreateModal(discord.ui.Modal, title="⚔️ Create Boss Raid Activity"):
-    def __init__(self, boss_name: str):
-        super().__init__(timeout=300)
-        self.boss_name = discord.ui.TextInput(label="Boss", default=boss_name[:100], max_length=100, required=True)
-        self.activity_date = discord.ui.TextInput(label="วันที่ (DD/MM/YYYY)", placeholder="09/09/2026", max_length=10, required=True)
-        self.attack_time = discord.ui.TextInput(label="เวลาโจมตี (HH:MM หรือ HHMM)", placeholder="20:30 หรือ 2030", max_length=5, required=True)
-        self.checkin_open = discord.ui.TextInput(label="เปิดเช็คชื่อ (HH:MM หรือ HHMM)", placeholder="20:15 หรือ 2015", max_length=5, required=True)
-        self.checkin_close = discord.ui.TextInput(label="ปิดเช็คชื่อ (HH:MM หรือ HHMM)", placeholder="20:45 หรือ 2045", max_length=5, required=True)
-        for item in (self.boss_name, self.activity_date, self.attack_time, self.checkin_open, self.checkin_close):
-            self.add_item(item)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.guild or not isinstance(interaction.user, discord.Member) or not is_guild_admin_or_owner(interaction.user):
-            await interaction.response.send_message("❌ เฉพาะ Admin หรือ Server Owner เท่านั้นที่สร้างกิจกรรมได้", ephemeral=True)
-            return
-        await _safe_interaction_ack(interaction, ephemeral=True)
-        date_text = str(self.activity_date.value).strip()
-        attack_input = str(self.attack_time.value).strip()
-        open_input = str(self.checkin_open.value).strip()
-        close_input = str(self.checkin_close.value).strip()
-        attack_text = _attendance_normalize_time_text(attack_input)
-        open_text = _attendance_normalize_time_text(open_input)
-        close_text = _attendance_normalize_time_text(close_input)
-        attack_dt = _attendance_parse_local(date_text, attack_input)
-        open_dt = _attendance_parse_local(date_text, open_input)
-        close_dt = _attendance_parse_local(date_text, close_input)
-        if not attack_dt or not open_dt or not close_dt or not attack_text or not open_text or not close_text or not (open_dt <= attack_dt <= close_dt):
-            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ วันที่/เวลาไม่ถูกต้อง หรือช่วงเปิด-ปิดไม่ครอบคลุมเวลาโจมตี", ephemeral=True)
-            return
-        cfg = _attendance_config_snapshot(interaction.guild.id)
-        summary_id = cfg.get("summary_channel_id")
-        summary_channel = interaction.guild.get_channel(int(summary_id)) if summary_id else None
-        if not isinstance(summary_channel, discord.TextChannel):
-            await guarded_interaction_followup_send(interaction, "interaction-followup", "❌ ยังไม่ได้ตั้งห้องสรุป Attendance ใช้ `/set-notification` → `ตั้งห้องสรุป Attendance` ก่อน", ephemeral=True)
-            return
-        activity_id = f"{attack_dt.strftime('%Y%m%d')}_{re.sub(r'[^A-Za-z0-9]+', '_', str(self.boss_name.value).strip())[:32]}_{attack_dt.strftime('%H%M')}_{uuid.uuid4().hex[:6]}"
-        activity = {
-            "activity_id": activity_id,
-            "guild_id": interaction.guild.id,
-            "boss_name": str(self.boss_name.value).strip(),
-            "activity_date": date_text,
-            "attack_time": attack_text,
-            "checkin_open": open_text,
-            "checkin_close": close_text,
-            "open_at": open_dt.isoformat(),
-            "close_at": close_dt.isoformat(),
-            "attack_at": attack_dt.isoformat(),
-            "status": "scheduled" if datetime.now(TZ_THAI) < open_dt else "open",
-            "created_by": str(interaction.user.id),
-            "created_by_name": _attendance_member_display(interaction.user),
-            "created_at": _attendance_now_iso(),
-            "panel_channel_id": interaction.channel_id,
-            "panel_message_id": None,
-            "summary_channel_id": int(summary_channel.id),
-            "participants": {},
-        }
-        try:
-            await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, activity_id)).set, activity), timeout=8)
-        except Exception as e:
-            await guarded_interaction_followup_send(interaction, "interaction-followup", f"❌ บันทึกกิจกรรมลง Firebase ไม่สำเร็จ: {e}", ephemeral=True)
-            return
-        view = RaidAttendanceView(activity_id)
-        message = await guarded_interaction_followup_send(interaction, "interaction-followup", embed=build_raid_activity_embed(activity, [], closed=False), view=view, ephemeral=False)
-        if message is not None:
-            try:
-                await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, activity_id)).update, {"panel_message_id": int(message.id)}), timeout=8)
-                activity["panel_message_id"] = int(message.id)
-                bot.add_view(view, message_id=int(message.id))
-            except Exception as e:
-                print(f"⚠️ บันทึก panel message ID ไม่สำเร็จ: {e}", flush=True)
-        else:
-            print(f"⚠️ สร้าง Attendance panel message ไม่สำเร็จ: {activity_id}", flush=True)
-        await send_audit_log(interaction.guild, interaction.user, "สร้าง Boss Raid Attendance", f"Boss: `{activity['boss_name']}` | วันที่: `{date_text}` | เปิด: `{open_text}` | ปิด: `{close_text}` | Activity: `{activity_id}`", discord.Color.blurple())
-        print(f"⚔️ Attendance activity created | guild={interaction.guild.name} | activity={activity_id}", flush=True)
-
-
-class RaidAttendanceView(discord.ui.View):
-    def __init__(self, activity_id: str, disabled: bool = False):
-        super().__init__(timeout=None)
-        self.activity_id = str(activity_id)
-        self.add_item(self._button("check", "✅ เช็กชื่อ", discord.ButtonStyle.success, disabled))
-        self.add_item(self._button("cancel", "❌ ยกเลิกเช็กชื่อ", discord.ButtonStyle.danger, disabled))
-        self.add_item(self._button("list", "📋 รายชื่อ", discord.ButtonStyle.secondary, False))
-
-    def _button(self, action: str, label: str, style, disabled: bool):
-        button = discord.ui.Button(label=label, style=style, custom_id=f"raid_attendance:{action}:{self.activity_id}", disabled=disabled)
-        if action == "check":
-            button.callback = self._check
-        elif action == "cancel":
-            button.callback = self._cancel
-        else:
-            button.callback = self._list
-        return button
-
-    async def _load(self, interaction: discord.Interaction):
-        activity, participants = await _attendance_fetch_participants(interaction.guild.id, self.activity_id)
-        return activity, participants
-
-    async def _check(self, interaction: discord.Interaction):
-        await _safe_interaction_ack(interaction, ephemeral=True)
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return
-        activity, participants = await self._load(interaction)
-        if not activity:
-            await guarded_interaction_followup_send(interaction, "attendance-check", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
-            return
-        now = datetime.now(TZ_THAI)
-        open_dt = parse_to_thai_datetime(activity.get("open_at"))
-        close_dt = parse_to_thai_datetime(activity.get("close_at"))
-        if str(activity.get("status")) == "closed" or not open_dt or not close_dt or not (open_dt <= now <= close_dt):
-            await guarded_interaction_followup_send(interaction, "attendance-check", "🔒 กิจกรรมนี้ยังไม่เปิดเช็คชื่อหรือปิดเช็คชื่อแล้ว", ephemeral=True)
-            return
-        ref_path = f"{_attendance_activity_path(interaction.guild.id, self.activity_id)}/participants/{interaction.user.id}"
-        record = {
-            "user_id": str(interaction.user.id),
-            "username": str(interaction.user.name),
-            "display_name": _attendance_member_display(interaction.user),
-            "checked_in_at": _attendance_now_iso(),
-            "status": "checked_in",
-        }
-        transaction_result = None
-        try:
-            def _tx(current_value):
-                if isinstance(current_value, dict) and current_value.get("status") == "checked_in":
-                    return current_value
-                return record
-            transaction_result = await asyncio.wait_for(
-                asyncio.to_thread(db.reference(ref_path).transaction, _tx), timeout=8
-            )
-            if isinstance(transaction_result, dict) and transaction_result.get("status") == "checked_in" and str(transaction_result.get("checked_in_at")) != str(record.get("checked_in_at")):
-                await guarded_interaction_followup_send(interaction, "attendance-check", "⚠️ คุณเช็คชื่อกิจกรรมนี้แล้ว", ephemeral=True)
-                return
-            await asyncio.wait_for(asyncio.to_thread(db.reference(_attendance_activity_path(interaction.guild.id, self.activity_id)).update, {"updated_at": _attendance_now_iso()}), timeout=8)
-        except Exception as e:
-            await guarded_interaction_followup_send(interaction, "attendance-check", f"❌ บันทึกเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
-            return
-        await guarded_interaction_followup_send(interaction, "attendance-check", "✅ เช็คชื่อเข้าร่วมกิจกรรมสำเร็จ", ephemeral=True)
-        activity, participants = await self._load(interaction)
-        await _attendance_refresh_panel(interaction.guild, activity, participants, closed=False)
-
-    async def _cancel(self, interaction: discord.Interaction):
-        await _safe_interaction_ack(interaction, ephemeral=True)
-        if not interaction.guild or not isinstance(interaction.user, discord.Member):
-            return
-        activity, participants = await self._load(interaction)
-        if not activity:
-            await guarded_interaction_followup_send(interaction, "attendance-cancel", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
-            return
-        now = datetime.now(TZ_THAI)
-        open_dt = parse_to_thai_datetime(activity.get("open_at"))
-        close_dt = parse_to_thai_datetime(activity.get("close_at"))
-        if str(activity.get("status")) == "closed" or not open_dt or not close_dt or not (open_dt <= now <= close_dt):
-            await guarded_interaction_followup_send(interaction, "attendance-cancel", "🔒 กิจกรรมนี้ปิดเช็คชื่อแล้ว", ephemeral=True)
-            return
-        ref_path = f"{_attendance_activity_path(interaction.guild.id, self.activity_id)}/participants/{interaction.user.id}"
-        try:
-            current = await asyncio.wait_for(asyncio.to_thread(db.reference(ref_path).get), timeout=8)
-        except Exception as e:
-            await guarded_interaction_followup_send(interaction, "attendance-cancel", f"❌ อ่านข้อมูลเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
-            return
-        if not isinstance(current, dict) or current.get("status") != "checked_in":
-            await guarded_interaction_followup_send(interaction, "attendance-cancel", "ℹ️ คุณยังไม่ได้เช็คชื่อกิจกรรมนี้", ephemeral=True)
-            return
-        current.update({"status": "cancelled", "cancelled_at": _attendance_now_iso()})
-        try:
-            await asyncio.wait_for(asyncio.to_thread(db.reference(ref_path).update, current), timeout=8)
-        except Exception as e:
-            await guarded_interaction_followup_send(interaction, "attendance-cancel", f"❌ ยกเลิกเช็คชื่อไม่สำเร็จ: {e}", ephemeral=True)
-            return
-        await guarded_interaction_followup_send(interaction, "attendance-cancel", "❌ ยกเลิกเช็คชื่อเรียบร้อยแล้ว", ephemeral=True)
-        activity, participants = await self._load(interaction)
-        await _attendance_refresh_panel(interaction.guild, activity, participants, closed=False)
-
-    async def _list(self, interaction: discord.Interaction):
-        await _safe_interaction_ack(interaction, ephemeral=True)
-        if not interaction.guild:
-            return
-        activity, participants = await self._load(interaction)
-        if not activity:
-            await guarded_interaction_followup_send(interaction, "attendance-list", "❌ ไม่พบกิจกรรมนี้", ephemeral=True)
-            return
-        checked = [p for p in participants if p.get("status") == "checked_in"]
-        names = [f"{idx}. {p.get('display_name') or p.get('username') or p.get('user_id')}" for idx, p in enumerate(checked, 1)]
-        if len(names) > 50:
-            names = names[:50] + [f"… และอีก {len(checked)-50} คน"]
-        await guarded_interaction_followup_send(interaction, "attendance-list", embed=discord.Embed(title="📋 รายชื่อผู้เข้าร่วม", description="\n".join(names) if names else "-", color=discord.Color.blurple()), ephemeral=True)
-
-
-async def restore_raid_attendance_views():
-    total = 0
-    for guild in list(bot.guilds):
-        try:
-            data = await asyncio.wait_for(asyncio.to_thread(db.reference(f"raid_attendance/{guild.id}").get), timeout=8)
+            bot.add_view(view, message_id=int(message.id))
         except Exception:
-            continue
-        if not isinstance(data, dict):
-            continue
-        for activity_id, activity in data.items():
-            if not isinstance(activity, dict):
-                continue
-            if str(activity.get("status")) == "closed":
-                continue
-            try:
-                msg_id = int(activity.get("panel_message_id") or 0)
-            except (TypeError, ValueError):
-                msg_id = 0
-            view = RaidAttendanceView(str(activity_id))
-            try:
-                if msg_id:
-                    bot.add_view(view, message_id=msg_id)
-                else:
-                    bot.add_view(view)
-                total += 1
-            except Exception as e:
-                print(f"⚠️ restore Attendance View failed: {guild.id}/{activity_id}: {e}", flush=True)
-    print(f"✅ restore_raid_attendance_views สำเร็จ ({total} active view(s))", flush=True)
+            pass
+    except Exception as exc:
+        print(f"⚠️ Auto Attendance panel ID save failed | guild={guild.name} | activity={activity_id} | {exc}", flush=True)
+    return message
 
 
 @tasks.loop(seconds=30)
 async def attendance_lifecycle_loop():
     try:
+        await ensure_auto_attendance_activities()
         root = await asyncio.wait_for(asyncio.to_thread(db.reference("raid_attendance").get), timeout=8)
     except Exception as e:
         print(f"⚠️ Attendance lifecycle Firebase read failed: {e}", flush=True)
@@ -6433,6 +5171,60 @@ async def code_command(interaction: discord.Interaction, boss_name: str, code: s
                 await guarded_channel_send(attendance_channel, context="audit:boss-code", embed=log_embed)
             except Exception as e:
                 print(f"❌ ส่ง Audit Log ใน boss-attendance ไม่สำเร็จ: {e}")
+
+
+@bot.tree.command(name="autoattendance", description="เปิดหรือปิด Auto Attendance ก่อนเวลาบอสเกิด 30 นาที")
+@app_commands.describe(status="เลือกเปิด (on) หรือปิด (off) ระบบ Auto Attendance")
+@app_commands.choices(status=[
+    app_commands.Choice(name="เปิดระบบ (on)", value="on"),
+    app_commands.Choice(name="ปิดระบบ (off)", value="off"),
+])
+@app_commands.checks.has_permissions(administrator=True)
+async def autoattendance_command(interaction: discord.Interaction, status: app_commands.Choice[str]):
+    """Toggle automatic Boss Raid Attendance creation for this guild.
+
+    Permission is intentionally server-admin only because this changes a server-wide
+    background feature. Existing /attendance permissions and behavior are unchanged.
+    """
+    if not interaction.guild:
+        await _safe_interaction_ack(interaction, ephemeral=True)
+        await guarded_interaction_followup_send(interaction, "autoattendance", "❌ คำสั่งนี้ใช้ได้เฉพาะในเซิร์ฟเวอร์", ephemeral=True)
+        return
+    await _safe_interaction_ack(interaction, ephemeral=True)
+    enabled = str(status.value).lower() == "on"
+    guild_key = str(interaction.guild.id)
+    cfg = _attendance_config_snapshot(interaction.guild.id)
+    summary_id = cfg.get("summary_channel_id")
+    if not summary_id:
+        candidate = discord.utils.get(interaction.guild.text_channels, name=LIVE_CHANNEL_NAME) or interaction.channel
+        if isinstance(candidate, discord.TextChannel):
+            summary_id = candidate.id
+            cfg["guild_id"] = interaction.guild.id
+            cfg["summary_channel_id"] = int(summary_id)
+            cfg["channel_name"] = candidate.name
+    cfg["guild_id"] = interaction.guild.id
+    cfg["summary_channel_id"] = int(summary_id or 0)
+    cfg["auto_attendance_enabled"] = enabled
+    cfg["updated_by"] = str(interaction.user.id)
+    cfg["updated_at"] = _attendance_now_iso()
+    with schedule_lock:
+        attendance_config[guild_key] = cfg
+    await save_attendance_config()
+
+    state_text = "🟢 เปิดใช้งาน Auto Attendance แล้ว" if enabled else "🔴 ปิด Auto Attendance แล้ว"
+    detail = (
+        f"{state_text}\n"
+        "ระบบจะสร้าง Attendance จากเวลา Boss Schedule อัตโนมัติ "
+        "ตั้งแต่ 30 นาทีก่อนเกิด และปิดเช็คชื่อเมื่อถึงเวลาเกิดบอส"
+        if enabled else
+        f"{state_text}\nกิจกรรม Auto Attendance ใหม่จะไม่ถูกสร้างแล้ว (กิจกรรมเดิมยังปิดตามเวลาที่กำหนด)"
+    )
+    await guarded_interaction_followup_send(interaction, "autoattendance", detail, ephemeral=True)
+    print(
+        f"⚙️ Auto Attendance {'ENABLED' if enabled else 'DISABLED'} | "
+        f"guild={interaction.guild.name} | by={interaction.user} | summary_channel={summary_id or '-'}",
+        flush=True,
+    )
 
 
 @bot.tree.command(name="attendance", description="สร้างและจัดการกิจกรรมเช็คชื่อการโจมตีบอส")
@@ -6723,12 +5515,12 @@ def validate_runtime_integrity():
     if missing:
         raise RuntimeError("V46 integrity check failed; missing functions: " + ", ".join(missing))
     direct = [cmd.name for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Command)]
-    if len(direct) != 18:
-        raise RuntimeError(f"V79 integrity check failed; expected 18 direct slash commands, found {len(direct)}")
+    if len(direct) != 19:
+        raise RuntimeError(f"V92 integrity check failed; expected 19 direct slash commands, found {len(direct)}")
     group = next((cmd for cmd in bot.tree.get_commands() if isinstance(cmd, app_commands.Group) and cmd.name == "add"), None)
     if group is None or not any(sub.name == "boss" for sub in group.commands):
         raise RuntimeError("V79 integrity check failed; /add boss subcommand missing")
-    print("✅ V79 integrity check passed | 18 direct + /add boss = 19 command paths", flush=True)
+    print("✅ V92 integrity check passed | 19 direct + /add boss = 20 command paths | existing 19 preserved + /autoattendance", flush=True)
 
 
 async def run_bot_with_backoff(token: str):
