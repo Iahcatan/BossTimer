@@ -71,7 +71,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V89_ATTENDANCE_STREAM_FIX_2026-09-10-R1"
+NOTICE_BF_PATCH_VERSION = "V90_ATTENDANCE_STREAM_WAITRESS_FIX_2026-09-10-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -611,7 +611,6 @@ def attendance_stream_api():
     response.headers['Cache-Control'] = 'no-cache, no-transform'
     response.headers['X-Accel-Buffering'] = 'no'
     response.headers['Vary'] = 'Origin'
-    response.headers['Connection'] = 'keep-alive'
     return response
 
 
