@@ -6042,11 +6042,16 @@ async def ensure_library_boss_schedule_records(*, force_refresh: bool = False) -
     finally:
         is_updating_from_bot = False
 
-    print(
-        f"📚 Library Boss schedule ensured | changed={changed} | migrated={migrated} | "
-        f"aliases_deleted={aliases_deleted} | slots=09:00,21:00",
-        flush=True,
-    )
+    # V97: avoid repeating a healthy-state log on every lifecycle tick.
+    # Log only when the canonical Library Boss schedule actually changed,
+    # was migrated, or had a legacy alias removed. The underlying schedule
+    # and Firebase/Voice/Boss logic remain unchanged.
+    if changed or migrated or aliases_deleted:
+        print(
+            f"📚 Library Boss schedule ensured | changed={changed} | migrated={migrated} | "
+            f"aliases_deleted={aliases_deleted} | slots=09:00,21:00",
+            flush=True,
+        )
 
 
 async def save_attendance_config():
