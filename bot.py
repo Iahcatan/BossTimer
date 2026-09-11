@@ -3490,20 +3490,58 @@ async def _play_tts_in_channel(guild, channel, files):
 
         if not vc or not vc.is_connected():
             last_exc = None
-            for attempt in range(1, 3):
+            # Discord Voice can leave a stale VoiceClient object behind when the
+            # initial voice handshake times out. Always clean that object before
+            # retrying so the next attempt starts a fresh voice session instead of
+            # colliding with the failed session. Keep retries bounded to avoid
+            # creating an aggressive reconnect loop.
+            for attempt in range(1, 4):
                 try:
-                    print(f"🔌 Voice connect attempt {attempt}/2: {guild.name} -> {channel.name}")
-                    vc = await channel.connect(reconnect=True, timeout=20, self_deaf=False, self_mute=False)
+                    stale_vc = guild.voice_client
+                    if stale_vc and not stale_vc.is_connected():
+                        try:
+                            await stale_vc.disconnect(force=True)
+                        except Exception:
+                            pass
+                        vc = None
+
+                    print(f"🔌 Voice connect attempt {attempt}/3: {guild.name} -> {channel.name}")
+                    vc = await channel.connect(reconnect=True, timeout=25, self_deaf=False, self_mute=False)
                     if vc and vc.is_connected():
                         connected_here = True
                         print(f"✅ Voice connect success: {guild.name} -> {channel.name}")
                         break
+
+                    last_exc = RuntimeError("Discord returned a VoiceClient that is not connected")
+                    try:
+                        if vc:
+                            await vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    vc = None
                 except Exception as exc:
                     last_exc = exc
-                    print(f"⚠️ Voice connect attempt {attempt}/2 failed: {guild.name}/{channel.name}: {exc}")
-                    await asyncio.sleep(1.2 * attempt)
+                    print(
+                        f"⚠️ Voice connect attempt {attempt}/3 failed: "
+                        f"{guild.name}/{channel.name}: {type(exc).__name__}: {exc!r}",
+                        flush=True,
+                    )
+                    try:
+                        stale_vc = guild.voice_client
+                        if stale_vc and not stale_vc.is_connected():
+                            await stale_vc.disconnect(force=True)
+                    except Exception:
+                        pass
+                    vc = None
+                    if attempt < 3:
+                        await asyncio.sleep(2.0 * attempt)
+
             if not vc or not vc.is_connected():
-                print(f"❌ Voice connect failed: {guild.name}/{channel.name}: {last_exc}")
+                print(
+                    f"❌ Voice connect failed: {guild.name}/{channel.name}: "
+                    f"{type(last_exc).__name__ if last_exc else 'UnknownError'}: {last_exc!r}",
+                    flush=True,
+                )
                 return False
 
         # Give the Discord voice websocket and UDP path time to become ready.
