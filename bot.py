@@ -71,7 +71,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V95_AUTO_ATTENDANCE_GUARD_EXCLUSION_FIX_2026-09-10-R1"
+NOTICE_BF_PATCH_VERSION = "V96_LIBRARY_BOSS_SCHEDULE_CANONICAL_FIX_2026-09-11-R1"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -2627,7 +2627,9 @@ async def load_boss_data():
         for boss_name, data in saved_data.items():
             if not isinstance(data, dict):
                 continue
-            canonical = get_boss_canonical_name(boss_name)
+            canonical = _canonical_library_boss_key(boss_name)
+            if canonical == boss_name:
+                canonical = get_boss_canonical_name(boss_name)
             internal = _firebase_to_internal(canonical, data)
             if internal:
                 boss_schedule[canonical] = internal
@@ -2819,7 +2821,9 @@ def start_firebase_listener(loop):
             for boss_name, data in snapshot.items():
                 if not isinstance(data, dict):
                     continue
-                canonical = get_boss_canonical_name(boss_name)
+                canonical = _canonical_library_boss_key(boss_name)
+                if canonical == boss_name:
+                    canonical = get_boss_canonical_name(boss_name)
                 internal = _firebase_to_internal(canonical, data)
                 if internal:
                     new_schedule[canonical] = internal
@@ -5874,41 +5878,97 @@ def _next_library_boss_occurrence(now: datetime, hour: int) -> datetime:
     return candidate
 
 
+LIBRARY_BOSS_SCHEDULE_SPECS = (
+    ("Library Boss 09-00", 9, "09-00"),
+    ("Library Boss 21-00", 21, "21-00"),
+)
+
+
+def _canonical_library_boss_key(key: str) -> str:
+    cleaned = str(key or "").strip()
+    compact = cleaned.replace("_", " ").replace(":", "-")
+    aliases = {
+        "Library Boss 09-00": "Library Boss 09-00",
+        "Library Boss 09-00": "Library Boss 09-00",
+        "Library Boss 09 00": "Library Boss 09-00",
+        "Library_Boss_09-00": "Library Boss 09-00",
+        "Library_Boss_09_00": "Library Boss 09-00",
+        "Library Boss 21-00": "Library Boss 21-00",
+        "Library Boss 21 00": "Library Boss 21-00",
+        "Library_Boss_21-00": "Library Boss 21-00",
+        "Library_Boss_21_00": "Library Boss 21-00",
+    }
+    return aliases.get(cleaned, aliases.get(compact, cleaned))
+
+
+def _library_schedule_alias_keys(canonical_key: str) -> set[str]:
+    if canonical_key == "Library Boss 09-00":
+        return {"Library_Boss_09-00", "Library_Boss_09_00", "Library Boss 09 00"}
+    if canonical_key == "Library Boss 21-00":
+        return {"Library_Boss_21-00", "Library_Boss_21_00", "Library Boss 21 00"}
+    return set()
+
+
 async def ensure_library_boss_schedule_records(*, force_refresh: bool = False) -> None:
-    """Ensure two recurring Library Boss rows exist in boss_schedule.
+    """Ensure exactly two canonical recurring Library Boss rows exist in boss_schedule.
 
-    This is a schedule-only feature. It does not reuse/modify the legacy Library Boss
-    notification task (which still announces at 08:50/20:50), so no duplicate generic
-    Boss notification/TTS is introduced.
+    V96 fix: V95 wrote the in-memory key with spaces but wrote Firebase using
+    _safe_firebase_key(), producing a second underscore-key row. Firebase root-sync
+    then loaded both rows, so Dashboard displayed duplicates and the next-day 09:00
+    occurrence could be overwritten by the stale alias. This function now uses the same
+    canonical key in memory and Firebase, migrates/deletes legacy underscore aliases,
+    and advances each fixed daily slot independently after it has passed.
     """
+    global is_updating_from_bot
+
     now = datetime.now(TZ_THAI)
-    slots = ((9, "09-00"), (21, "21-00"))
+    migrated = 0
     changed = 0
+    aliases_deleted = 0
 
-    for hour, slot_text in slots:
-        boss_key = f"Library Boss {slot_text}"
-        with schedule_lock:
-            existing = dict(boss_schedule.get(boss_key, {}) or {})
+    try:
+        root = await asyncio.wait_for(asyncio.to_thread(db.reference("boss_schedule").get), timeout=8)
+    except Exception as exc:
+        root = None
+        print(f"⚠️ Library Boss schedule root read failed safely: {exc}", flush=True)
+    if not isinstance(root, dict):
+        root = {}
 
-        existing_spawn = parse_to_thai_datetime(existing.get("spawn_time") or existing.get("spawnTimeMs"))
-        desired_spawn = _next_library_boss_occurrence(now, hour)
+    try:
+        is_updating_from_bot = True
 
-        # Keep the current occurrence when it is still in the future. Once crossed,
-        # advance exactly one daily slot. This makes the Dashboard row always usable
-        # as the source of truth for Auto Attendance.
-        if existing_spawn and existing_spawn > now + timedelta(seconds=5):
-            target_spawn = existing_spawn
-        else:
-            target_spawn = desired_spawn
+        for canonical_key, hour, slot_text in LIBRARY_BOSS_SCHEDULE_SPECS:
+            candidates = []
+            for raw_key, raw_data in root.items():
+                if not isinstance(raw_data, dict):
+                    continue
+                if _canonical_library_boss_key(raw_key) == canonical_key:
+                    candidates.append((str(raw_key), dict(raw_data)))
 
-        target_ms = int(target_spawn.timestamp() * 1000)
-        existing_ms = int(existing_spawn.timestamp() * 1000) if existing_spawn else None
-        metadata_ok = (
-            parse_bool(existing.get("is_library_boss_schedule"), False)
-            and str(existing.get("library_slot") or "") == slot_text
-        )
+            # Prefer the canonical human-readable key; otherwise migrate the alias.
+            existing_key = canonical_key if any(k == canonical_key for k, _ in candidates) else (candidates[0][0] if candidates else None)
+            existing = next((d for k, d in candidates if k == existing_key), {}) if existing_key else {}
+            existing_spawn = parse_to_thai_datetime(
+                existing.get("spawn_time") or existing.get("spawnTimeMs")
+            )
+            desired_spawn = _next_library_boss_occurrence(now, hour)
 
-        if force_refresh or existing_ms != target_ms or not metadata_ok:
+            # Keep a still-future occurrence. Once it has crossed, advance exactly
+            # one occurrence for this fixed daily slot.
+            if existing_spawn and existing_spawn > now + timedelta(seconds=5):
+                target_spawn = existing_spawn
+            else:
+                target_spawn = desired_spawn
+
+            target_ms = int(target_spawn.timestamp() * 1000)
+            existing_ms = int(existing_spawn.timestamp() * 1000) if existing_spawn else None
+            metadata_ok = (
+                parse_bool(existing.get("is_library_boss_schedule"), False)
+                and str(existing.get("library_slot") or "") == slot_text
+                and str(existing.get("recurrence") or "") == "daily"
+            )
+            needs_write = force_refresh or existing_ms != target_ms or not metadata_ok or existing_key != canonical_key
+
             record = {
                 "spawnTimeMs": target_ms,
                 "spawn_time": target_spawn.isoformat(),
@@ -5923,26 +5983,42 @@ async def ensure_library_boss_schedule_records(*, force_refresh: bool = False) -
                 "notifiedSpawn": False,
                 "voiceNoticeSent": False,
                 "voiceSpawnSent": False,
-                # Schedule-only marker: existing Library Boss notification task remains
-                # the owner of its 08:50/20:50 alert and this row will not create a
-                # second generic Boss notification.
                 "suppressBossNotifications": True,
                 "is_library_boss_schedule": True,
                 "library_slot": slot_text,
                 "recurrence": "daily",
                 "autoAttendanceEligible": True,
             }
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(db.reference(f"boss_schedule/{_safe_firebase_key(boss_key)}").set, record),
-                    timeout=8,
-                )
-            except Exception as e:
-                print(f"⚠️ Library Boss schedule Firebase update failed | {boss_key}: {e}", flush=True)
-                continue
+
+            if needs_write:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(db.reference(f"boss_schedule/{canonical_key}").set, record),
+                        timeout=8,
+                    )
+                    changed += 1
+                    if existing_key and existing_key != canonical_key:
+                        migrated += 1
+                except Exception as exc:
+                    print(f"⚠️ Library Boss canonical schedule write failed | key={canonical_key} | {exc}", flush=True)
+                    continue
+
+            # Remove all known alias keys so the root can only contain one row per slot.
+            alias_keys = _library_schedule_alias_keys(canonical_key)
+            for alias_key in alias_keys:
+                if alias_key not in root:
+                    continue
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(db.reference(f"boss_schedule/{alias_key}").delete), timeout=8
+                    )
+                    aliases_deleted += 1
+                except Exception as exc:
+                    print(f"⚠️ Library Boss alias cleanup failed | key={alias_key} | {exc}", flush=True)
 
             with schedule_lock:
-                boss_schedule[boss_key] = _firebase_to_internal(boss_key, record) or {
+                boss_schedule.pop(existing_key, None) if existing_key and existing_key != canonical_key else None
+                boss_schedule[canonical_key] = _firebase_to_internal(canonical_key, record) or {
                     "spawn_time": target_spawn,
                     "noticeMinutes": 30,
                     "notified_advance": False,
@@ -5956,10 +6032,21 @@ async def ensure_library_boss_schedule_records(*, force_refresh: bool = False) -
                     "suppressBossNotifications": True,
                     "autoAttendanceEligible": True,
                 }
-            changed += 1
 
-    if changed:
-        print(f"📚 Library Boss schedule ensured | changed={changed} | slots=09:00,21:00", flush=True)
+        # Remove stale alias keys from the local in-memory cache too.
+        with schedule_lock:
+            for raw_key in list(boss_schedule.keys()):
+                canonical = _canonical_library_boss_key(raw_key)
+                if canonical in {spec[0] for spec in LIBRARY_BOSS_SCHEDULE_SPECS} and raw_key != canonical:
+                    boss_schedule.pop(raw_key, None)
+    finally:
+        is_updating_from_bot = False
+
+    print(
+        f"📚 Library Boss schedule ensured | changed={changed} | migrated={migrated} | "
+        f"aliases_deleted={aliases_deleted} | slots=09:00,21:00",
+        flush=True,
+    )
 
 
 async def save_attendance_config():
