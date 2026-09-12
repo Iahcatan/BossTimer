@@ -370,6 +370,20 @@ def web_push_public_key_api():
     return _web_push_cors(response)
 
 
+@app.route("/api/push/diagnostics", methods=["GET", "OPTIONS"])
+def web_push_diagnostics_api():
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    return _web_push_cors(jsonify({
+        "success": True,
+        "projectId": "skynet-3ad44",
+        "vapidConfigured": bool(WEB_PUSH_VAPID_PUBLIC_KEY),
+        "vapidLength": len(WEB_PUSH_VAPID_PUBLIC_KEY),
+        "messagingModule": firebase_messaging is not None,
+        "defaultUrl": WEB_PUSH_DEFAULT_URL,
+    }))
+
+
 @app.route("/api/push/subscribe", methods=["POST", "OPTIONS"])
 def web_push_subscribe_api():
     if request.method == "OPTIONS":
@@ -428,11 +442,9 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
         return
     _web_push_stage_inflight.add(event_key)
     try:
-        if not WEB_PUSH_VAPID_PUBLIC_KEY:
-            if not _web_push_missing_config_logged:
-                _web_push_missing_config_logged = True
-                print("⚠️ Web Push disabled: WEB_PUSH_VAPID_PUBLIC_KEY is not configured on Render", flush=True)
-            return
+        # The VAPID public key is needed when the browser registers for Web Push.
+        # Once an FCM registration token exists, the Admin SDK send call does not
+        # need to re-check the public key for every Boss event.
 
         already_sent = await asyncio.to_thread(lambda: db.reference(f"web_push_sent_events/{event_key}").get())
         if already_sent:
@@ -598,6 +610,27 @@ def firebase_config_js():
     response.headers['Cache-Control'] = 'no-store'
     return response
 
+
+
+@app.route('/api/firebase-config.json')
+def firebase_config_json():
+    """Expose the public Firebase Web SDK config as JSON for the FCM service worker.
+    This never exposes the Firebase Admin service-account secret.
+    """
+    raw = os.environ.get('FIREBASE_WEB_CONFIG_JSON', '').strip()
+    try:
+        cfg = json.loads(raw) if raw else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:
+        cfg = {}
+    cfg.setdefault('projectId', 'skynet-3ad44')
+    cfg.setdefault('authDomain', 'skynet-3ad44.firebaseapp.com')
+    cfg.setdefault('databaseURL', 'https://skynet-3ad44-default-rtdb.asia-southeast1.firebasedatabase.app')
+    response = jsonify(cfg)
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 
