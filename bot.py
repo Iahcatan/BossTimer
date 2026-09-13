@@ -73,7 +73,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V107_USERNAME_1CHAR_TIMEZONE_FIX_2026-09-13"
+NOTICE_BF_PATCH_VERSION = "V108_TIMEZONE_SELECTED_DAY_FIX_2026-09-13"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -1084,9 +1084,13 @@ def record_boss_api():
             else:
                 if time_input:
                     hh, mm, ss = parse_dashboard_time_components(time_input)
+                    # V108: when the Dashboard date field is blank, interpret the
+                    # typed clock time as TODAY in the selected IANA timezone.
+                    # Do not guess yesterday from the clock difference. The user
+                    # can explicitly enter a date when recording a past-day kill.
+                    # This prevents cross-timezone entries such as 21:02 Melbourne
+                    # from being shifted to an unintended date.
                     boss_died_at = now_dashboard.replace(hour=hh, minute=mm, second=ss, microsecond=0)
-                    if (boss_died_at - now_dashboard).total_seconds() > 600:
-                        boss_died_at -= timedelta(days=1)
                 else:
                     boss_died_at = now_dashboard
         except ValueError:
@@ -1095,7 +1099,9 @@ def record_boss_api():
         print(
             f"🕒 Dashboard time resolved | boss={canonical_name} | "
             f"input={date_input or '-'} {time_input or '-'} | tz={requested_tz_name} | "
-            f"resolved={boss_died_at.isoformat()} | epoch_ms={int(boss_died_at.timestamp() * 1000)}",
+            f"resolved={boss_died_at.isoformat()} | "
+            f"resolved_utc={boss_died_at.astimezone(timezone.utc).isoformat()} | "
+            f"epoch_ms={int(boss_died_at.timestamp() * 1000)}",
             flush=True,
         )
 
