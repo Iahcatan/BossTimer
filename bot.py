@@ -72,7 +72,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V104_FCM_PUSH_3LANG_2026-09-13"
+NOTICE_BF_PATCH_VERSION = "V105_VOICE_CONFIRMATION_QUEUE_IDLE_FIX_2026-09-13"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -2914,6 +2914,30 @@ async def load_boss_data():
 
 
 _confirmation_queue_ids = set()
+# V105: Requests that are durably pending but currently have no occupied /setvoice
+# target are deferred at the Firebase-listener layer. This prevents root-sync events
+# from continuously creating fire-and-forget tasks for the same idle request.
+_confirmation_deferred_ids = set()
+
+def _has_occupied_voice_confirmation_target():
+    """Return True only when at least one configured /setvoice room has a human.
+
+    This is intentionally read-only and does not connect to Voice. It lets the
+    Firebase listener keep pending work durable without repeatedly scheduling
+    the existing confirmation coroutine while every configured room is empty.
+    """
+    for guild in list(bot.guilds):
+        try:
+            configured_channels = get_configured_voice_channels(guild)
+        except Exception:
+            continue
+        for configured in configured_channels:
+            try:
+                if any(not member.bot for member in configured.members):
+                    return True
+            except Exception:
+                continue
+    return False
 
 def queue_voice_confirmation(boss_name: str, data: dict, source: str = 'unknown', wait: bool = False, timeout: float = 180.0):
     """Queue one voice confirmation on the Discord event loop.
@@ -3122,11 +3146,27 @@ def start_firebase_listener(loop):
                 if req_id in _confirmation_seen_ids or req_id in _confirmation_queue_ids:
                     continue
 
+                # V105: Firebase root-sync can fire repeatedly even though nothing
+                # about this pending confirmation needs another Voice task. Check the
+                # actual occupied /setvoice targets first. The durable Firebase record
+                # remains pending, while voice-join/on-demand retry will process it as
+                # soon as a human actually enters a configured room.
+                if not _has_occupied_voice_confirmation_target():
+                    if req_id not in _confirmation_deferred_ids:
+                        _confirmation_deferred_ids.add(req_id)
+                        print(
+                            f"⏳ Firebase pending Voice confirmation held: no occupied /setvoice room "
+                            f"| boss={boss_name} | request={req_id}",
+                            flush=True,
+                        )
+                    continue
+
+                _confirmation_deferred_ids.discard(req_id)
                 queue_result = queue_voice_confirmation(
                     boss_name, item, source='firebase-listener'
                 )
                 # Only mark the request as seen after it has been accepted either
-                # for immediate execution or for the READY/pending queue.  This keeps
+                # for immediate execution or for the READY/pending queue. This keeps
                 # a transient listener race from permanently swallowing the request.
                 if queue_result is not False:
                     _confirmation_seen_ids.add(req_id)
