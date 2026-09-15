@@ -80,7 +80,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V116_FREE_TRANSLATOR_TH_EN_KO_2026-09-15"
+NOTICE_BF_PATCH_VERSION = "V119_TRANSLATOR_FREE_API_ROBUST_FALLBACK_2026-09-15"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -113,33 +113,44 @@ TZ_THAI = timezone(timedelta(hours=7))
 DASHBOARD_DEFAULT_TZ = "Asia/Bangkok"
 
 # ==========================================
-# 🌐 V117 Free Translator (TH / EN / KO)
-# Uses public LibreTranslate-compatible mirrors without requiring a paid API key.
-# The translator is strictly isolated from Boss/Firebase/TTS/Voice/20 commands.
+# 🌐 V119 Free Translator (TH / EN / KO)
+# Robust free-provider fallback. Isolated from Boss/Firebase/TTS/Voice/20 commands.
+# Primary provider: MyMemory anonymous/free API (5000 chars/day; optional contact email
+# can raise the documented limit). Fallback: public LibreTranslate-compatible mirrors.
 # ==========================================
-# V118: free-provider failover. The old translate.argosopentech.com endpoint
-# is known to fail DNS in current deployments, so it is intentionally not a default.
-# These are community LibreTranslate-compatible mirrors; availability can change.
 _TRANSLATION_DEFAULT_URLS = [
+    "https://api.mymemory.translated.net/get",
     "https://translate.terraprint.co/translate",
-    "https://translate.flossboxin.org.in/translate",
-    "https://trans.zillyhuhn.com/translate",
     "https://libretranslate.de/translate",
 ]
-_TRANSLATION_ENV_URLS = [x.strip().rstrip("/") for x in os.environ.get("TRANSLATION_API_URLS", "").split(",") if x.strip()]
-# Keep a user-supplied list, but drop the V117 dead default automatically.
+_TRANSLATION_ENV_URLS = [
+    x.strip().rstrip("/")
+    for x in os.environ.get("TRANSLATION_API_URLS", "").split(",")
+    if x.strip()
+]
 TRANSLATION_API_URLS = []
 for _url in (_TRANSLATION_ENV_URLS or _TRANSLATION_DEFAULT_URLS):
-    if "translate.argosopentech.com" in _url.lower():
+    lower = _url.lower()
+    # Remove known/broken public endpoints from the old V117/V118 defaults.
+    if any(dead in lower for dead in (
+        "translate.argosopentech.com",
+        "translate.flossboxin.org.in",
+        "trans.zillyhuhn.com",
+    )):
         continue
     if _url not in TRANSLATION_API_URLS:
         TRANSLATION_API_URLS.append(_url)
 TRANSLATION_API_KEY = os.environ.get("TRANSLATION_API_KEY", "").strip()
+TRANSLATION_CONTACT_EMAIL = os.environ.get("TRANSLATION_CONTACT_EMAIL", "").strip()
 TRANSLATION_MAX_CHARS = max(100, min(4000, int(os.environ.get("TRANSLATION_MAX_CHARS", "1000") or 1000)))
 TRANSLATION_MAX_PER_MINUTE = max(1, min(120, int(os.environ.get("TRANSLATION_MAX_PER_MINUTE", "20") or 20)))
 TRANSLATION_CACHE_SIZE = max(100, min(5000, int(os.environ.get("TRANSLATION_CACHE_SIZE", "1000") or 1000)))
 TRANSLATION_REQUEST_TIMEOUT = max(3, min(20, float(os.environ.get("TRANSLATION_REQUEST_TIMEOUT", "8") or 8)))
 TRANSLATION_RATE_WAIT_MAX_SECONDS = max(1.0, min(15.0, float(os.environ.get("TRANSLATION_RATE_WAIT_MAX_SECONDS", "5") or 5)))
+# MyMemory documents 5000 chars/day for anonymous usage and 50000 chars/day with a valid
+# contact email. Keep a safety margin on anonymous usage.
+TRANSLATION_MYMEMORY_ANON_DAILY_CHARS = 4500
+TRANSLATION_MYMEMORY_EMAIL_DAILY_CHARS = 45000
 TRANSLATION_LANGS = {"th", "en", "ko"}
 TRANSLATION_CONFIG_DEFAULT = {
     "enabled": False,
@@ -157,8 +168,9 @@ _translation_rate_lock = asyncio.Lock()
 _translation_stats = {"hits": 0, "misses": 0, "requests": 0, "failures": 0}
 _translation_http_lock = asyncio.Lock()
 _translation_session = None
-_translation_disabled_until = 0.0
 _translation_provider_cooldowns = {}
+_translation_mymemory_usage = {"date": None, "chars": 0}
+_translation_mymemory_usage_lock = asyncio.Lock()
 
 
 def _translation_config_path(guild_id):
@@ -241,57 +253,117 @@ async def _get_translation_session():
         if _translation_session and not _translation_session.closed:
             return _translation_session
         timeout = aiohttp.ClientTimeout(total=TRANSLATION_REQUEST_TIMEOUT)
-        _translation_session = aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "SKYNET-Translator/1.0"})
+        _translation_session = aiohttp.ClientSession(
+            timeout=timeout,
+            headers={"User-Agent": "SKYNET-Translator/1.1"},
+        )
         return _translation_session
 
 
-async def _translate_free_api(text, source, target):
-    global _translation_disabled_until
-    if source not in TRANSLATION_LANGS or target not in TRANSLATION_LANGS or source == target:
-        return text
-    if time.monotonic() < _translation_disabled_until:
-        raise RuntimeError("free translation provider temporarily backed off")
+async def _translation_mymemory_budget_ok(char_count: int) -> bool:
+    """Keep the anonymous MyMemory provider below its documented daily quota."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    limit = TRANSLATION_MYMEMORY_EMAIL_DAILY_CHARS if TRANSLATION_CONTACT_EMAIL else TRANSLATION_MYMEMORY_ANON_DAILY_CHARS
+    async with _translation_mymemory_usage_lock:
+        if _translation_mymemory_usage.get("date") != today:
+            _translation_mymemory_usage["date"] = today
+            _translation_mymemory_usage["chars"] = 0
+        current = int(_translation_mymemory_usage.get("chars") or 0)
+        if current + char_count > limit:
+            return False
+        _translation_mymemory_usage["chars"] = current + char_count
+        return True
 
-    if not await _translation_rate_limit_wait():
-        raise RuntimeError("free translation rate limit queue full")
+
+def _translation_parse_json(body: str, endpoint: str, status: int) -> dict:
+    text = str(body or "").strip()
+    if not text:
+        raise RuntimeError(f"HTTP {status}: empty response body")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        compact = re.sub(r"\s+", " ", text)[:240]
+        raise RuntimeError(
+            f"HTTP {status}: invalid JSON from {endpoint} | body={compact!r}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"HTTP {status}: unexpected JSON type from {endpoint}")
+    return data
+
+
+async def _translate_mymemory(session, text: str, source: str, target: str, endpoint: str) -> str:
+    # MyMemory GET endpoint documents a 500-byte max query length.
+    candidate = text
+    while len(candidate.encode("utf-8")) > 500 and candidate:
+        candidate = candidate[:-1]
+    if not candidate:
+        raise RuntimeError("MyMemory text exceeds 500-byte request limit")
+    if not await _translation_mymemory_budget_ok(len(candidate)):
+        raise RuntimeError("MyMemory daily free character budget reached")
+    params = {"q": candidate, "langpair": f"{source}|{target}", "mt": "1"}
+    if TRANSLATION_CONTACT_EMAIL:
+        params["de"] = TRANSLATION_CONTACT_EMAIL
+    async with session.get(endpoint, params=params) as response:
+        body = await response.text()
+        if response.status != 200:
+            raise RuntimeError(f"HTTP {response.status} from MyMemory: {re.sub(r'\\s+', ' ', body)[:240]}")
+        data = _translation_parse_json(body, endpoint, response.status)
+        translated = str((data.get("responseData") or {}).get("translatedText") or "").strip()
+        if not translated:
+            raise RuntimeError(f"MyMemory response missing responseData.translatedText | responseStatus={data.get('responseStatus')}")
+        return translated
+
+
+async def _translate_libretranslate(session, text: str, source: str, target: str, endpoint: str) -> str:
     payload = {"q": text[:TRANSLATION_MAX_CHARS], "source": source, "target": target, "format": "text"}
     if TRANSLATION_API_KEY:
         payload["api_key"] = TRANSLATION_API_KEY
+    async with session.post(endpoint, json=payload) as response:
+        body = await response.text()
+        if response.status != 200:
+            raise RuntimeError(f"HTTP {response.status}: {re.sub(r'\\s+', ' ', body)[:240]}")
+        data = _translation_parse_json(body, endpoint, response.status)
+        translated = str(data.get("translatedText") or "").strip()
+        if not translated:
+            raise RuntimeError("translation response missing translatedText")
+        return translated
 
-    last_error = None
+
+async def _translate_free_api(text, source, target):
+    if source not in TRANSLATION_LANGS or target not in TRANSLATION_LANGS or source == target:
+        return text
+    if not await _translation_rate_limit_wait():
+        raise RuntimeError("free translation rate limit queue full")
+
     session = await _get_translation_session()
+    last_error = None
     now_mono = time.monotonic()
     for endpoint in TRANSLATION_API_URLS:
         cooldown_until = float(_translation_provider_cooldowns.get(endpoint, 0.0) or 0.0)
         if cooldown_until > now_mono:
             continue
+        provider = "mymemory" if "api.mymemory.translated.net/get" in endpoint.lower() else "libretranslate"
         try:
             _translation_stats["requests"] += 1
-            async with session.post(endpoint, json=payload) as response:
-                body = await response.text()
-                if response.status == 200:
-                    data = json.loads(body or "{}")
-                    translated = str(data.get("translatedText") or "").strip()
-                    if translated:
-                        _translation_disabled_until = 0.0
-                        _translation_provider_cooldowns.pop(endpoint, None)
-                        print(f"✅ Translation provider success | endpoint={endpoint} | {source}->{target}", flush=True)
-                        return translated
-                    raise RuntimeError("translation response missing translatedText")
-                if response.status in {408, 429, 502, 503, 504}:
-                    _translation_provider_cooldowns[endpoint] = time.monotonic() + 30.0
-                elif response.status in {401, 403}:
-                    _translation_provider_cooldowns[endpoint] = time.monotonic() + 120.0
-                last_error = RuntimeError(f"HTTP {response.status}: {body[:240]}")
+            if provider == "mymemory":
+                translated = await _translate_mymemory(session, text, source, target, endpoint)
+            else:
+                translated = await _translate_libretranslate(session, text, source, target, endpoint)
+            print(f"✅ Translation provider success | provider={provider} | endpoint={endpoint} | {source}->{target}", flush=True)
+            _translation_provider_cooldowns.pop(endpoint, None)
+            return translated
         except (aiohttp.ClientConnectorError, aiohttp.ClientConnectionError, aiohttp.ClientOSError, asyncio.TimeoutError) as exc:
-            # DNS/connection failures are provider-specific; back off that mirror and try the next one.
-            _translation_provider_cooldowns[endpoint] = time.monotonic() + 60.0
+            _translation_provider_cooldowns[endpoint] = time.monotonic() + 120.0
             last_error = exc
-            print(f"⚠️ Translation provider unavailable; backing off | endpoint={endpoint} | {exc}", flush=True)
+            print(f"⚠️ Translation provider unavailable; backing off | provider={provider} | endpoint={endpoint} | {exc}", flush=True)
             continue
         except Exception as exc:
+            # Bad JSON/HTML, HTTP 4xx/5xx, quota exhaustion, or malformed response.
+            _translation_provider_cooldowns[endpoint] = time.monotonic() + (300.0 if "mymemory" in endpoint.lower() else 180.0)
             last_error = exc
+            print(f"⚠️ Translation provider failed; trying next | provider={provider} | endpoint={endpoint} | {exc}", flush=True)
             continue
+
     _translation_stats["failures"] += 1
     raise last_error or RuntimeError("all free translation providers failed or are temporarily unavailable")
 
@@ -376,7 +448,6 @@ async def _run_translation_for_message(message):
             await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         except Exception as exc:
             print(f"⚠️ Translation failed | guild={message.guild.id} | source={source_lang} | target={target_lang} | mode={cfg.get('mode')} | {exc}", flush=True)
-
 
 def resolve_dashboard_timezone(value):
     requested = str(value or "").strip()
