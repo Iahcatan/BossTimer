@@ -2535,7 +2535,7 @@ def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
     if now_log - discord_rest_last_429_log >= 5.0:
         discord_rest_last_429_log = now_log
         timer_note = f"server_timer={server_retry:.3f}s" if server_retry > 0 else f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
-        print(f"⏸️ GLOBAL Discord REST 429 | context={context} | {timer_note} | next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | repeat probes suppressed", flush=True)
+        print(f"⏸️ Discord REST 429 | context={context} | global={discord_block_global} | {timer_note} | next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | repeat probes suppressed", flush=True)
     _mark_discord_block_log(context, force=True)
     return local_pause
 
@@ -2767,18 +2767,11 @@ async def guarded_discord_call(
             return result
         except discord.HTTPException as exc:
             if getattr(exc, "status", None) == 429:
-                if background and discord_block_temp_restriction:
-                    # The Discord-provided Retry-After is authoritative; add the existing
-                    # recovery grace so the next background request cannot be an immediate probe.
-                    server_retry = 0.0
-                    try:
-                        server_retry = float(getattr(exc, "retry_after", 0) or 0)
-                    except (TypeError, ValueError):
-                        server_retry = 0.0
-                    _quarantine_background_rest(
-                        reason=f"429:{context}",
-                        duration=server_retry + discord_background_rest_recovery_grace_seconds,
-                    )
+                # Single source of truth for Discord 429 state.
+                # _apply_discord_rest_429() records Retry-After, updates the
+                # persistent circuit breaker, and quarantines background REST.
+                # Do not quarantine here a second time: doing so created duplicate
+                # hold logs and two competing recovery timers for the same 429.
                 _apply_discord_rest_429(exc, context=context)
             else:
                 _apply_discord_rest_error(exc, context=context)
