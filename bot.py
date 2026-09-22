@@ -416,6 +416,54 @@ def _web_push_subscription_key(endpoint: str) -> str:
     return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()[:32]
 
 
+def _normalize_web_push_timezone(value: str) -> str:
+    """Return a valid IANA timezone for one push device; never trust client input blindly."""
+    candidate = str(value or "").strip()
+    if candidate == "auto" or not candidate:
+        return "Asia/Bangkok"
+    try:
+        ZoneInfo(candidate)
+        return candidate
+    except (ZoneInfoNotFoundError, ValueError):
+        return "Asia/Bangkok"
+
+
+def _format_web_push_event_time(spawn_time: datetime, timezone_name: str, language: str) -> str:
+    """Format the absolute boss spawn instant in each device's selected timezone."""
+    tz_name = _normalize_web_push_timezone(timezone_name)
+    try:
+        local_dt = spawn_time.astimezone(ZoneInfo(tz_name))
+    except (ZoneInfoNotFoundError, ValueError):
+        local_dt = spawn_time.astimezone(TZ_THAI)
+    if language == "ko":
+        return local_dt.strftime("%Y-%m-%d %H:%M")
+    return local_dt.strftime("%d/%m/%Y %H:%M")
+
+
+def _web_push_message_by_language(
+    boss_name: str,
+    stage: str,
+    spawn_time: datetime,
+    notice_minutes: int,
+    language: str,
+    timezone_name: str,
+) -> tuple[str, str]:
+    """Build a localized title/body while showing the event time in the device timezone."""
+    language = language if language in {"th", "en", "ko"} else "th"
+    local_time = _format_web_push_event_time(spawn_time, timezone_name, language)
+    if stage == "spawn":
+        return {
+            "en": (f"⚔️ {boss_name} — Spawned!", f"Boss {boss_name} has spawned! Local time: {local_time}"),
+            "ko": (f"⚔️ {boss_name} — 생성 완료!", f"보스 {boss_name}이(가) 생성되었습니다! 현지 시간: {local_time}"),
+            "th": (f"⚔️ {boss_name} — เกิดแล้ว", f"บอส {boss_name} เกิดแล้ว เวลา {local_time} น."),
+        }[language]
+    return {
+        "en": (f"⏳ {boss_name} — Spawning Soon!", f"Boss {boss_name} will spawn in {notice_minutes} minutes. Spawn time: {local_time}"),
+        "ko": (f"⏳ {boss_name} — 생성 임박!", f"보스 {boss_name}이(가) {notice_minutes}분 후에 생성됩니다. 생성 시간: {local_time}"),
+        "th": (f"⏳ {boss_name} — ใกล้เกิดใน {notice_minutes} นาที", f"บอส {boss_name} จะเกิดในอีก {notice_minutes} นาที เวลา {local_time} น."),
+    }[language]
+
+
 def _b64url_decode(value: str) -> bytes:
     raw = str(value or "").encode("ascii")
     return base64.urlsafe_b64decode(raw + b"=" * (-len(raw) % 4))
@@ -563,10 +611,12 @@ def web_push_subscribe_api():
         requested_language = str(payload.get("language") or "th").strip().lower()
         if requested_language not in {"th", "en", "ko"}:
             requested_language = "th"
+        requested_timezone = _normalize_web_push_timezone(payload.get("timezone"))
         token_key = _web_push_token_key(token)
         record = {
             "token": token,
             "language": requested_language,
+            "timezone": requested_timezone,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "updatedAt": datetime.now(timezone.utc).isoformat(),
             "userAgent": str(request.headers.get("User-Agent") or "")[:500],
@@ -577,11 +627,12 @@ def web_push_subscribe_api():
             not isinstance(existing, dict)
             or existing.get("token") != token
             or existing.get("language") != requested_language
+            or existing.get("timezone") != requested_timezone
             or existing.get("userAgent") != record["userAgent"]
         )
         if changed:
             token_ref.set(record)
-            print(f"🔔 Web Push/FCM token registered | uid={uid} | key={token_key}", flush=True)
+            print(f"🔔 Web Push/FCM token registered | uid={uid} | key={token_key} | language={requested_language} | timezone={requested_timezone}", flush=True)
         else:
             # Idempotent re-registration: do not write/log the same device repeatedly.
             print(f"🟢 Web Push/FCM token already registered | uid={uid} | key={token_key}", flush=True)
@@ -638,6 +689,7 @@ def web_push_standard_subscribe_api():
         requested_language = str(payload.get("language") or "th").strip().lower()
         if requested_language not in {"th", "en", "ko"}:
             requested_language = "th"
+        requested_timezone = _normalize_web_push_timezone(payload.get("timezone"))
         sub_key = _web_push_subscription_key(endpoint)
         record = {
             "subscription": {
@@ -645,6 +697,7 @@ def web_push_standard_subscribe_api():
                 "keys": {"p256dh": p256dh, "auth": auth_secret},
             },
             "language": requested_language,
+            "timezone": requested_timezone,
             "platform": "ios-webpush",
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "updatedAt": datetime.now(timezone.utc).isoformat(),
@@ -652,7 +705,7 @@ def web_push_standard_subscribe_api():
         }
         db.reference(f"web_push_subscriptions/{uid}/{sub_key}").set(record)
         print(
-            f"🍎 iPhone Web Push subscription registered | uid={uid} | key={sub_key} | endpoint_host={parsed.netloc} | language={requested_language}",
+            f"🍎 iPhone Web Push subscription registered | uid={uid} | key={sub_key} | endpoint_host={parsed.netloc} | language={requested_language} | timezone={requested_timezone}",
             flush=True,
         )
         return _web_push_cors(jsonify({"success": True, "subscriptionKey": sub_key}))
@@ -661,6 +714,60 @@ def web_push_standard_subscribe_api():
     except Exception as exc:
         print(f"❌ /api/push/web-subscribe failed | type={type(exc).__name__} | {exc}", flush=True)
         return _web_push_cors(jsonify({"success": False, "error": f"{type(exc).__name__}: {exc}"})), 500
+
+
+@app.route("/api/push/preferences", methods=["POST", "OPTIONS"])
+def web_push_preferences_api():
+    """Update language + timezone for one already-registered push device."""
+    if request.method == "OPTIONS":
+        return _web_push_cors(jsonify({"success": True})), 204
+    try:
+        uid, _profile = _verify_dashboard_user_request()
+        payload = request.get_json(silent=True) or {}
+        requested_language = str(payload.get("language") or "th").strip().lower()
+        if requested_language not in {"th", "en", "ko"}:
+            requested_language = "th"
+        requested_timezone = _normalize_web_push_timezone(payload.get("timezone"))
+
+        token = str(payload.get("token") or "").strip()
+        endpoint = str(payload.get("endpoint") or "").strip()
+        updated = False
+        if token:
+            token_key = _web_push_token_key(token)
+            token_ref = db.reference(f"web_push_tokens/{uid}/{token_key}")
+            current = token_ref.get() or {}
+            if isinstance(current, dict) and current.get("token") == token:
+                current.update({
+                    "language": requested_language,
+                    "timezone": requested_timezone,
+                    "updatedAt": datetime.now(timezone.utc).isoformat(),
+                })
+                token_ref.set(current)
+                updated = True
+        if endpoint:
+            sub_key = _web_push_subscription_key(endpoint)
+            sub_ref = db.reference(f"web_push_subscriptions/{uid}/{sub_key}")
+            current = sub_ref.get() or {}
+            if isinstance(current, dict):
+                current.update({
+                    "language": requested_language,
+                    "timezone": requested_timezone,
+                    "updatedAt": datetime.now(timezone.utc).isoformat(),
+                })
+                sub_ref.set(current)
+                updated = True
+        if not updated:
+            return _web_push_cors(jsonify({"success": False, "error": "Push device registration not found"})), 404
+        print(
+            f"🔄 Web Push preferences updated | uid={uid} | language={requested_language} | timezone={requested_timezone}",
+            flush=True,
+        )
+        return _web_push_cors(jsonify({"success": True, "language": requested_language, "timezone": requested_timezone}))
+    except PermissionError as exc:
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 401
+    except Exception as exc:
+        print(f"❌ /api/push/preferences failed: {exc}", flush=True)
+        return _web_push_cors(jsonify({"success": False, "error": str(exc)})), 500
 
 
 @app.route("/api/push/web-unsubscribe", methods=["POST", "OPTIONS"])
@@ -825,7 +932,8 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
                         language = str(item.get("language") or "th").strip().lower()
                         if language not in {"th", "en", "ko"}:
                             language = "th"
-                        tokens.append((str(uid), str(token_key), str(item["token"]), language))
+                        device_timezone = _normalize_web_push_timezone(item.get("timezone"))
+                        tokens.append((str(uid), str(token_key), str(item["token"]), language, device_timezone))
 
         subscriptions = []
         if isinstance(standard_root, dict):
@@ -841,7 +949,8 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
                     language = str(item.get("language") or "th").strip().lower()
                     if language not in {"th", "en", "ko"}:
                         language = "th"
-                    subscriptions.append((str(uid), str(sub_key), subscription, language))
+                    device_timezone = _normalize_web_push_timezone(item.get("timezone"))
+                    subscriptions.append((str(uid), str(sub_key), subscription, language, device_timezone))
 
         if stage == "spawn":
             message_by_lang = {
@@ -859,18 +968,18 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
         # Once every currently registered device is either delivered or has exhausted
         # its bounded retry budget, this event becomes permanently complete.
         def _fcm_complete():
-            keys = {k for _u, k, _t, _l in tokens}
+            keys = {k for _u, k, _t, _l, _tz in tokens}
             return not keys or keys.issubset(fcm_sent_keys | fcm_failed_keys)
 
         def _web_complete():
-            keys = {k for _u, k, _s, _l in subscriptions}
+            keys = {k for _u, k, _s, _l, _tz in subscriptions}
             return not keys or keys.issubset(web_sent_keys | web_failed_keys)
 
         fcm_success_count = 0
         fcm_attempted = 0
         fcm_stale = []
         if not _fcm_complete():
-            for uid, token_key, token, language in tokens:
+            for uid, token_key, token, language, device_timezone in tokens:
                 if token_key in fcm_sent_keys or token_key in fcm_failed_keys:
                     continue
                 retry_count = int(fcm_retry_counts.get(token_key) or 0)
@@ -879,7 +988,9 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
                     continue
                 fcm_attempted += 1
                 try:
-                    title, body = message_by_lang[language]
+                    title, body = _web_push_message_by_language(
+                        boss_name, stage, spawn_time, notice_minutes, language, device_timezone
+                    )
                     message = firebase_messaging.Message(
                         token=token,
                         notification=firebase_messaging.Notification(title=title, body=body),
@@ -899,6 +1010,8 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
                             "eventKey": event_key,
                             "title": title,
                             "body": body,
+                            "timezone": device_timezone,
+                            "localEventTime": _format_web_push_event_time(spawn_time, device_timezone, language),
                             "url": WEB_PUSH_DEFAULT_URL,
                         },
                     )
@@ -940,7 +1053,7 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
                     print("⚠️ iPhone Web Push is configured with subscriptions but VAPID private key is missing; standard Web Push delivery is on hold", flush=True)
                     _web_push_missing_config_logged = True
             else:
-                for uid, sub_key, subscription, language in subscriptions:
+                for uid, sub_key, subscription, language, device_timezone in subscriptions:
                     if sub_key in web_sent_keys or sub_key in web_failed_keys:
                         continue
                     retry_count = int(web_retry_counts.get(sub_key) or 0)
@@ -949,7 +1062,9 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
                         continue
                     standard_attempted += 1
                     try:
-                        title, body = message_by_lang[language]
+                        title, body = _web_push_message_by_language(
+                            boss_name, stage, spawn_time, notice_minutes, language, device_timezone
+                        )
                         payload = {
                             "notification": {
                                 "title": title,
@@ -963,6 +1078,8 @@ async def _send_web_push_stage(boss_name: str, stage: str, spawn_time: datetime,
                                 "bossName": str(boss_name),
                                 "stage": str(stage),
                                 "eventKey": event_key,
+                                "timezone": device_timezone,
+                                "localEventTime": _format_web_push_event_time(spawn_time, device_timezone, language),
                                 "url": WEB_PUSH_DEFAULT_URL,
                             },
                         }
