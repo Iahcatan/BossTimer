@@ -2672,28 +2672,57 @@ def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
         server_retry = float(meta.get("reset_after") or 0.0)
     is_temp_restriction = bool(discord_block_temp_restriction)
     now_mono = time.monotonic()
-    if server_retry > 0:
-        local_pause = server_retry
-        probe_in = server_retry + (discord_block_recovery_grace_seconds if is_temp_restriction else 0.0)
-        discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
-        discord_rest_backoff_seconds = discord_block_local_retry_seconds
+
+    # V130: use the wall-clock expiry reconstructed by _record_discord_block_observed
+    # as the single authoritative server timer.  This prevents the separate monotonic
+    # cooldown from drifting several seconds away from the exact Discord timer shown in
+    # diagnostics (for example, cooldown=445s while Discord reported 429s remaining).
+    # Background recovery grace remains a separate hold and is NOT folded into the
+    # server-rate-limit timer itself.
+    with discord_block_lock:
+        authoritative_server_remaining = max(0.0, float(discord_block_server_until or 0.0) - time.time())
+
+    if authoritative_server_remaining > 0:
+        local_pause = authoritative_server_remaining
+        probe_in = authoritative_server_remaining + (discord_block_recovery_grace_seconds if is_temp_restriction else 0.0)
+        if server_retry > 0:
+            discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
+            discord_rest_backoff_seconds = discord_block_local_retry_seconds
     else:
-        local_pause = discord_block_local_retry_seconds
-        discord_block_local_retry_seconds = min(discord_block_local_retry_seconds * 2.0, 900.0)
-        probe_in = local_pause
-    discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, now_mono + max(1.0, local_pause))
-    discord_block_next_probe_mono = max(discord_block_next_probe_mono, now_mono + max(1.0, probe_in))
+        # Discord supplied no usable absolute expiry. Fall back to the extracted retry
+        # interval, or the local safety backoff if neither source is available.
+        local_pause = server_retry if server_retry > 0 else discord_block_local_retry_seconds
+        probe_in = local_pause + (discord_block_recovery_grace_seconds if is_temp_restriction and local_pause > 0 else 0.0)
+        if server_retry > 0:
+            discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
+            discord_rest_backoff_seconds = discord_block_local_retry_seconds
+        else:
+            discord_block_local_retry_seconds = min(max(60.0, discord_block_local_retry_seconds * 2.0), 900.0)
+            discord_rest_backoff_seconds = discord_block_local_retry_seconds
+
+    # The shared REST cooldown ends at Discord's server expiry.  The separate
+    # background quarantine/probation may extend beyond it by the configured grace.
+    discord_rest_rate_limited_until = now_mono + max(1.0, local_pause)
+    discord_block_next_probe_mono = now_mono + max(1.0, probe_in)
     if is_temp_restriction:
         _quarantine_background_rest(
             reason=f"discord-temp-restriction:{context}",
-            duration=server_retry + discord_background_rest_recovery_grace_seconds,
+            duration=local_pause + discord_background_rest_recovery_grace_seconds,
         )
     _schedule_persist_discord_block_state(reason=f"429:{context}")
     now_log = time.monotonic()
     if now_log - discord_rest_last_429_log >= 5.0:
         discord_rest_last_429_log = now_log
-        timer_note = f"server_timer={server_retry:.3f}s" if server_retry > 0 else f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
-        print(f"⏸️ Discord REST 429 | context={context} | global={discord_block_global} | {timer_note} | next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | repeat probes suppressed", flush=True)
+        timer_note = (
+            f"server_timer={authoritative_server_remaining:.3f}s"
+            if authoritative_server_remaining > 0
+            else f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
+        )
+        print(
+            f"⏸️ Discord REST 429 | context={context} | global={discord_block_global} | {timer_note} | "
+            f"next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | repeat probes suppressed",
+            flush=True,
+        )
     _mark_discord_block_log(context, force=True)
     return local_pause
 
