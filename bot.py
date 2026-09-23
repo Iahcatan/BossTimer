@@ -2425,6 +2425,17 @@ async def restore_persisted_discord_block_state():
         print(f"⚠️ Discord REST block persisted state invalid; ignoring it: {exc!r}", flush=True)
         return False
 
+    # V132 migration: V131 could accidentally persist an Interaction ACK 429 into the
+    # shared REST breaker. That state is invalid for REST recovery and must never be
+    # restored. Remove only the contaminated interaction-lane record.
+    if source.strip().upper() == "INTERACTION":
+        print(
+            "🧹 V132 discarded persisted INTERACTION-only 429 from shared Discord REST breaker",
+            flush=True,
+        )
+        await _clear_persisted_discord_block_state(reason="v132-interaction-lane-migration")
+        return False
+
     # An old/stale record must never permanently suppress REST.
     # For temporary restrictions, Discord's supplied server expiry is authoritative.
     # When an old record has expired, keep only a short recovery grace window so
@@ -2525,6 +2536,10 @@ def _record_discord_block_observed(exc: Exception, *, context: str, source: str 
     global discord_block_temp_restriction
 
     meta = _extract_discord_rate_limit_metadata(exc)
+    if str(source or "").strip().upper() == "INTERACTION":
+        # Interaction callbacks use a dedicated webhook lane. Never allow an interaction
+        # callback 429 to become a shared REST breaker event.
+        return meta
     now_wall = time.time()
     with discord_block_lock:
         previous_server_until = float(discord_block_server_until or 0.0)
@@ -3061,12 +3076,13 @@ async def guarded_context_send(ctx, *args, context: str, background: bool | None
 
 
 # Interaction webhook traffic is intentionally isolated from the background REST
-# circuit breaker.  A valid interaction token has its own webhook lane, and blocking
-# it because a background Discord REST route is cooling down can make otherwise-
-# successful slash commands appear to fail.  This lane still honors short Retry-After
-# values and refuses long sleeps that would outlive the interaction/webhook window.
+# circuit breaker. A valid interaction token has its own webhook lane.
+# V132: Interaction 429 state is also isolated from the shared REST breaker so a
+# failed interaction ACK cannot create a 50-60 minute REST quarantine for boss/audit/BF.
 interaction_webhook_guard_lock = asyncio.Lock()
 interaction_webhook_next_call_at = 0.0
+interaction_api_suppressed_until = 0.0
+interaction_api_last_429_log = 0.0
 
 async def _interaction_webhook_call(call_factory, *, context: str):
     global interaction_webhook_next_call_at
@@ -3088,14 +3104,13 @@ async def _interaction_webhook_call(call_factory, *, context: str):
                 # Only honor a short webhook retry delay.  Waiting for a long
                 # restriction here would exceed the lifetime/usefulness of the interaction.
                 if 0 < retry_after <= 8.0:
-                    interaction_webhook_next_call_at = time.monotonic() + retry_after
-                    await asyncio.sleep(retry_after)
-                    result = await call_factory()
-                    interaction_webhook_next_call_at = time.monotonic() + max(0.1, discord_rest_min_interval)
-                    return result
+                    interaction_webhook_next_call_at = max(
+                        interaction_webhook_next_call_at,
+                        time.monotonic() + retry_after,
+                    )
                 print(
                     f"⚠️ Interaction webhook 429 | context={context} | retry_after={retry_after:.2f}s | "
-                    "background REST cooldown ignored",
+                    "one-shot response; no immediate retry; background REST cooldown ignored",
                     flush=True,
                 )
             else:
@@ -5348,23 +5363,36 @@ async def _get_retry_after_seconds(exc, default=30.0):
 async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=True):
     """Send exactly one time-critical initial Interaction ACK.
 
-    Interaction callback endpoints are not part of the bot Global Rate Limit.  Therefore
-    an ACK 429 must NOT open the shared REST circuit breaker.  We also do not retry a
-    long Retry-After because Discord requires the initial response within 3 seconds.
-    If Discord itself temporarily rejects the callback (for example during an API/IP
-    restriction), the command continues its Voice work, but the Discord client may show
-    "The application did not respond" until the restriction clears.
+    V132 keeps Interaction callback traffic completely outside the shared Discord REST
+    breaker. A 429 received while acknowledging an interaction is tracked only in the
+    Interaction lane so it cannot create/extend a long REST quarantine for Boss/Audit/BF.
+    Because Discord requires the initial response within 3 seconds, we never sleep and retry
+    an expired interaction callback. During an active interaction-only retry window we skip
+    the network call locally to avoid hammering the same rejected callback route.
     """
-    global discord_rest_rate_limited_until, discord_block_next_probe_mono
+    global interaction_api_suppressed_until, interaction_api_last_429_log
+
     try:
         if interaction.response.is_done():
             return True
     except Exception:
         pass
 
+    now_mono = time.monotonic()
+    if interaction_api_suppressed_until > now_mono:
+        remaining = interaction_api_suppressed_until - now_mono
+        if now_mono - interaction_api_last_429_log >= 15.0:
+            interaction_api_last_429_log = now_mono
+            print(
+                f"⏭️ Interaction ACK skipped during interaction-only cooldown | "
+                f"remaining={remaining:.1f}s | shared REST breaker unchanged",
+                flush=True,
+            )
+        return False
+
     try:
-        # One immediate ACK attempt only.  Do not sleep for Retry-After and do not touch
-        # the shared REST cooldown; this endpoint is intentionally isolated from it.
+        # One immediate ACK attempt only. Do not sleep for Retry-After and do not touch
+        # the shared REST cooldown; Discord requires the initial response within 3 seconds.
         await asyncio.wait_for(
             interaction.response.defer(ephemeral=ephemeral),
             timeout=1.75,
@@ -5385,26 +5413,25 @@ async def _safe_interaction_ack(interaction: discord.Interaction, *, ephemeral=T
             cf_ray = headers.get("CF-RAY") or headers.get("cf-ray") or "-"
             via = headers.get("Via") or headers.get("via") or "-"
             date_header = headers.get("Date") or headers.get("date") or "-"
-            _record_discord_block_observed(exc, context="interaction-ack", source="INTERACTION")
-            with discord_block_lock:
-                if discord_block_temp_restriction:
-                    server_retry = max(0.0, discord_block_server_until - time.time())
-                    gate_hold = server_retry + discord_block_recovery_grace_seconds if server_retry > 0 else 60.0
-                    discord_block_next_probe_mono = max(
-                        discord_block_next_probe_mono,
-                        time.monotonic() + gate_hold,
-                    )
-                    discord_rest_rate_limited_until = max(
-                        discord_rest_rate_limited_until,
-                        time.monotonic() + gate_hold,
-                    )
-            _schedule_persist_discord_block_state(reason="interaction-ack-429")
-            _mark_discord_block_log("interaction-ack", force=True)
-            print(
-                f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
-                f"cf_ray={cf_ray} | via={via} | date={date_header} | shared REST cooldown unchanged",
-                flush=True,
+
+            # V132: keep Interaction 429 completely local. Do NOT call
+            # _record_discord_block_observed(), do NOT persist app_settings/discord_rest_block,
+            # and do NOT change discord_rest_rate_limited_until. This prevents one rejected
+            # interaction callback from quarantining otherwise healthy REST lanes.
+            cooldown = max(1.0, retry_after) if retry_after > 0 else 60.0
+            interaction_api_suppressed_until = max(
+                interaction_api_suppressed_until,
+                time.monotonic() + cooldown,
             )
+            now_log = time.monotonic()
+            if now_log - interaction_api_last_429_log >= 5.0:
+                interaction_api_last_429_log = now_log
+                print(
+                    f"⚠️ Interaction ACK rejected by Discord 429 | retry_after={retry_after:.2f}s | "
+                    f"cf_ray={cf_ray} | via={via} | date={date_header} | "
+                    "lane=INTERACTION_ONLY | shared REST breaker unchanged",
+                    flush=True,
+                )
             return False
         print(f"❌ Interaction ACK failed: {exc}", flush=True)
         return False
