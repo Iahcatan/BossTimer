@@ -80,7 +80,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V127_DISCORD_USER_NOTIFY_PERMISSION_FIX_2026-09-23"
+NOTICE_BF_PATCH_VERSION = "V134_DISCORD_REST_STARTUP_PROBATION_FIX_2026-09-23"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -2101,6 +2101,13 @@ discord_background_rest_min_interval = max(1.0, float(os.environ.get("DISCORD_BA
 discord_background_rest_recovery_grace_seconds = max(
     15.0, float(os.environ.get("DISCORD_BACKGROUND_REST_RECOVERY_GRACE", "30"))
 )
+# V134: after a successful startup command sync, keep non-essential/background
+# Discord REST quiet for a short probation window. This prevents the first
+# auto-attendance/boss/audit request after deploy from becoming a rate-limit
+# trigger when the process has just performed command synchronization.
+discord_background_rest_startup_probation_seconds = max(
+    60.0, float(os.environ.get("DISCORD_BACKGROUND_REST_STARTUP_PROBATION", "300"))
+)
 discord_background_rest_suppressed_until = 0.0
 discord_background_rest_quarantined = False
 # Hold all non-essential background Discord REST until the first successful
@@ -2879,6 +2886,22 @@ def _arm_background_rest_after_foreground_recovery():
     discord_background_rest_quarantined = True
     print(
         f"🛡️ Background Discord REST recovery grace armed | hold={hold:.1f}s | foreground request succeeded",
+        flush=True,
+    )
+
+
+def _arm_background_rest_startup_probation():
+    """Quiet the non-essential Discord REST lane after every successful startup sync."""
+    global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    hold = discord_background_rest_startup_probation_seconds
+    discord_background_rest_suppressed_until = max(
+        discord_background_rest_suppressed_until,
+        time.monotonic() + hold,
+    )
+    discord_background_rest_quarantined = True
+    print(
+        f"🛡️ Background Discord REST startup probation armed | hold={hold:.1f}s | "
+        "command sync succeeded; background REST held",
         flush=True,
     )
 
@@ -5201,16 +5224,17 @@ async def _guarded_tree_sync(*args, **kwargs):
             "🟢 Background Discord REST startup hold released | command sync succeeded",
             flush=True,
         )
-        # Tree sync is a confirmed successful foreground REST request, but it is
-        # intentionally outside guarded_discord_call.  V59 therefore arms the
-        # existing background recovery grace here too, so queued boss/audit REST
-        # cannot immediately become the first post-block probe.
+        # Tree sync is a confirmed successful foreground REST request. V134 adds
+        # a startup-only probation even when there is no persisted active block,
+        # so auto-attendance/boss/audit background requests cannot immediately
+        # become the first REST calls after a fresh deploy.
         had_active_block = False
         with discord_block_lock:
             had_active_block = discord_block_started_at > 0
         _clear_discord_block_after_success(context="startup:tree-sync")
         if had_active_block:
             _arm_background_rest_after_foreground_recovery()
+        _arm_background_rest_startup_probation()
         return result
     except discord.HTTPException as exc:
         if getattr(exc, "status", None) == 429:
