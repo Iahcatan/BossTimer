@@ -92,7 +92,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V137 verify-first Guild Commands (single CommandTree)")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V138 verify-first Guild Commands (startup hold release fix)")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
@@ -126,6 +126,7 @@ async def sync_commands_once():
         log("🛡️ Global command cleanup skipped | Guild Commands are authoritative")
 
         successful = 0
+        command_sync_performed = False
         local_name_set = set(command_names)
         for guild in guilds:
             try:
@@ -155,6 +156,7 @@ async def sync_commands_once():
                         )
                         bot_module.bot.tree.clear_commands(guild=guild)
                         bot_module.bot.tree.copy_global_to(guild=guild)
+                        command_sync_performed = True
                         synced = await bot_module.bot.tree.sync(guild=guild)
                         remote_names = sorted(
                             getattr(command, "qualified_name", getattr(command, "name", ""))
@@ -182,6 +184,19 @@ async def sync_commands_once():
                 traceback.print_exc()
 
         if successful == len(guilds):
+            # V138: verification can legitimately finish with zero HTTP writes when the
+            # remote Guild command set already matches the local 20-command tree. V137
+            # only released the background startup hold from tree.sync(), so the no-sync
+            # path stayed permanently blocked and logged startup-command-sync-hold forever.
+            # Release the hold here after successful verification. Existing probation remains
+            # reserved for the case where an actual command sync was performed.
+            try:
+                bot_module.release_discord_rest_startup_hold(
+                    reason="command-verification-complete",
+                    arm_probation=False if not command_sync_performed else True,
+                )
+            except Exception as exc:
+                log(f"⚠️ Startup REST hold release failed safely: {exc!r}")
             _sync_complete = True
             log(f"✅ DISCORD GUILD COMMAND SYNC COMPLETE ({successful}/{len(guilds)} guilds)")
         else:
