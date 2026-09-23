@@ -2132,6 +2132,9 @@ discord_block_next_probe_mono = 0.0
 discord_block_local_retry_seconds = 60.0
 discord_block_recovery_grace_seconds = max(5.0, float(os.environ.get("DISCORD_BLOCK_RECOVERY_GRACE", "15")))
 discord_block_recovery_until_mono = 0.0
+# V131: one-shot recovery probe epoch. This is only armed after the Discord server timer
+# and the configured recovery hold have both expired; it is never a periodic probe.
+discord_block_recovery_probe_started_at = 0.0
 
 # V53: Persist the REST restriction state across process/Gateway restarts.
 # Firebase is the durable source on Render; SQLite is kept as a local fallback
@@ -2605,6 +2608,7 @@ def _clear_discord_block_after_success(*, context: str):
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
     global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_recovery_until_mono
+    global discord_block_recovery_probe_started_at
     now_wall = time.time()
     with discord_block_lock:
         started = discord_block_started_at
@@ -2627,7 +2631,8 @@ def _clear_discord_block_after_success(*, context: str):
         discord_block_source = ""
         discord_block_temp_restriction = False
         discord_block_next_probe_mono = 0.0
-        discord_block_recovery_until_mono = time.monotonic() + 30.0
+        discord_block_recovery_probe_started_at = 0.0
+        discord_block_recovery_until_mono = time.monotonic() + discord_background_rest_recovery_grace_seconds
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(
@@ -2647,14 +2652,88 @@ def _mark_discord_block_log(context: str, *, force: bool = False):
     print(_discord_block_diagnostic_line() + f" | context={context}", flush=True)
 
 
+async def _run_expired_discord_recovery_probe():
+    """Perform exactly one low-impact REST verification after a Discord timer expires.
+
+    This does not poll. The epoch marker prevents repeat probes for the same restriction.
+    A 429 response is fed back into the central breaker so Discord's new Retry-After becomes
+    the only authority for the next attempt.
+    """
+    global discord_block_recovery_probe_started_at
+
+    if not getattr(bot, "user", None):
+        return False
+
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    with discord_block_lock:
+        active = discord_block_started_at > 0
+        temp_restriction = discord_block_temp_restriction
+        server_until = float(discord_block_server_until or 0.0)
+        next_probe_mono = float(discord_block_next_probe_mono or 0.0)
+        epoch = float(discord_block_started_at or 0.0)
+        already_attempted = discord_block_recovery_probe_started_at == epoch
+
+        if not active or not temp_restriction or server_until <= 0:
+            return False
+        if server_until > now_wall or next_probe_mono > now_mono:
+            return False
+        if already_attempted:
+            return False
+
+        # Arm the epoch BEFORE awaiting network I/O so the 15-second diagnostics loop
+        # cannot launch a duplicate recovery request while this one is in flight.
+        discord_block_recovery_probe_started_at = epoch
+
+    print(
+        f"🔎 Discord REST expired-timer recovery probe | bot={bot.user.id} | "
+        f"expiry={datetime.fromtimestamp(server_until, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z')} | "
+        f"attempt=1 (one-shot)",
+        flush=True,
+    )
+
+    try:
+        result = await guarded_discord_call(
+            lambda: bot.fetch_user(bot.user.id),
+            context="rest-recovery-probe",
+            background=False,
+            recovery_probe=True,
+            wait_for_cooldown=False,
+        )
+        if result is None:
+            print("⚠️ Discord REST expired-timer recovery probe was not sent", flush=True)
+            return False
+        print(
+            "✅ Discord REST expired-timer recovery probe succeeded | restriction confirmed clear",
+            flush=True,
+        )
+        return True
+    except discord.HTTPException as exc:
+        if getattr(exc, "status", None) == 429:
+            print(
+                "⏸️ Discord REST recovery probe received 429 | central breaker accepted new Retry-After",
+                flush=True,
+            )
+        else:
+            print(
+                f"⚠️ Discord REST recovery probe failed | status={getattr(exc, 'status', None)} | error={exc!r}",
+                flush=True,
+            )
+        return False
+    except Exception as exc:
+        print(f"⚠️ Discord REST recovery probe failed unexpectedly: {exc!r}", flush=True)
+        return False
+
+
 async def discord_block_diagnostics_loop():
-    """Passive diagnostics only: no HTTP probes are sent."""
+    """Diagnostics plus a strictly one-shot post-expiry recovery verification."""
     while True:
         try:
             with discord_block_lock:
                 active = discord_block_started_at > 0
             if active:
                 _mark_discord_block_log("periodic", force=True)
+                await _run_expired_discord_recovery_probe()
             await asyncio.sleep(15)
         except asyncio.CancelledError:
             raise
@@ -2672,57 +2751,28 @@ def _apply_discord_rest_429(exc: Exception, *, context: str) -> float:
         server_retry = float(meta.get("reset_after") or 0.0)
     is_temp_restriction = bool(discord_block_temp_restriction)
     now_mono = time.monotonic()
-
-    # V130: use the wall-clock expiry reconstructed by _record_discord_block_observed
-    # as the single authoritative server timer.  This prevents the separate monotonic
-    # cooldown from drifting several seconds away from the exact Discord timer shown in
-    # diagnostics (for example, cooldown=445s while Discord reported 429s remaining).
-    # Background recovery grace remains a separate hold and is NOT folded into the
-    # server-rate-limit timer itself.
-    with discord_block_lock:
-        authoritative_server_remaining = max(0.0, float(discord_block_server_until or 0.0) - time.time())
-
-    if authoritative_server_remaining > 0:
-        local_pause = authoritative_server_remaining
-        probe_in = authoritative_server_remaining + (discord_block_recovery_grace_seconds if is_temp_restriction else 0.0)
-        if server_retry > 0:
-            discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
-            discord_rest_backoff_seconds = discord_block_local_retry_seconds
+    if server_retry > 0:
+        local_pause = server_retry
+        probe_in = server_retry + (discord_block_recovery_grace_seconds if is_temp_restriction else 0.0)
+        discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
+        discord_rest_backoff_seconds = discord_block_local_retry_seconds
     else:
-        # Discord supplied no usable absolute expiry. Fall back to the extracted retry
-        # interval, or the local safety backoff if neither source is available.
-        local_pause = server_retry if server_retry > 0 else discord_block_local_retry_seconds
-        probe_in = local_pause + (discord_block_recovery_grace_seconds if is_temp_restriction and local_pause > 0 else 0.0)
-        if server_retry > 0:
-            discord_block_local_retry_seconds = min(max(60.0, server_retry * 2.0), 900.0)
-            discord_rest_backoff_seconds = discord_block_local_retry_seconds
-        else:
-            discord_block_local_retry_seconds = min(max(60.0, discord_block_local_retry_seconds * 2.0), 900.0)
-            discord_rest_backoff_seconds = discord_block_local_retry_seconds
-
-    # The shared REST cooldown ends at Discord's server expiry.  The separate
-    # background quarantine/probation may extend beyond it by the configured grace.
-    discord_rest_rate_limited_until = now_mono + max(1.0, local_pause)
-    discord_block_next_probe_mono = now_mono + max(1.0, probe_in)
+        local_pause = discord_block_local_retry_seconds
+        discord_block_local_retry_seconds = min(discord_block_local_retry_seconds * 2.0, 900.0)
+        probe_in = local_pause
+    discord_rest_rate_limited_until = max(discord_rest_rate_limited_until, now_mono + max(1.0, local_pause))
+    discord_block_next_probe_mono = max(discord_block_next_probe_mono, now_mono + max(1.0, probe_in))
     if is_temp_restriction:
         _quarantine_background_rest(
             reason=f"discord-temp-restriction:{context}",
-            duration=local_pause + discord_background_rest_recovery_grace_seconds,
+            duration=server_retry + discord_background_rest_recovery_grace_seconds,
         )
     _schedule_persist_discord_block_state(reason=f"429:{context}")
     now_log = time.monotonic()
     if now_log - discord_rest_last_429_log >= 5.0:
         discord_rest_last_429_log = now_log
-        timer_note = (
-            f"server_timer={authoritative_server_remaining:.3f}s"
-            if authoritative_server_remaining > 0
-            else f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
-        )
-        print(
-            f"⏸️ Discord REST 429 | context={context} | global={discord_block_global} | {timer_note} | "
-            f"next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | repeat probes suppressed",
-            flush=True,
-        )
+        timer_note = f"server_timer={server_retry:.3f}s" if server_retry > 0 else f"server_timer=UNKNOWN | local_safety_pause={local_pause:.1f}s"
+        print(f"⏸️ Discord REST 429 | context={context} | global={discord_block_global} | {timer_note} | next_real_request_in={max(0.0, discord_block_next_probe_mono - time.monotonic()):.1f}s | repeat probes suppressed", flush=True)
     _mark_discord_block_log(context, force=True)
     return local_pause
 
@@ -2824,6 +2874,7 @@ async def guarded_discord_call(
     context: str,
     wait_for_cooldown: bool = False,
     background: bool | None = None,
+    recovery_probe: bool = False,
 ):
     """Run a Discord REST call through the central guard.
 
@@ -2832,6 +2883,8 @@ async def guarded_discord_call(
     - once Discord reports an API/IP temporary restriction, background REST is quarantined;
       it never probes the API just to see whether the block ended.
     - foreground command REST may still proceed according to Discord's own Retry-After rules.
+    - recovery_probe=True permits exactly one explicit post-expiry verification request; it is
+      used only by the recovery controller after Discord's server timer has expired.
     - Voice/TTS calls never enter this function.
     """
     if background is None:
@@ -2869,7 +2922,7 @@ async def guarded_discord_call(
         with discord_block_lock:
             temp_restriction = discord_block_temp_restriction
             next_probe_mono = discord_block_next_probe_mono
-        if temp_restriction and next_probe_mono > time.monotonic():
+        if temp_restriction and next_probe_mono > time.monotonic() and not recovery_probe:
             _log_background_rest_skip(
                 context,
                 max(0.0, next_probe_mono - time.monotonic()),
@@ -2886,7 +2939,7 @@ async def guarded_discord_call(
     with discord_block_lock:
         temp_restriction = discord_block_temp_restriction
         next_probe_mono = discord_block_next_probe_mono
-    if temp_restriction and next_probe_mono > now_mono:
+    if temp_restriction and next_probe_mono > now_mono and not recovery_probe:
         if background:
             _log_background_rest_skip(context, max(0.0, next_probe_mono - now_mono), reason="discord-block")
         else:
@@ -2894,7 +2947,7 @@ async def guarded_discord_call(
         return None
 
     remaining = _discord_rest_rate_limit_remaining()
-    if remaining > 0:
+    if remaining > 0 and not recovery_probe:
         if not wait_for_cooldown:
             _log_rest_skip(context, remaining)
             return None
@@ -2905,7 +2958,7 @@ async def guarded_discord_call(
         with discord_block_lock:
             temp_restriction = discord_block_temp_restriction
             next_probe_mono = discord_block_next_probe_mono
-        if temp_restriction and next_probe_mono > now_mono:
+        if temp_restriction and next_probe_mono > now_mono and not recovery_probe:
             if background:
                 _log_background_rest_skip(context, max(0.0, next_probe_mono - now_mono), reason="discord-block")
             else:
@@ -2926,7 +2979,7 @@ async def guarded_discord_call(
                     return None
 
         remaining = _discord_rest_rate_limit_remaining()
-        if remaining > 0:
+        if remaining > 0 and not recovery_probe:
             if not wait_for_cooldown:
                 if background:
                     _log_background_rest_skip(context, remaining, reason="rate-limit")
