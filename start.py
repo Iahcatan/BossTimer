@@ -92,7 +92,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V66 global-command dedup (single CommandTree)")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V137 verify-first Guild Commands (single CommandTree)")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
@@ -119,70 +119,66 @@ async def sync_commands_once():
             log("❌ ไม่มี Guild สำหรับ sync คำสั่ง")
             return
 
-        # Older deployments can leave the same commands registered globally while
-        # the current deployment intentionally uses Guild Commands.  discord.py does
-        # not allow constructing a second CommandTree for the same Bot, so cleanup
-        # must use the Bot's existing tree.  Preserve the current local command objects,
-        # sync an empty GLOBAL set once, then restore the same objects before the normal
-        # Guild sync.  This changes only remote command scope; callbacks/17 commands are
-        # not replaced or modified.
-        try:
-            await bot_module.wait_for_discord_rest_startup_gate(context="startup:global-command-cleanup")
-        except Exception:
-            await bot_module.bot.wait_until_ready()
-
-        try:
-            existing_global_commands = list(bot_module.bot.tree.get_commands())
-            if existing_global_commands:
-                bot_module.bot.tree.clear_commands(guild=None)
-                await bot_module._original_tree_sync()
-                log(
-                    f"🧹 Global Discord application commands cleared | "
-                    f"removed={len(existing_global_commands)} | guild commands remain authoritative"
-                )
-                for command in existing_global_commands:
-                    bot_module.bot.tree.add_command(command)
-                restored_names = sorted(
-                    getattr(command, "qualified_name", getattr(command, "name", ""))
-                    for command in bot_module.bot.tree.get_commands()
-                    if getattr(command, "name", None)
-                )
-                log(
-                    f"🔄 Local command tree restored | commands={len(restored_names)} | "
-                    f"paths={', '.join(restored_names)}"
-                )
-            else:
-                log("ℹ️ No local Global Commands to clear | proceeding with Guild-only sync")
-        except discord.HTTPException as exc:
-            if getattr(exc, "status", None) == 429:
-                try:
-                    bot_module._apply_discord_rest_429(exc, context="startup:global-command-cleanup")
-                except Exception:
-                    pass
-            raise
+        # V137: do not clear/rewrite Global Commands on every startup. The current
+        # deployment is Guild-authoritative and the previous cleanup already removed
+        # stale global commands. Repeating that bulk REST mutation on every Render
+        # restart creates unnecessary Discord API traffic.
+        log("🛡️ Global command cleanup skipped | Guild Commands are authoritative")
 
         successful = 0
+        local_name_set = set(command_names)
         for guild in guilds:
             try:
-                bot_module.bot.tree.clear_commands(guild=guild)
-                bot_module.bot.tree.copy_global_to(guild=guild)
-                synced = await bot_module.bot.tree.sync(guild=guild)
-                remote_names = sorted(
-                    getattr(command, "qualified_name", getattr(command, "name", ""))
-                    for command in synced
-                    if getattr(command, "name", None)
-                )
-                log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
-                log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
+                await bot_module.wait_for_discord_rest_startup_gate(context="startup:command-verify")
+                try:
+                    remote_commands = await bot_module.bot.tree.fetch_commands(guild=guild)
+                    remote_names = sorted(
+                        getattr(command, "qualified_name", getattr(command, "name", ""))
+                        for command in remote_commands
+                        if getattr(command, "name", None)
+                    )
+                    remote_name_set = set(remote_names)
+                    log(
+                        f"🔎 Guild command verification: {guild.name} ({guild.id}) -> "
+                        f"remote={len(remote_names)} local={len(local_name_set)}"
+                    )
 
-                missing_remote = sorted(required - set(remote_names))
-                if missing_remote:
-                    log("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
-                else:
-                    log("🟢 Required commands verified: /status /kill /setvoice")
-                successful += 1
+                    if remote_name_set == local_name_set and len(remote_names) == len(command_names):
+                        log(
+                            f"✅ Guild command set already current | {guild.name} ({guild.id}) -> "
+                            f"{len(remote_names)} commands | sync skipped"
+                        )
+                    else:
+                        log(
+                            f"🔄 Guild command set differs | {guild.name} ({guild.id}) | "
+                            f"remote={', '.join(remote_names)} | local={', '.join(command_names)}"
+                        )
+                        bot_module.bot.tree.clear_commands(guild=guild)
+                        bot_module.bot.tree.copy_global_to(guild=guild)
+                        synced = await bot_module.bot.tree.sync(guild=guild)
+                        remote_names = sorted(
+                            getattr(command, "qualified_name", getattr(command, "name", ""))
+                            for command in synced
+                            if getattr(command, "name", None)
+                        )
+                        log(f"✅ Guild Sync: {guild.name} ({guild.id}) -> {len(remote_names)} commands")
+
+                    log("🔎 Remote Guild Commands: " + ", ".join(remote_names))
+                    missing_remote = sorted(required - set(remote_names))
+                    if missing_remote:
+                        log("❌ Required commands missing on " + guild.name + ": " + ", ".join(missing_remote))
+                    else:
+                        log("🟢 Required commands verified: /status /kill /setvoice")
+                    successful += 1
+                except discord.HTTPException as exc:
+                    if getattr(exc, "status", None) == 429:
+                        try:
+                            bot_module._apply_discord_rest_429(exc, context="startup:command-verify")
+                        except Exception:
+                            pass
+                    raise
             except Exception as exc:
-                log(f"❌ Guild Sync failed: {guild.name} ({guild.id}): {exc!r}")
+                log(f"❌ Guild command verification/sync failed: {guild.name} ({guild.id}): {exc!r}")
                 traceback.print_exc()
 
         if successful == len(guilds):
