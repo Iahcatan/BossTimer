@@ -92,7 +92,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V139 verify-first Guild Commands (background REST rate guard)")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V140 verify-first Guild Commands (background REST re-entry guard)")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
