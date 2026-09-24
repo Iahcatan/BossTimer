@@ -431,9 +431,20 @@ async def sync_commands_once():
         local_name_set = set(command_names)
         for guild in guilds:
             try:
-                await bot_module.wait_for_discord_rest_startup_gate(context="startup:command-verify")
+                await bot_module.wait_for_discord_rest_clear_confirmed(context="startup:command-verify")
                 try:
-                    remote_commands = await bot_module.bot.tree.fetch_commands(guild=guild)
+                    remote_commands = await bot_module.guarded_discord_call(
+                        lambda: bot_module.bot.tree.fetch_commands(guild=guild),
+                        context="startup:command-verify",
+                        background=False,
+                        wait_for_cooldown=False,
+                    )
+                    if remote_commands is None:
+                        log(
+                            f"⏭️ Guild command verification deferred by Discord REST guard | "
+                            f"{guild.name} ({guild.id}) | no HTTP sent"
+                        )
+                        continue
                     remote_names = sorted(
                         getattr(command, "qualified_name", getattr(command, "name", ""))
                         for command in remote_commands
@@ -604,7 +615,7 @@ async def main():
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
 
-    # V150: retain V149 pre-Gateway durable restriction restore and add lease-bound REST ownership.
+    # V151: retain V150 durable restriction/lease controls and add recovery-only REST gating for command verification.
     # V149: restore any durable Discord temporary-API restriction BEFORE the first
     # Gateway request. The previous flow restored this state only inside on_ready(),
     # which is too late: a new Render process could hit Discord Gateway first and
