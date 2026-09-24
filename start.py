@@ -4,6 +4,9 @@ import os
 import sys
 import traceback
 from discord import app_commands
+import signal
+import time
+import uuid
 
 # Render normally runs Python with stdout connected to a log pipe.
 # Reconfigure BEFORE importing bot.py so even Firebase/import/on_ready logs
@@ -24,7 +27,7 @@ if SKYNET_RUNTIME_ROLE not in {"web", "bot"}:
 # ============================================================
 # SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
 # ============================================================
-# start.py owns command synchronization only.
+# start.py owns process startup/hand-over control and command synchronization only.
 # bot.py remains the owner of Firebase, Boss Timer, /kill,
 # /setvoice, /status, TTS, Voice, Dashboard and background tasks.
 
@@ -33,6 +36,299 @@ COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
 def log(message: str):
     print(message, flush=True)
+
+
+# ============================================================
+# 🛡️ V143: SINGLE DISCORD GATEWAY RUNTIME HANDOVER
+#
+# Render Web Services use zero-downtime deploys: a new instance can start
+# while the previous instance is still alive. The old V142 in-process guard
+# cannot see a different Python process, so it cannot prevent two Gateway
+# sessions from using the same Discord token during the handover window.
+#
+# This lock lives in Firebase (not Discord) and is therefore outside Discord's
+# rate-limit system. Only one process may hold the Gateway lease at a time.
+# The first V143 bootstrap also waits long enough for a legacy pre-V143 process
+# to receive Render's SIGTERM before taking the lease.
+# ============================================================
+GATEWAY_LEASE_PATH = os.environ.get(
+    "DISCORD_GATEWAY_LEASE_PATH",
+    "app_settings/discord_gateway_lease_v143",
+).strip() or "app_settings/discord_gateway_lease_v143"
+GATEWAY_LEASE_META_PATH = os.environ.get(
+    "DISCORD_GATEWAY_LEASE_META_PATH",
+    "app_settings/discord_gateway_lease_v143_meta",
+).strip() or "app_settings/discord_gateway_lease_v143_meta"
+GATEWAY_LEASE_TTL_SECONDS = max(
+    90.0,
+    float(os.environ.get("DISCORD_GATEWAY_LEASE_TTL", "120")),
+)
+GATEWAY_LEASE_RENEW_SECONDS = max(
+    15.0,
+    min(GATEWAY_LEASE_TTL_SECONDS / 3.0, float(os.environ.get("DISCORD_GATEWAY_LEASE_RENEW", "20"))),
+)
+GATEWAY_LEASE_POLL_SECONDS = max(
+    5.0,
+    float(os.environ.get("DISCORD_GATEWAY_LEASE_POLL", "10")),
+)
+# Render sends SIGTERM to the old instance 60 seconds after the new instance
+# becomes ready, then waits for the configured shutdown delay (30 seconds by
+# default). This one-time bootstrap window covers the legacy V142 -> V143 handover.
+GATEWAY_LEGACY_HANDOVER_SECONDS = max(
+    60.0,
+    float(os.environ.get("DISCORD_GATEWAY_LEGACY_HANDOVER", "75")),
+)
+GATEWAY_LEASE_INSTANCE_ID = f"{os.getpid()}-{uuid.uuid4().hex}"
+gateway_lease_lost_event = asyncio.Event()
+gateway_shutdown_event = asyncio.Event()
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+async def _gateway_lease_meta_exists() -> bool:
+    """Read the one-time V143 guard marker from Firebase without touching Discord."""
+    try:
+        raw = await asyncio.to_thread(
+            lambda: bot_module.db.reference(GATEWAY_LEASE_META_PATH).get()
+        )
+        return isinstance(raw, dict) and bool(raw.get("initialized"))
+    except Exception as exc:
+        log(f"⚠️ Gateway handover meta read failed safely: {exc!r}")
+        # Do not assume the guard is initialized when Firebase cannot be read.
+        # A bootstrap hold is the safer choice because it prevents an overlap.
+        return False
+
+
+def _gateway_lease_transaction(current):
+    """Atomic Firebase transaction callback for acquiring our single Gateway lease."""
+    now = time.time()
+    current = dict(current) if isinstance(current, dict) else {}
+    holder = str(current.get("holder_id") or "")
+    expires_at = _safe_float(current.get("expires_at"), 0.0)
+    if not holder or holder == GATEWAY_LEASE_INSTANCE_ID or expires_at <= now:
+        acquired_at = _safe_float(current.get("acquired_at"), 0.0)
+        if not acquired_at or holder != GATEWAY_LEASE_INSTANCE_ID:
+            acquired_at = now
+        return {
+            "version": 1,
+            "holder_id": GATEWAY_LEASE_INSTANCE_ID,
+            "pid": os.getpid(),
+            "acquired_at": acquired_at,
+            "renewed_at": now,
+            "expires_at": now + GATEWAY_LEASE_TTL_SECONDS,
+            "runtime_role": SKYNET_RUNTIME_ROLE,
+        }
+    return current
+
+
+async def acquire_gateway_lease() -> bool:
+    """Attempt one atomic lease claim; return True only if this process owns it."""
+    try:
+        result = await asyncio.to_thread(
+            lambda: bot_module.db.reference(GATEWAY_LEASE_PATH).transaction(_gateway_lease_transaction)
+        )
+        if isinstance(result, dict) and str(result.get("holder_id") or "") == GATEWAY_LEASE_INSTANCE_ID:
+            return True
+        return False
+    except Exception as exc:
+        log(f"⚠️ Gateway lease acquire failed safely: {exc!r}")
+        return False
+
+
+def _gateway_lease_renew_transaction(current):
+    now = time.time()
+    if not isinstance(current, dict):
+        return current
+    if str(current.get("holder_id") or "") != GATEWAY_LEASE_INSTANCE_ID:
+        return current
+    updated = dict(current)
+    updated["renewed_at"] = now
+    updated["expires_at"] = now + GATEWAY_LEASE_TTL_SECONDS
+    updated["pid"] = os.getpid()
+    return updated
+
+
+async def renew_gateway_lease_once() -> bool:
+    """Renew only when the Firebase record still belongs to this process."""
+    try:
+        result = await asyncio.to_thread(
+            lambda: bot_module.db.reference(GATEWAY_LEASE_PATH).transaction(_gateway_lease_renew_transaction)
+        )
+        owned = isinstance(result, dict) and str(result.get("holder_id") or "") == GATEWAY_LEASE_INSTANCE_ID
+        if not owned:
+            gateway_lease_lost_event.set()
+            log("🚨 Gateway lease lost to another runtime; Gateway shutdown requested")
+        return owned
+    except Exception as exc:
+        # If ownership cannot be renewed, stop the Gateway rather than risking
+        # split-brain operation after the lease expires and another runtime claims it.
+        gateway_lease_lost_event.set()
+        log(f"🚨 Gateway lease renewal could not be confirmed; stopping Gateway safely: {exc!r}")
+        return False
+
+
+def _gateway_lease_release_transaction(current):
+    if isinstance(current, dict) and str(current.get("holder_id") or "") == GATEWAY_LEASE_INSTANCE_ID:
+        return None
+    return current
+
+
+async def release_gateway_lease(reason: str = "shutdown"):
+    """Release our lease only; never remove another process's lease."""
+    try:
+        result = await asyncio.to_thread(
+            lambda: bot_module.db.reference(GATEWAY_LEASE_PATH).transaction(_gateway_lease_release_transaction)
+        )
+        released = not isinstance(result, dict) or str(result.get("holder_id") or "") != GATEWAY_LEASE_INSTANCE_ID
+        if released:
+            log(f"🔓 Discord Gateway lease released | reason={reason}")
+    except Exception as exc:
+        log(f"⚠️ Discord Gateway lease release failed safely | reason={reason} | {exc!r}")
+
+
+async def gateway_lease_worker():
+    """Keep the single Gateway lease alive and detect ownership loss."""
+    while not gateway_shutdown_event.is_set():
+        try:
+            try:
+                await asyncio.wait_for(
+                    gateway_shutdown_event.wait(),
+                    timeout=GATEWAY_LEASE_RENEW_SECONDS,
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+
+            if gateway_shutdown_event.is_set():
+                break
+            await renew_gateway_lease_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log(f"⚠️ Gateway lease worker failed safely: {exc!r}")
+
+
+async def wait_for_gateway_lease() -> bool:
+    """Wait until this process exclusively owns the Discord Gateway lease."""
+    initialized = await _gateway_lease_meta_exists()
+    if not initialized:
+        log(
+            "🛡️ V143 first-runtime handover guard | "
+            f"waiting {GATEWAY_LEGACY_HANDOVER_SECONDS:.0f}s before claiming Gateway lease "
+            "so a legacy V142 Render instance can terminate first"
+        )
+        try:
+            await asyncio.wait_for(
+                gateway_shutdown_event.wait(),
+                timeout=GATEWAY_LEGACY_HANDOVER_SECONDS,
+            )
+            return False
+        except asyncio.TimeoutError:
+            pass
+
+    while not gateway_shutdown_event.is_set():
+        if await acquire_gateway_lease():
+            try:
+                await asyncio.to_thread(
+                    lambda: bot_module.db.reference(GATEWAY_LEASE_META_PATH).set({
+                        "version": 1,
+                        "initialized": True,
+                        "initialized_at": time.time(),
+                        "last_holder_id": GATEWAY_LEASE_INSTANCE_ID,
+                    })
+                )
+            except Exception as exc:
+                log(f"⚠️ Gateway handover meta write failed safely: {exc!r}")
+            log(
+                "🔐 Discord Gateway lease ACQUIRED | "
+                f"instance={GATEWAY_LEASE_INSTANCE_ID} | ttl={GATEWAY_LEASE_TTL_SECONDS:.0f}s"
+            )
+            return True
+
+        # The transaction returns the currently-held lease, so avoid another
+        # Firebase read just to calculate a wait time. This keeps the control plane small.
+        log(
+            "⏳ Discord Gateway lease busy | "
+            f"another runtime owns the lease; retry in {GATEWAY_LEASE_POLL_SECONDS:.0f}s | no Discord request sent"
+        )
+        try:
+            await asyncio.wait_for(
+                gateway_shutdown_event.wait(),
+                timeout=GATEWAY_LEASE_POLL_SECONDS,
+            )
+            return False
+        except asyncio.TimeoutError:
+            pass
+    return False
+
+
+def install_gateway_signal_handlers(loop):
+    """Convert Render SIGTERM/SIGINT into a graceful async shutdown signal."""
+    def _signal_received(signum):
+        signal_name = getattr(signal.Signals(signum), "name", str(signum))
+        log(f"🛑 {signal_name} received | preparing graceful Discord Gateway handover")
+        gateway_shutdown_event.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _signal_received, sig)
+        except (NotImplementedError, RuntimeError, ValueError):
+            # Windows / non-main-loop environments may not support add_signal_handler.
+            pass
+
+
+async def run_gateway_until_shutdown(token: str, lease_worker_task):
+    """Run the existing Gateway controller until shutdown or lease loss."""
+    gateway_task = asyncio.create_task(
+        bot_module.run_bot_with_backoff(token),
+        name="skynet-gateway-runner",
+    )
+    shutdown_wait_task = asyncio.create_task(
+        gateway_shutdown_event.wait(),
+        name="skynet-gateway-shutdown-wait",
+    )
+    lease_loss_wait_task = asyncio.create_task(
+        gateway_lease_lost_event.wait(),
+        name="skynet-gateway-lease-loss-wait",
+    )
+
+    try:
+        done, _pending = await asyncio.wait(
+            {gateway_task, shutdown_wait_task, lease_loss_wait_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if shutdown_wait_task in done or lease_loss_wait_task in done:
+            if lease_loss_wait_task in done and gateway_lease_lost_event.is_set():
+                log("🛑 Gateway lease ownership is no longer exclusive; stopping Discord Gateway safely")
+            else:
+                log("🛑 Graceful shutdown requested; stopping Discord Gateway safely")
+            try:
+                await bot_module.bot.close()
+            except Exception as exc:
+                log(f"⚠️ Discord bot close failed safely: {exc!r}")
+            if not gateway_task.done():
+                gateway_task.cancel()
+            await asyncio.gather(gateway_task, return_exceptions=True)
+            return
+
+        # The existing gateway controller should normally be long-lived. If it ever
+        # terminates or raises unexpectedly, preserve that behavior instead of hiding it.
+        result = await gateway_task
+        return result
+    finally:
+        for task in (shutdown_wait_task, lease_loss_wait_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(shutdown_wait_task, lease_loss_wait_task, return_exceptions=True)
+        if lease_worker_task is not None and not lease_worker_task.done():
+            lease_worker_task.cancel()
+            await asyncio.gather(lease_worker_task, return_exceptions=True)
 
 
 # ------------------------------------------------------------
@@ -92,7 +388,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V142 verify-first Guild Commands (REST diagnostics + voice/attendance safeguards)")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V143 verify-first Guild Commands (Gateway handover + REST diagnostics + voice/attendance safeguards)")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
@@ -300,12 +596,28 @@ async def main():
 
     log("🔑 พบ DISCORD_TOKEN")
     log("🔌 กำลังเริ่ม Discord Bot...")
-    log("🔌 กำลังเชื่อมต่อ Discord Gateway...")
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
+    log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
 
+    install_gateway_signal_handlers(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(startup_heartbeat())
+    lease_worker_task = None
+    lease_acquired = False
     try:
-        await bot_module.run_bot_with_backoff(token)
+        # IMPORTANT: do not touch Discord Gateway until this process exclusively
+        # owns the handover lease. This prevents Render's old/new overlap from
+        # producing two simultaneous Gateway sessions with the same token.
+        lease_acquired = await wait_for_gateway_lease()
+        if not lease_acquired:
+            log("🛑 Gateway startup cancelled before lease acquisition")
+            return
+
+        lease_worker_task = asyncio.create_task(
+            gateway_lease_worker(),
+            name="skynet-gateway-lease-worker",
+        )
+        log("🔌 กำลังเชื่อมต่อ Discord Gateway... (single-runtime lease confirmed)")
+        await run_gateway_until_shutdown(token, lease_worker_task)
     except KeyboardInterrupt:
         log("🛑 Bot stopped")
     except Exception as exc:
@@ -313,6 +625,16 @@ async def main():
         traceback.print_exc()
         raise
     finally:
+        gateway_shutdown_event.set()
+        if lease_worker_task is not None and not lease_worker_task.done():
+            lease_worker_task.cancel()
+            await asyncio.gather(lease_worker_task, return_exceptions=True)
+        if lease_acquired:
+            await release_gateway_lease(reason="runtime-exit")
+        try:
+            await bot_module.bot.close()
+        except Exception as exc:
+            log(f"⚠️ Discord bot close during runtime-exit failed safely: {exc!r}")
         heartbeat_task.cancel()
         try:
             await heartbeat_task
