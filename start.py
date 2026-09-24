@@ -39,7 +39,7 @@ def log(message: str):
 
 
 # ============================================================
-# 🛡️ V143: SINGLE DISCORD GATEWAY RUNTIME HANDOVER
+# 🛡️ V144: SINGLE DISCORD GATEWAY RUNTIME HANDOVER
 #
 # Render Web Services use zero-downtime deploys: a new instance can start
 # while the previous instance is still alive. The old V142 in-process guard
@@ -73,7 +73,7 @@ GATEWAY_LEASE_POLL_SECONDS = max(
 )
 # Render sends SIGTERM to the old instance 60 seconds after the new instance
 # becomes ready, then waits for the configured shutdown delay (30 seconds by
-# default). This one-time bootstrap window covers the legacy V142 -> V143 handover.
+# default). This one-time bootstrap window covers the legacy V143 -> V144 handover.
 GATEWAY_LEGACY_HANDOVER_SECONDS = max(
     60.0,
     float(os.environ.get("DISCORD_GATEWAY_LEGACY_HANDOVER", "75")),
@@ -218,9 +218,9 @@ async def wait_for_gateway_lease() -> bool:
     initialized = await _gateway_lease_meta_exists()
     if not initialized:
         log(
-            "🛡️ V143 first-runtime handover guard | "
+            "🛡️ V144 first-runtime handover guard | "
             f"waiting {GATEWAY_LEGACY_HANDOVER_SECONDS:.0f}s before claiming Gateway lease "
-            "so a legacy V142 Render instance can terminate first"
+            "so a legacy V143 Render instance can terminate first"
         )
         try:
             await asyncio.wait_for(
@@ -388,7 +388,7 @@ async def sync_commands_once():
             await asyncio.sleep(COMMAND_SYNC_DELAY)
 
         log("=" * 60)
-        log("🔄 SKYNET DISCORD COMMAND SYNC | V143 verify-first Guild Commands (Gateway handover + REST diagnostics + voice/attendance safeguards)")
+        log("🔄 SKYNET DISCORD COMMAND SYNC | V144 verify-first Guild Commands (Gateway handover + REST diagnostics + voice/attendance safeguards)")
         log(f"🤖 Bot: {bot_module.bot.user}")
         log(f"🆔 Bot ID: {getattr(bot_module.bot.user, 'id', None)}")
         log(f"🏠 Guilds: {len(bot_module.bot.guilds)}")
