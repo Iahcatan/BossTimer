@@ -39,7 +39,7 @@ def log(message: str):
 
 
 # ============================================================
-# 🛡️ V144: SINGLE DISCORD GATEWAY RUNTIME HANDOVER
+# 🛡️ V145: SINGLE DISCORD GATEWAY RUNTIME HANDOVER
 #
 # Render Web Services use zero-downtime deploys: a new instance can start
 # while the previous instance is still alive. The old V142 in-process guard
@@ -73,7 +73,7 @@ GATEWAY_LEASE_POLL_SECONDS = max(
 )
 # Render sends SIGTERM to the old instance 60 seconds after the new instance
 # becomes ready, then waits for the configured shutdown delay (30 seconds by
-# default). This one-time bootstrap window covers the legacy V143 -> V144 handover.
+# default). This one-time bootstrap window covers the legacy V144 -> V145 handover.
 GATEWAY_LEGACY_HANDOVER_SECONDS = max(
     60.0,
     float(os.environ.get("DISCORD_GATEWAY_LEGACY_HANDOVER", "75")),
@@ -173,8 +173,11 @@ async def renew_gateway_lease_once() -> bool:
 
 
 def _gateway_lease_release_transaction(current):
+    # Firebase Admin transaction callbacks must return a concrete value; returning
+    # None causes ValueError("Value must not be none."). Use an empty object to
+    # clear our holder while preserving the transaction contract.
     if isinstance(current, dict) and str(current.get("holder_id") or "") == GATEWAY_LEASE_INSTANCE_ID:
-        return None
+        return {}
     return current
 
 
