@@ -161,14 +161,16 @@ async def renew_gateway_lease_once() -> bool:
         )
         owned = isinstance(result, dict) and str(result.get("holder_id") or "") == GATEWAY_LEASE_INSTANCE_ID
         if not owned:
+            bot_module.discord_rest_runtime_lease_owned = False
             gateway_lease_lost_event.set()
-            log("🚨 Gateway lease lost to another runtime; Gateway shutdown requested")
+            log("🚨 Gateway lease lost to another runtime; Discord REST ownership disabled and Gateway shutdown requested")
         return owned
     except Exception as exc:
         # If ownership cannot be renewed, stop the Gateway rather than risking
         # split-brain operation after the lease expires and another runtime claims it.
+        bot_module.discord_rest_runtime_lease_owned = False
         gateway_lease_lost_event.set()
-        log(f"🚨 Gateway lease renewal could not be confirmed; stopping Gateway safely: {exc!r}")
+        log(f"🚨 Gateway lease renewal could not be confirmed; Discord REST ownership disabled; stopping Gateway safely: {exc!r}")
         return False
 
 
@@ -602,6 +604,7 @@ async def main():
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
 
+    # V150: retain V149 pre-Gateway durable restriction restore and add lease-bound REST ownership.
     # V149: restore any durable Discord temporary-API restriction BEFORE the first
     # Gateway request. The previous flow restored this state only inside on_ready(),
     # which is too late: a new Render process could hit Discord Gateway first and
@@ -630,6 +633,12 @@ async def main():
             log("🛑 Gateway startup cancelled before lease acquisition")
             return
 
+        # V150: use the same single-runtime Firebase handover lease for normal
+        # Discord REST. This prevents old/new Render deploy overlap from creating
+        # two concurrent REST writers even when Gateway ownership is exclusive.
+        bot_module.discord_rest_runtime_lease_owned = True
+        log("🛡️ Discord REST runtime lease ownership ENABLED with Gateway lease")
+
         lease_worker_task = asyncio.create_task(
             gateway_lease_worker(),
             name="skynet-gateway-lease-worker",
@@ -648,6 +657,8 @@ async def main():
             lease_worker_task.cancel()
             await asyncio.gather(lease_worker_task, return_exceptions=True)
         if lease_acquired:
+            bot_module.discord_rest_runtime_lease_owned = False
+            log("🛡️ Discord REST runtime lease ownership DISABLED before Gateway lease release")
             await release_gateway_lease(reason="runtime-exit")
         try:
             await bot_module.bot.close()
