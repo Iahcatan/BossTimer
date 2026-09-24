@@ -39,7 +39,7 @@ def log(message: str):
 
 
 # ============================================================
-# 🛡️ V145: SINGLE DISCORD GATEWAY RUNTIME HANDOVER
+# 🛡️ V149: DISCORD REST-AWARE GATEWAY STARTUP + SINGLE RUNTIME HANDOVER
 #
 # Render Web Services use zero-downtime deploys: a new instance can start
 # while the previous instance is still alive. The old V142 in-process guard
@@ -73,7 +73,7 @@ GATEWAY_LEASE_POLL_SECONDS = max(
 )
 # Render sends SIGTERM to the old instance 60 seconds after the new instance
 # becomes ready, then waits for the configured shutdown delay (30 seconds by
-# default). This one-time bootstrap window covers the legacy V144 -> V145 handover.
+# default). This one-time bootstrap window covers the legacy V144 -> V149 handover.
 GATEWAY_LEGACY_HANDOVER_SECONDS = max(
     60.0,
     float(os.environ.get("DISCORD_GATEWAY_LEGACY_HANDOVER", "75")),
@@ -601,6 +601,21 @@ async def main():
     log("🔌 กำลังเริ่ม Discord Bot...")
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
+
+    # V149: restore any durable Discord temporary-API restriction BEFORE the first
+    # Gateway request. The previous flow restored this state only inside on_ready(),
+    # which is too late: a new Render process could hit Discord Gateway first and
+    # receive another 429 during an already-active server restriction. This restore
+    # performs only Firebase/SQLite reads and local waiting; it sends no Discord HTTP.
+    try:
+        restored = await bot_module.restore_persisted_discord_block_state()
+        if restored:
+            await bot_module.wait_for_discord_rest_startup_gate(context="startup:gateway")
+            log("🟢 Persisted Discord REST restriction gate cleared for Gateway startup; no early HTTP probe was sent")
+    except Exception as exc:
+        # Preserve the existing startup path if persistence is temporarily unavailable.
+        # A real Discord 429 is still handled by bot.py and persisted for the next retry.
+        log(f"⚠️ Pre-Gateway Discord REST restriction restore failed safely: {exc!r}")
 
     install_gateway_signal_handlers(asyncio.get_running_loop())
     heartbeat_task = asyncio.create_task(startup_heartbeat())
