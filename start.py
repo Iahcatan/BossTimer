@@ -617,6 +617,16 @@ async def main():
 
     # V153: retain V151 Discord REST recovery-only gating; stale Dashboard Voice-confirmation handling is isolated to bot.py.
     # V149: restore any durable Discord temporary-API restriction BEFORE the first
+    # V155: initialize the local SQLite schema before restoring the persisted Discord
+    # REST-block state. The previous startup order attempted get_db_value() first,
+    # which could emit "no such table: bot_settings" and silently lose the local
+    # fallback during Render handover. This creates only local tables and sends no
+    # Discord request. Firebase remains the canonical persisted source.
+    try:
+        bot_module.init_db()
+    except Exception as exc:
+        log(f"⚠️ SQLite startup schema initialization failed safely: {exc!r}")
+
     # Gateway request. The previous flow restored this state only inside on_ready(),
     # which is too late: a new Render process could hit Discord Gateway first and
     # receive another 429 during an already-active server restriction. This restore
