@@ -615,7 +615,7 @@ async def main():
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
 
-    # V152: retain V151 Discord REST recovery-only gating; Boss Voice/queue behavior changes are isolated to bot.py.
+    # V153: retain V151 Discord REST recovery-only gating; stale Dashboard Voice-confirmation handling is isolated to bot.py.
     # V149: restore any durable Discord temporary-API restriction BEFORE the first
     # Gateway request. The previous flow restored this state only inside on_ready(),
     # which is too late: a new Render process could hit Discord Gateway first and
