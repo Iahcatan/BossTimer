@@ -678,6 +678,12 @@ async def main():
             lease_worker_task.cancel()
             await asyncio.gather(lease_worker_task, return_exceptions=True)
         if lease_acquired:
+            # V158: finish any in-flight durable Discord restriction write before the
+            # Render process hands over the Gateway lease. Firebase/SQLite only; no Discord HTTP.
+            try:
+                await bot_module.flush_discord_block_persistence(timeout=5.0)
+            except Exception as exc:
+                log(f"⚠️ Discord REST block persistence flush skipped safely: {exc!r}")
             bot_module.discord_rest_runtime_lease_owned = False
             log("🛡️ Discord REST runtime lease ownership DISABLED before Gateway lease release")
             await release_gateway_lease(reason="runtime-exit")
