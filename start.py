@@ -1,4 +1,3 @@
-# V161_DISCORD_INTERACTION_RESTRICTION_REENTRY_GUARD_FIX_2026-09-27
 import asyncio
 import discord
 import os
