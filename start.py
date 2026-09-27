@@ -678,7 +678,7 @@ async def main():
             lease_worker_task.cancel()
             await asyncio.gather(lease_worker_task, return_exceptions=True)
         if lease_acquired:
-            # V158: finish any in-flight durable Discord restriction write before the
+            # V159: finish any in-flight durable Discord restriction write before the
             # Render process hands over the Gateway lease. Firebase/SQLite only; no Discord HTTP.
             try:
                 await bot_module.flush_discord_block_persistence(timeout=5.0)
