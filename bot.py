@@ -80,7 +80,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V175_DISCORD_TIME_CRITICAL_REST_LANE_ISOLATION_FIX_2026-10-01 | BASE=V174_DISCORD_EXACT_NOTIFICATION_TIMING_FROM_V172_FIX_2026-10-01"
+NOTICE_BF_PATCH_VERSION = "V176_AUTO_ATTENDANCE_DISCORD_EXACT_CLOSE_PANEL_FIX_2026-10-01 | BASE=V175_DISCORD_TIME_CRITICAL_REST_LANE_ISOLATION_FIX_2026-10-01"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -3572,6 +3572,7 @@ def _is_time_critical_background_rest_context(context: str) -> bool:
         "boss-notify:",
         "boss-time-log:",
         "attendance:auto-create:",
+        "attendance:panel-edit:",
         "boss-user-dm:",
         "bf:",
         "library-boss",
@@ -10070,7 +10071,29 @@ async def _attendance_refresh_panel(guild: discord.Guild, activity: dict, partic
     try:
         message = channel.get_partial_message(message_id)
         view = RaidAttendanceView(str(activity.get("activity_id"))) if not closed else RaidAttendanceView(str(activity.get("activity_id")), disabled=True)
-        await guarded_message_edit(message, context=f"attendance:panel-edit:{activity.get('activity_id')}", embed=build_raid_activity_embed(activity, participants, closed=closed), view=view, background=True)
+        result = await guarded_message_edit(
+            message,
+            context=f"attendance:panel-edit:{activity.get('activity_id')}",
+            embed=build_raid_activity_embed(activity, participants, closed=closed),
+            view=view,
+            background=True,
+        )
+        if closed and result is not None:
+            target_dt = parse_to_thai_datetime(activity.get("close_at"))
+            closed_dt = parse_to_thai_datetime(activity.get("closed_at")) or datetime.now(TZ_THAI)
+            lag = (closed_dt - target_dt).total_seconds() if target_dt else 0.0
+            print(
+                f"✅ Auto Attendance Discord panel closed | guild={guild.name} | "
+                f"activity={activity.get('activity_id')} | target_close="
+                f"{target_dt.isoformat() if target_dt else '-'} | panel_edit_lag={lag:.3f}s",
+                flush=True,
+            )
+        elif closed and result is None:
+            print(
+                f"⏭️ Auto Attendance Discord panel close deferred by REST guard | guild={guild.name} | "
+                f"activity={activity.get('activity_id')} | target_close={activity.get('close_at') or '-'}",
+                flush=True,
+            )
     except Exception as e:
         print(f"⚠️ อัปเดต Attendance panel ไม่สำเร็จ: {e}", flush=True)
 
@@ -10119,6 +10142,8 @@ def _ensure_attendance_exact_close_task(guild_id: int, activity_id: str, close_a
                 flush=True,
             )
             # Firebase can have a transient TLS/socket failure exactly at the deadline.
+            # V176: the visible Discord panel-close edit uses the time-critical REST lane so
+            # a non-critical/background queue cannot delay the UI transition past spawn time.
             # Retry only the local Firebase close operation for a short bounded period;
             # no Discord request is made by this retry loop.
             retry_deadline = time.monotonic() + 60.0
