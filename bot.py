@@ -80,7 +80,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V172_AUTO_ATTENDANCE_DUPLICATE_PANEL_FIX_2026-09-29 | BASE=V171_AUTO_ATTENDANCE_EXACT_CLOSE_FIREBASE_RETRY_HARDEN_FIX_2026-09-29"
+NOTICE_BF_PATCH_VERSION = "V174_DISCORD_EXACT_NOTIFICATION_TIMING_FROM_V172_FIX_2026-10-01 | BASE=V172_AUTO_ATTENDANCE_DUPLICATE_PANEL_FIX_2026-09-29"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -2280,6 +2280,12 @@ PENDING_BOSS_REST_MAX = 100
 pending_boss_rest_notifications = deque(maxlen=PENDING_BOSS_REST_MAX)
 pending_boss_rest_lock = threading.Lock()
 pending_boss_rest_keys = set()
+
+# V174: keep an exact-boundary Boss text notification alive for a bounded grace period
+# after spawn_time. The V172 purge treated any post-spawn queue item as stale, which
+# could drop the message before the dedicated REST worker sent it.
+BOSS_REST_ADVANCE_LATE_GRACE_SECONDS = max(5.0, float(os.environ.get("BOSS_REST_ADVANCE_LATE_GRACE_SECONDS", "30.0")))
+BOSS_REST_SPAWN_LATE_GRACE_SECONDS = max(10.0, float(os.environ.get("BOSS_REST_SPAWN_LATE_GRACE_SECONDS", "30.0")))
 
 # =========================================================
 # 🛡️ V22: GLOBAL DISCORD REST GUARD
@@ -5038,9 +5044,11 @@ async def _flush_pending_channel_messages_once():
 
 async def flush_pending_command_outputs_once():
     # Auto Attendance is time-sensitive and gets the first background REST slot.
+    # V174: Boss text notifications use their own fast worker so unrelated command-output
+    # or audit work cannot delay a Boss notice. Discord Retry-After and REST guards remain
+    # authoritative for every actual Discord request.
     await flush_pending_autoattendance_panels_once()
     await _flush_pending_channel_messages_once()
-    await flush_pending_boss_rest_notifications_once()
     await flush_pending_audit_logs_once()
     # V135: per-user DM delivery is handled only by the dedicated 5s worker below.
     # Keeping it out of this shared queue worker prevents duplicate DM sends and lets
@@ -5062,6 +5070,15 @@ async def flush_pending_discord_user_dm_worker():
         await flush_pending_discord_user_dm_notifications_once()
     except Exception as exc:
         print(f"⚠️ Discord per-user DM worker failed safely: {exc!r}", flush=True)
+
+
+@tasks.loop(seconds=0.2)
+async def flush_pending_boss_rest_notification_worker():
+    """V174: dedicated fast worker for public Boss text notifications."""
+    try:
+        await flush_pending_boss_rest_notifications_once()
+    except Exception as exc:
+        print(f"⚠️ Boss REST timing worker failed safely: {exc!r}", flush=True)
 
 
 @tasks.loop(seconds=2)
@@ -6978,6 +6995,7 @@ async def on_ready():
     if not update_live_embed.is_running(): update_live_embed.start()
     if not check_auto_disconnect.is_running(): check_auto_disconnect.start()
     if not flush_pending_command_outputs.is_running(): flush_pending_command_outputs.start()
+    if not flush_pending_boss_rest_notification_worker.is_running(): flush_pending_boss_rest_notification_worker.start()
     if not flush_pending_autoattendance_panel_worker.is_running(): flush_pending_autoattendance_panel_worker.start()
     if not flush_pending_discord_user_dm_worker.is_running(): flush_pending_discord_user_dm_worker.start()
     if not retry_pending_voice_confirmation_worker.is_running(): retry_pending_voice_confirmation_worker.start()
@@ -8143,17 +8161,21 @@ def _queue_boss_rest_notification(
             "queued_at": time.time(),
             "spawn_time": spawn_time.isoformat() if isinstance(spawn_time, datetime) else None,
         })
-    print(f"⏸️ Boss text notification queued | boss={boss_name} | stage={stage} | channel={channel_id}", flush=True)
+    print(
+        f"⏸️ Boss text notification queued | boss={boss_name} | stage={stage} | channel={channel_id} | "
+        f"target={spawn_time.isoformat() if isinstance(spawn_time, datetime) else '-'} | "
+        f"queued_at={datetime.now(TZ_THAI).isoformat()}",
+        flush=True,
+    )
     return True
 
 
 async def _purge_expired_pending_boss_rest_notifications(now: datetime | None = None) -> int:
-    """Drop queued Boss text notices after their Boss spawn time.
+    """Drop only genuinely stale queued Boss text notices.
 
-    V152: this is limited strictly to the public Boss text queue. When an item is
-    expired, its existing notification-complete flag is also persisted so a later
-    boss_schedule root sync cannot make the stale stage eligible again.
-    Voice, Auto Attendance, and command-output queues are untouched.
+    V174: a notice intentionally queued at the exact spawn boundary remains eligible
+    briefly after spawn_time so normal REST scheduling can deliver it. Voice, Auto
+    Attendance, and command-output queues remain untouched.
     """
     current = now or datetime.now(TZ_THAI)
     expired = []
@@ -8162,10 +8184,17 @@ async def _purge_expired_pending_boss_rest_notifications(now: datetime | None = 
         while pending_boss_rest_notifications:
             item = pending_boss_rest_notifications.popleft()
             spawn_dt = parse_to_thai_datetime(item.get("spawn_time"))
-            if spawn_dt is not None and current > spawn_dt:
-                expired.append(item)
-                pending_boss_rest_keys.discard(item.get("key"))
-                continue
+            if spawn_dt is not None:
+                stage = str(item.get("stage") or "").strip().lower()
+                late_grace = (
+                    BOSS_REST_ADVANCE_LATE_GRACE_SECONDS
+                    if stage == "advance"
+                    else BOSS_REST_SPAWN_LATE_GRACE_SECONDS
+                )
+                if current > (spawn_dt + timedelta(seconds=late_grace)):
+                    expired.append(item)
+                    pending_boss_rest_keys.discard(item.get("key"))
+                    continue
             survivors.append(item)
         pending_boss_rest_notifications.extend(survivors)
 
@@ -8263,9 +8292,13 @@ async def _flush_one_boss_rest_notification() -> bool:
         queue_age = max(0.0, time.time() - float(item.get("queued_at") or time.time()))
     except Exception:
         queue_age = 0.0
+    sent_now = datetime.now(TZ_THAI)
+    target_dt = parse_to_thai_datetime(item.get("spawn_time"))
+    target_lag = (sent_now - target_dt).total_seconds() if target_dt is not None else None
     print(
         f"🟢 Boss REST queue sent: {item['boss_name']} | stage={item['stage']} | "
-        f"queue_age={queue_age:.1f}s",
+        f"queue_age={queue_age:.1f}s | target_lag={max(0.0, target_lag) if target_lag is not None else '-'}s | "
+        f"sent_at={sent_now.isoformat()}",
         flush=True,
     )
     return True
@@ -8455,7 +8488,7 @@ async def _run_boss_voice_stage(boss_name: str, stage: str, notice_minutes: int,
         _boss_voice_stage_inflight.discard(key)
 
 
-@tasks.loop(seconds=2)
+@tasks.loop(seconds=0.5)
 async def check_boss_notifications():
     try:
         now = datetime.now(TZ_THAI)
@@ -8539,11 +8572,11 @@ async def check_boss_notifications():
             if not notification_action_due:
                 continue
 
-            # Text notification targets are now persisted in Firebase under
-            # notification_channels and are read immediately before a Boss event.
-            # This preserves the old per-boss/fallback behavior only when no explicit
-            # notification channels are configured yet.
-            configured_notification_ids = await get_notification_channel_ids_from_database()
+            # V174: use the live in-memory notification-channel cache on the exact event path.
+            # /set-notification updates this cache immediately, so a Firebase read cannot
+            # delay the Discord notification at the scheduled boundary. Existing fallbacks
+            # below remain unchanged.
+            configured_notification_ids = _notification_channel_ids_from_memory()
             channels_to_notify = []
             seen_channel_ids = set()
             for target_channel_id in configured_notification_ids:
@@ -8601,7 +8634,6 @@ async def check_boss_notifications():
                 spawn_stage_queued = any(item.get("boss_name") == boss_name and item.get("stage") == "spawn" for item in pending_boss_rest_notifications)
 
             if 0 < time_left <= notice_seconds and not notified_advance and not advance_stage_queued:
-                await refresh_discord_notification_languages()
                 embed = build_boss_discord_notification(boss_name, "advance", spawn_time, notice_minutes)
                 for ch in channels_to_notify:
                     try:
@@ -8642,7 +8674,6 @@ async def check_boss_notifications():
             # Spawn: only notify at the actual crossing. Old schedules >60s late
             # are marked complete instead of replaying after every deploy/reload.
             if time_left <= 0 and not notified_spawn and not spawn_stage_queued:
-                await refresh_discord_notification_languages()
                 embed = build_boss_discord_notification(boss_name, "spawn", spawn_time, notice_minutes)
                 for ch in channels_to_notify:
                     try:
