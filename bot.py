@@ -80,7 +80,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V176_AUTO_ATTENDANCE_DISCORD_EXACT_CLOSE_PANEL_FIX_2026-10-01 | BASE=V175_DISCORD_TIME_CRITICAL_REST_LANE_ISOLATION_FIX_2026-10-01"
+NOTICE_BF_PATCH_VERSION = "V177_DISCORD_API_BLOCK_RECOVERY_CHANNEL_PROBE_FIX_2026-10-03 | BASE=V176_AUTO_ATTENDANCE_DISCORD_EXACT_CLOSE_PANEL_FIX_2026-10-01"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -2385,6 +2385,13 @@ discord_block_scope = ""
 discord_block_global = False
 discord_block_kind = ""
 discord_block_source = ""
+# V177: retain the original 429 trigger metadata so a later 15-second diagnostic line
+# remains self-contained even when Render starts streaming logs after the actual 429 event.
+discord_block_trigger_context = ""
+discord_block_cf_ray = ""
+discord_block_via = ""
+discord_block_server_header = ""
+discord_block_content_type = ""
 discord_block_last_log_at = 0.0
 discord_block_temp_restriction = False
 discord_block_next_probe_mono = 0.0
@@ -2413,6 +2420,14 @@ discord_block_lock = threading.Lock()
 # acquired, and clears it before lease release. Voice/TTS and Firebase work are
 # unaffected because they do not pass through this REST guard.
 discord_rest_runtime_lease_owned = False
+
+# V177: after a temporary Discord API/IP restriction clears, do not make the first
+# real background message-create/edit call the next readiness test. The first use of
+# each cached message channel performs one guarded read-only history probe. A failed
+# probe is treated as a normal Discord REST failure and the real message call is not sent.
+discord_background_recovery_channel_probe_required = False
+discord_background_recovery_channel_probe_done = set()
+discord_background_recovery_channel_probe_lock = asyncio.Lock()
 
 
 def _discord_rest_rate_limit_remaining() -> float:
@@ -2609,6 +2624,11 @@ def _discord_block_state_snapshot() -> dict:
         "global": is_global,
         "kind": kind,
         "source": source,
+        "trigger_context": str(discord_block_trigger_context or ""),
+        "cf_ray": str(discord_block_cf_ray or ""),
+        "via": str(discord_block_via or ""),
+        "server_header": str(discord_block_server_header or ""),
+        "content_type": str(discord_block_content_type or ""),
         "temp_restriction": temp_restriction,
         "local_retry_seconds": local_retry,
         "post_recovery_quiet_until": float(discord_rest_post_recovery_quiet_until_wall or 0.0),
@@ -2786,9 +2806,12 @@ async def restore_persisted_discord_block_state():
     global discord_rest_rate_limited_until
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_trigger_context, discord_block_cf_ray, discord_block_via
+    global discord_block_server_header, discord_block_content_type
     global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_local_retry_seconds
     global discord_rest_post_recovery_quiet_until_wall, discord_rest_post_recovery_quiet_until_mono
     global discord_background_rest_suppressed_until, discord_background_rest_quarantined
+    global discord_background_recovery_channel_probe_required, discord_background_recovery_channel_probe_done
     now_wall = time.time()
     state = None
 
@@ -2838,12 +2861,31 @@ async def restore_persisted_discord_block_state():
         is_global = bool(state.get("global"))
         kind = str(state.get("kind") or "")
         source = str(state.get("source") or "")
+        trigger_context = str(state.get("trigger_context") or "")
+        cf_ray = str(state.get("cf_ray") or "")
+        via = str(state.get("via") or "")
+        server_header = str(state.get("server_header") or "")
+        content_type = str(state.get("content_type") or "")
         temp_restriction = bool(state.get("temp_restriction"))
         local_retry = max(60.0, float(state.get("local_retry_seconds") or 60.0))
         updated_at = float(state.get("updated_at") or last_seen or started)
     except (TypeError, ValueError) as exc:
         print(f"⚠️ Discord REST block persisted state invalid; ignoring it: {exc!r}", flush=True)
         return False
+
+    with discord_block_lock:
+        global_state_assignments = (
+            trigger_context,
+            cf_ray,
+            via,
+            server_header,
+            content_type,
+        )
+        discord_block_trigger_context = global_state_assignments[0]
+        discord_block_cf_ray = global_state_assignments[1]
+        discord_block_via = global_state_assignments[2]
+        discord_block_server_header = global_state_assignments[3]
+        discord_block_content_type = global_state_assignments[4]
 
     # V160/V162: restore a post-recovery background quiet even when the active block itself
     # has already been cleared. This prevents a Render restart from immediately replaying
@@ -2859,6 +2901,9 @@ async def restore_persisted_discord_block_state():
             time.monotonic() + post_remaining,
         )
         discord_background_rest_quarantined = True
+        discord_background_recovery_channel_probe_required = True
+        discord_background_recovery_channel_probe_epoch = float(state.get("last_seen_at") or state.get("updated_at") or 0.0)
+        discord_background_recovery_channel_probe_done.clear()
         post_recovery_guard_restored = True
         print(
             f"🛡️ Discord REST post-recovery background guard RESTORED | "
@@ -3051,6 +3096,8 @@ def _record_discord_block_observed(exc: Exception, *, context: str, source: str 
     global discord_block_started_at, discord_block_last_seen_at
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_trigger_context, discord_block_cf_ray, discord_block_via
+    global discord_block_server_header, discord_block_content_type
     global discord_block_temp_restriction
 
     meta = _extract_discord_rate_limit_metadata(exc)
@@ -3085,6 +3132,11 @@ def _record_discord_block_observed(exc: Exception, *, context: str, source: str 
         else:
             discord_block_kind = "RATE_LIMIT"
         discord_block_source = source
+        discord_block_trigger_context = str(context or "")
+        discord_block_cf_ray = str(meta.get("cf_ray") or "")
+        discord_block_via = str(meta.get("via") or "")
+        discord_block_server_header = str(meta.get("server") or "")
+        discord_block_content_type = str(meta.get("content_type") or "")
 
     return meta
 
@@ -3110,6 +3162,8 @@ def _discord_block_diagnostic_line() -> str:
         is_global = discord_block_global
         kind = discord_block_kind or "-"
         source = discord_block_source or "-"
+        trigger_context = discord_block_trigger_context or "-"
+        cf_ray = discord_block_cf_ray or "-"
     if started <= 0:
         return "✅ Discord API restriction: NONE OBSERVED"
     elapsed = max(0.0, now_wall - started)
@@ -3132,7 +3186,8 @@ def _discord_block_diagnostic_line() -> str:
         f"🚨 DISCORD API BLOCK STATUS | kind={kind} | source={source} | scope={scope} | global={is_global} | "
         f"started={datetime.fromtimestamp(started, tz=TZ_THAI).strftime('%d/%m/%Y %H:%M:%S %Z')} | "
         f"elapsed={_format_duration(elapsed)} | {remaining_text} | expiry={expiry_text} | "
-        f"next_probe_in={_format_duration(next_probe_remaining) if next_probe_remaining > 0 else 'READY'} | {certainty}"
+        f"next_probe_in={_format_duration(next_probe_remaining) if next_probe_remaining > 0 else 'READY'} | {certainty} | "
+        f"trigger_context={trigger_context} | cf_ray={cf_ray}"
     )
 
 
@@ -3140,8 +3195,11 @@ def _clear_discord_block_after_success(*, context: str, recovery_probe: bool = F
     global discord_block_started_at, discord_block_last_seen_at
     global discord_block_server_until, discord_block_server_retry_after
     global discord_block_scope, discord_block_global, discord_block_kind, discord_block_source
+    global discord_block_trigger_context, discord_block_cf_ray, discord_block_via
+    global discord_block_server_header, discord_block_content_type
     global discord_block_temp_restriction, discord_block_next_probe_mono, discord_block_recovery_until_mono
     global discord_block_recovery_probe_started_at
+    global discord_background_recovery_channel_probe_required, discord_background_recovery_channel_probe_done
     global discord_background_rest_recovery_quiet_override_seconds
     global discord_user_dm_recovery_suppressed_until
     now_wall = time.time()
@@ -3187,10 +3245,25 @@ def _clear_discord_block_after_success(*, context: str, recovery_probe: bool = F
         discord_block_global = False
         discord_block_kind = ""
         discord_block_source = ""
+        discord_block_trigger_context = ""
+        discord_block_cf_ray = ""
+        discord_block_via = ""
+        discord_block_server_header = ""
+        discord_block_content_type = ""
         discord_block_temp_restriction = False
         discord_block_next_probe_mono = 0.0
         discord_block_recovery_probe_started_at = 0.0
         discord_block_recovery_until_mono = time.monotonic() + discord_background_rest_recovery_grace_seconds
+        # V177: the timer probe confirms the API is reachable, but it is intentionally
+        # not considered proof that a later channel message-create/edit route is healthy.
+        # Require one guarded, read-only channel probe before the first real background
+        # channel write after this restriction epoch.
+        if prior_temp_restriction:
+            discord_background_recovery_channel_probe_required = True
+            discord_background_recovery_channel_probe_done.clear()
+        else:
+            discord_background_recovery_channel_probe_required = False
+            discord_background_recovery_channel_probe_done.clear()
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(
@@ -3600,6 +3673,10 @@ async def guarded_discord_call(
 ):
     """Run a Discord REST call through the central guard.
 
+    V177 adds only a post-recovery channel-readiness layer around background channel
+    writes. The existing central guard, Retry-After handling, single-runtime lease,
+    and no-retry behavior remain authoritative.
+
     V58 background policy:
     - boss/audit/BF/Library/Live REST is non-essential and separately throttled.
     - once Discord reports an API/IP temporary restriction, background REST is quarantined;
@@ -3881,7 +3958,94 @@ async def guarded_discord_call(
                     discord_background_rest_noncritical_call_lock.release()
 
 
+async def _ensure_background_channel_recovery_probe(channel, *, context: str) -> bool:
+    """Perform one read-only channel probe before the first background write after a REST block.
+
+    V177 safety objective:
+    - The existing expired-timer bot-user probe only proves the general API endpoint is reachable.
+    - A later channel message-create/edit call can still be the first real write after recovery.
+    - This helper performs at most one guarded `fetch_channel` probe per channel
+      for the current temporary-restriction recovery epoch.
+    - No probe is attempted while a Discord restriction is active; the central guard decides.
+    """
+    global discord_background_recovery_channel_probe_required
+
+    if not background or SKYNET_RUNTIME_ROLE == "web":
+        return True
+    if not discord_background_recovery_channel_probe_required:
+        return True
+    # Keep user/DM traffic outside this guild-channel recovery layer; the existing DM
+    # worker and interaction webhook protections remain unchanged.
+    if getattr(channel, "guild", None) is None:
+        return True
+    if not hasattr(channel, "id"):
+        return True
+
+    try:
+        channel_id = int(getattr(channel, "id", 0) or 0)
+    except (TypeError, ValueError):
+        channel_id = 0
+    if channel_id <= 0:
+        return True
+
+    async with discord_background_recovery_channel_probe_lock:
+        if not discord_background_recovery_channel_probe_required:
+            return True
+        if channel_id in discord_background_recovery_channel_probe_done:
+            return True
+
+        print(
+            f"🔎 Discord REST post-recovery channel readiness probe | "
+            f"channel_id={channel_id} | context={context} | attempt=1 (read-only)",
+            flush=True,
+        )
+        try:
+            result = await guarded_discord_call(
+                lambda: bot.fetch_channel(channel_id),
+                context=f"rest-recovery-channel-probe:{channel_id}",
+                background=False,
+                recovery_probe=False,
+                wait_for_cooldown=False,
+            )
+        except discord.HTTPException as exc:
+            print(
+                f"⛔ Discord REST post-recovery channel probe failed | "
+                f"channel_id={channel_id} | status={getattr(exc, 'status', None)} | no background write sent",
+                flush=True,
+            )
+            return False
+        except Exception as exc:
+            print(
+                f"⛔ Discord REST post-recovery channel probe failed safely | "
+                f"channel_id={channel_id} | error={exc!r} | no background write sent",
+                flush=True,
+            )
+            return False
+
+        if result is None:
+            print(
+                f"⏭️ Discord REST post-recovery channel probe held | "
+                f"channel_id={channel_id} | no background write sent",
+                flush=True,
+            )
+            return False
+
+        discord_background_recovery_channel_probe_done.add(channel_id)
+        # Once one channel has successfully passed, keep the recovery requirement active
+        # for any other channel. Each channel is probed only once for the same epoch.
+        print(
+            f"✅ Discord REST post-recovery channel readiness confirmed | "
+            f"channel_id={channel_id} | future writes may proceed after normal guard checks",
+            flush=True,
+        )
+        return True
+
+
 async def guarded_channel_send(channel, *, context: str, content=None, embed=None, view=None, background: bool | None = None):
+    if background:
+        ready = await _ensure_background_channel_recovery_probe(channel, context=context)
+        if not ready:
+            return None
     return await guarded_discord_call(
         lambda: channel.send(content=content, embed=embed, view=view),
         context=context,
@@ -3906,6 +4070,12 @@ async def guarded_fetch_message(channel, message_id: int, *, context: str, backg
 
 
 async def guarded_message_edit(message, *, context: str, background: bool | None = None, **kwargs):
+    if background:
+        target_channel = getattr(message, "channel", None)
+        if target_channel is not None:
+            ready = await _ensure_background_channel_recovery_probe(target_channel, context=context)
+            if not ready:
+                return None
     return await guarded_discord_call(
         lambda: message.edit(**kwargs),
         context=context,
