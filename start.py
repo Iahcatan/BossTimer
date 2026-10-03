@@ -1,4 +1,4 @@
-# V179_DISCORD_API_BLOCK_PROBE_SUPPRESSION_RECOVERY_GUARD_FIX_2026-10-03 | BASE=V178_DISCORD_API_BLOCK_RECOVERY_PROBE_SCOPE_FIX_2026-10-03
+# V180_DISCORD_API_BLOCK_NO_AUTO_PROBE_REAL_REQUEST_RECOVERY_2026-10-03 | BASE=V179_DISCORD_API_BLOCK_PROBE_SUPPRESSION_RECOVERY_GUARD_FIX_2026-10-03
 import asyncio
 import discord
 import os
@@ -553,6 +553,9 @@ async def startup_command_sync():
         return
     log("🟢 on_ready received by start.py")
     try:
+        if hasattr(bot_module, "confirm_gateway_recovery_if_pending"):
+            if bot_module.confirm_gateway_recovery_if_pending():
+                log("✅ Discord Gateway authenticated after recovery gate; temporary restriction state cleared without an extra REST probe")
         await sync_commands_once()
     except Exception as exc:
         log(f"❌ startup command sync failed: {exc!r}")
