@@ -1,4 +1,4 @@
-# V188_OWNER_ONLY_CLOUDFLARE_1015_PERSISTENT_RECOVERY_GUARD_2026-10-07 | BASE=V187_WEEKLY_EVENTS_DAY_TIMEZONE_FIX_2026-10-04
+# V189_DISCORD_BLOCK_ROOT_CAUSE_DIAGNOSTICS_GUARD_FIX_2026-10-08 | BASE=V188_OWNER_ONLY_CLOUDFLARE_1015_PERSISTENT_RECOVERY_GUARD_2026-10-07
 import asyncio
 import discord
 import os
@@ -638,6 +638,11 @@ async def main():
     try:
         restored = await bot_module.restore_persisted_discord_block_state()
         if restored:
+            if hasattr(bot_module, "log_persisted_discord_block_diagnostics"):
+                try:
+                    bot_module.log_persisted_discord_block_diagnostics(context="startup:gateway")
+                except Exception as diag_exc:
+                    log(f"⚠️ Persisted Discord block diagnostic log failed safely: {diag_exc!r}")
             await bot_module.wait_for_discord_rest_startup_gate(context="startup:gateway")
             log("🟢 Persisted Discord REST restriction gate cleared for Gateway startup; no early HTTP probe was sent")
     except Exception as exc:
