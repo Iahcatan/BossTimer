@@ -1,4 +1,4 @@
-# V191_REST_BLOCK_GATEWAY_BLOCK_VOICE_CONTINUITY_FIX_2026-10-08 | BASE=V190_DISCORD_RECOVERY_RETRY_AFTER_EXACT_ONE_SHOT_FIX_2026-10-08
+# V192_DISCORD_ROOT_CAUSE_OUTBOUND_IP_TELEMETRY_FIX_2026-10-08 | BASE=V191_REST_BLOCK_GATEWAY_BLOCK_VOICE_CONTINUITY_FIX_2026-10-08
 import asyncio
 import discord
 import os
@@ -556,8 +556,19 @@ async def startup_command_sync():
         # V190: Gateway READY is the first real successful recovery signal. Record it
         # before clearing the temporary restriction so the diagnostic keeps last_success.
         try:
+            if hasattr(bot_module, "initialize_discord_runtime_telemetry"):
+                await bot_module.initialize_discord_runtime_telemetry()
+            if hasattr(bot_module, "log_discord_runtime_identity"):
+                bot_module.log_discord_runtime_identity("gateway:on_ready")
             if hasattr(bot_module, "_record_discord_http_success"):
                 bot_module._record_discord_http_success("gateway:on_ready")
+            if hasattr(bot_module, "_log_discord_http_telemetry"):
+                bot_module._log_discord_http_telemetry(
+                    seq=getattr(bot_module, "discord_http_attempt_sequence", "-"),
+                    status_code="GATEWAY_READY",
+                    context="gateway:on_ready",
+                    background=False,
+                )
         except Exception as success_exc:
             log(f"⚠️ Gateway success telemetry failed safely: {success_exc!r}")
         try:
@@ -631,6 +642,16 @@ async def main():
     log("🔌 กำลังเริ่ม Discord Bot...")
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
+
+    # V192: resolve and log the outbound network identity once before the first
+    # Discord Gateway/REST request. This is a non-Discord diagnostic request and
+    # never acts as a Discord readiness probe.
+    try:
+        if hasattr(bot_module, "initialize_discord_runtime_telemetry"):
+            await bot_module.initialize_discord_runtime_telemetry()
+            bot_module.log_discord_runtime_identity("startup")
+    except Exception as telemetry_exc:
+        log(f"⚠️ Discord outbound telemetry initialization failed safely: {telemetry_exc!r}")
 
     # V153: retain V151 Discord REST recovery-only gating; stale Dashboard Voice-confirmation handling is isolated to bot.py.
     # V149: restore any durable Discord temporary-API restriction BEFORE the first
