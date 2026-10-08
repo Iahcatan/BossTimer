@@ -1,4 +1,4 @@
-# V194_SHARED_EGRESS_IP_DIAGNOSTIC_SAFETY_FIX_2026-10-08 | BASE=V193_LIBRARY_BOSS_DAILY_ROTATION_GATE_INDEPENDENT_FIX_2026-10-08
+# V196_CF1015_SAME_EGRESS_POST_EXPIRY_REBLOCK_PREVENTION_FIX_2026-10-08 | BASE=V195_SHARED_EGRESS_RECOVERY_REBLOCK_PREVENTION_FIX_2026-10-08
 import asyncio
 import discord
 import os
@@ -650,6 +650,12 @@ async def main():
         if hasattr(bot_module, "initialize_discord_runtime_telemetry"):
             await bot_module.initialize_discord_runtime_telemetry()
             bot_module.log_discord_runtime_identity("startup")
+            log(
+                "🛡️ Shared egress recovery guard | "
+                f"mode={getattr(bot_module, 'DISCORD_SHARED_EGRESS_RECOVERY_GUARD', 'unknown')} | "
+                f"peer_bot={getattr(bot_module, 'DISCORD_PEER_BOT_NAME', 'JARVIS')} | "
+                f"peer_outbound_ip={getattr(bot_module, 'DISCORD_PEER_OUTBOUND_IP', '') or 'UNSET'}"
+            )
     except Exception as telemetry_exc:
         log(f"⚠️ Discord outbound telemetry initialization failed safely: {telemetry_exc!r}")
 
