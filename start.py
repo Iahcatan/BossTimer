@@ -1,4 +1,4 @@
-# V196_CF1015_SAME_EGRESS_POST_EXPIRY_REBLOCK_PREVENTION_FIX_2026-10-08 | BASE=V195_SHARED_EGRESS_RECOVERY_REBLOCK_PREVENTION_FIX_2026-10-08
+# V197_CF1015_REGION_AND_SAME_EGRESS_POST_EXPIRY_REBLOCK_PREVENTION_FIX_2026-10-08 | BASE=V195_SHARED_EGRESS_RECOVERY_REBLOCK_PREVENTION_FIX_2026-10-08
 import asyncio
 import discord
 import os
@@ -28,7 +28,7 @@ if SKYNET_RUNTIME_ROLE not in {"web", "bot"}:
 # ============================================================
 # SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
 # ============================================================
-# start.py owns process startup/hand-over control and command synchronization only.
+# start.py owns process startup/hand-over control, region-isolation validation, and command synchronization only.
 # bot.py remains the owner of Firebase, Boss Timer, /kill,
 # /setvoice, /status, TTS, Voice, Dashboard and background tasks.
 
@@ -642,6 +642,30 @@ async def main():
     log("🔌 กำลังเริ่ม Discord Bot...")
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
+
+    # V197: Render does not support changing an existing service region in-place.
+    # The region identity is therefore explicit and used only for recovery safety.
+    # This check sends no Discord request and does not alter any existing bot logic.
+    try:
+        configured_region = str(getattr(bot_module, "DISCORD_TELEMETRY_RENDER_REGION", "UNKNOWN") or "UNKNOWN").strip().lower()
+        peer_region = str(os.environ.get("DISCORD_PEER_RENDER_REGION", "frankfurt") or "UNKNOWN").strip().lower()
+        region_guard = str(os.environ.get("DISCORD_CF1015_REQUIRE_REGION_CHANGE", "block") or "block").strip().lower()
+        log(
+            "🧭 SKYNET REGION ISOLATION CONFIG | "
+            f"SKYNET_RENDER_REGION={configured_region} | DISCORD_PEER_RENDER_REGION={peer_region} | "
+            f"DISCORD_CF1015_REQUIRE_REGION_CHANGE={region_guard} | "
+            "note=region value is operator-configured; egress IP is the network proof"
+        )
+        if region_guard == "block" and configured_region != "unknown" and peer_region != "unknown" and configured_region == peer_region:
+            raise RuntimeError(
+                "SKYNET and the configured peer bot are in the same Render region; "
+                "move SKYNET to a different Render region before starting Discord Gateway. "
+                "Changing JARVIS only does not isolate SKYNET."
+            )
+    except Exception as region_exc:
+        log(f"🚫 SKYNET region-isolation startup guard: {region_exc!r}")
+        if isinstance(region_exc, RuntimeError):
+            raise
 
     # V192: resolve and log the outbound network identity once before the first
     # Discord Gateway/REST request. This is a non-Discord diagnostic request and
