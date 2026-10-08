@@ -1,4 +1,4 @@
-# V197_CF1015_REGION_AND_SAME_EGRESS_POST_EXPIRY_REBLOCK_PREVENTION_FIX_2026-10-08 | BASE=V195_SHARED_EGRESS_RECOVERY_REBLOCK_PREVENTION_FIX_2026-10-08
+# V199_CF1015_LEGACY_ORIGIN_RESTORE_FIX_AND_VERSION_GUARD_2026-10-09 | BASE=V196_CF1015_SAME_EGRESS_POST_EXPIRY_REBLOCK_PREVENTION_FIX_2026-10-08
 import asyncio
 import discord
 import os
@@ -21,6 +21,15 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
+EXPECTED_BOT_PATCH_PREFIX = "V199_CF1015_LEGACY_ORIGIN_RESTORE_FIX_AND_VERSION_GUARD_2026-10-09"
+ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
+if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
+    raise RuntimeError(
+        "STARTUP VERSION GUARD FAILED: start.py requires "
+        f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace both files from the same V199 package."
+    )
+
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
 if SKYNET_RUNTIME_ROLE not in {"web", "bot"}:
     raise RuntimeError("SKYNET_RUNTIME_ROLE must be exactly 'web' or 'bot'")
@@ -28,7 +37,7 @@ if SKYNET_RUNTIME_ROLE not in {"web", "bot"}:
 # ============================================================
 # SKYNET STARTUP / DISCORD COMMAND BOOTSTRAP
 # ============================================================
-# start.py owns process startup/hand-over control, region-isolation validation, and command synchronization only.
+# start.py owns process startup/hand-over control and command synchronization only.
 # bot.py remains the owner of Firebase, Boss Timer, /kill,
 # /setvoice, /status, TTS, Voice, Dashboard and background tasks.
 
@@ -642,30 +651,12 @@ async def main():
     log("🔌 กำลังเริ่ม Discord Bot...")
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
-
-    # V197: Render does not support changing an existing service region in-place.
-    # The region identity is therefore explicit and used only for recovery safety.
-    # This check sends no Discord request and does not alter any existing bot logic.
-    try:
-        configured_region = str(getattr(bot_module, "DISCORD_TELEMETRY_RENDER_REGION", "UNKNOWN") or "UNKNOWN").strip().lower()
-        peer_region = str(os.environ.get("DISCORD_PEER_RENDER_REGION", "frankfurt") or "UNKNOWN").strip().lower()
-        region_guard = str(os.environ.get("DISCORD_CF1015_REQUIRE_REGION_CHANGE", "block") or "block").strip().lower()
-        log(
-            "🧭 SKYNET REGION ISOLATION CONFIG | "
-            f"SKYNET_RENDER_REGION={configured_region} | DISCORD_PEER_RENDER_REGION={peer_region} | "
-            f"DISCORD_CF1015_REQUIRE_REGION_CHANGE={region_guard} | "
-            "note=region value is operator-configured; egress IP is the network proof"
-        )
-        if region_guard == "block" and configured_region != "unknown" and peer_region != "unknown" and configured_region == peer_region:
-            raise RuntimeError(
-                "SKYNET and the configured peer bot are in the same Render region; "
-                "move SKYNET to a different Render region before starting Discord Gateway. "
-                "Changing JARVIS only does not isolate SKYNET."
-            )
-    except Exception as region_exc:
-        log(f"🚫 SKYNET region-isolation startup guard: {region_exc!r}")
-        if isinstance(region_exc, RuntimeError):
-            raise
+    legacy_ip = str(getattr(bot_module, "DISCORD_CF1015_LEGACY_BLOCKED_IP", "") or "").strip()
+    log(
+        "🧭 CF1015 legacy origin evidence | "
+        f"operator_configured_ip={legacy_ip or 'UNSET'} | "
+        "action=never_infer_current_runtime_ip_as_legacy_origin"
+    )
 
     # V192: resolve and log the outbound network identity once before the first
     # Discord Gateway/REST request. This is a non-Discord diagnostic request and
