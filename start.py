@@ -1,4 +1,4 @@
-# V190_DISCORD_RECOVERY_RETRY_AFTER_EXACT_ONE_SHOT_FIX_2026-10-08 | BASE=V188_OWNER_ONLY_CLOUDFLARE_1015_PERSISTENT_RECOVERY_GUARD_2026-10-07
+# V191_REST_BLOCK_GATEWAY_BLOCK_VOICE_CONTINUITY_FIX_2026-10-08 | BASE=V190_DISCORD_RECOVERY_RETRY_AFTER_EXACT_ONE_SHOT_FIX_2026-10-08
 import asyncio
 import discord
 import os
@@ -656,8 +656,8 @@ async def main():
                     bot_module.log_persisted_discord_block_diagnostics(context="startup:gateway")
                 except Exception as diag_exc:
                     log(f"⚠️ Persisted Discord block diagnostic log failed safely: {diag_exc!r}")
-            await bot_module.wait_for_discord_rest_startup_gate(context="startup:gateway")
-            log("🟢 Persisted Discord REST restriction gate cleared for Gateway startup; no early HTTP probe was sent")
+            await bot_module.wait_for_discord_gateway_startup_gate(context="startup:gateway")
+            log("🟢 Discord Gateway startup gate evaluated; REST restriction remains isolated and separately guarded; no early HTTP probe was sent")
     except Exception as exc:
         # Preserve the existing startup path if persistence is temporarily unavailable.
         # A real Discord 429 is still handled by bot.py and persisted for the next retry.
