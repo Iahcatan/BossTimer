@@ -1,4 +1,4 @@
-# V192_DISCORD_ROOT_CAUSE_OUTBOUND_IP_TELEMETRY_FIX_2026-10-08 | BASE=V191_REST_BLOCK_GATEWAY_BLOCK_VOICE_CONTINUITY_FIX_2026-10-08
+# V193_LIBRARY_BOSS_DAILY_ROTATION_GATE_INDEPENDENT_FIX_2026-10-08 | BASE=V192_DISCORD_ROOT_CAUSE_OUTBOUND_IP_TELEMETRY_FIX_2026-10-08
 import asyncio
 import discord
 import os
@@ -665,6 +665,23 @@ async def main():
     except Exception as exc:
         log(f"⚠️ SQLite startup schema initialization failed safely: {exc!r}")
 
+    # V193: Library Boss daily schedule rotation must not depend on Discord Gateway
+    # readiness. When Gateway is temporarily blocked, Firebase/Dashboard can still
+    # be alive, so the fixed 09:00/21:00 rows must continue advancing to the next
+    # calendar occurrence. Start the existing 30-second rotation loop before any
+    # Gateway recovery gate, and perform one immediate reconciliation. This sends
+    # no Discord request and does not change the existing Boss/Voice/TTS logic.
+    try:
+        if hasattr(bot_module, "library_boss_daily_rotation_loop"):
+            if not bot_module.library_boss_daily_rotation_loop.is_running():
+                bot_module.library_boss_daily_rotation_loop.start()
+                log("📚 Library Boss daily rotation scheduler STARTED independently of Gateway")
+            if hasattr(bot_module, "ensure_library_boss_schedule_records"):
+                await bot_module.ensure_library_boss_schedule_records()
+                log("📚 Library Boss startup reconciliation COMPLETE | Gateway-independent")
+    except Exception as exc:
+        log(f"⚠️ Library Boss Gateway-independent startup reconciliation failed safely: {exc!r}")
+
     # Gateway request. The previous flow restored this state only inside on_ready(),
     # which is too late: a new Render process could hit Discord Gateway first and
     # receive another 429 during an already-active server restriction. This restore
@@ -717,6 +734,12 @@ async def main():
         raise
     finally:
         gateway_shutdown_event.set()
+        try:
+            if hasattr(bot_module, "library_boss_daily_rotation_loop") and bot_module.library_boss_daily_rotation_loop.is_running():
+                bot_module.library_boss_daily_rotation_loop.cancel()
+                log("📚 Library Boss daily rotation scheduler STOPPED | reason=runtime-exit")
+        except Exception as exc:
+            log(f"⚠️ Library Boss rotation scheduler shutdown skipped safely: {exc!r}")
         if lease_worker_task is not None and not lease_worker_task.done():
             lease_worker_task.cancel()
             await asyncio.gather(lease_worker_task, return_exceptions=True)
