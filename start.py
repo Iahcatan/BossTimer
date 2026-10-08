@@ -1,4 +1,4 @@
-# V199_CF1015_LEGACY_ORIGIN_RESTORE_FIX_AND_VERSION_GUARD_2026-10-09 | BASE=V196_CF1015_SAME_EGRESS_POST_EXPIRY_REBLOCK_PREVENTION_FIX_2026-10-08
+# V200_CF1015_MIGRATED_EGRESS_PERSISTED_BLOCK_RESET_FIX_2026-10-09 | BASE=V196_CF1015_SAME_EGRESS_POST_EXPIRY_REBLOCK_PREVENTION_FIX_2026-10-08
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V199_CF1015_LEGACY_ORIGIN_RESTORE_FIX_AND_VERSION_GUARD_2026-10-09"
+EXPECTED_BOT_PATCH_PREFIX = "V200_CF1015_MIGRATED_EGRESS_PERSISTED_BLOCK_RESET_FIX_2026-10-09"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace both files from the same V199 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V200 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
@@ -651,11 +651,11 @@ async def main():
     log("🔌 กำลังเริ่ม Discord Bot...")
     log("🛡️ Bot runtime: Discord Gateway/REST ENABLED on external runtime")
     log("🛡️ Gateway startup is gated by Firebase handover lease; no Discord request is sent while another runtime owns it")
-    legacy_ip = str(getattr(bot_module, "DISCORD_CF1015_LEGACY_BLOCKED_IP", "") or "").strip()
     log(
-        "🧭 CF1015 legacy origin evidence | "
-        f"operator_configured_ip={legacy_ip or 'UNSET'} | "
-        "action=never_infer_current_runtime_ip_as_legacy_origin"
+        "🧭 SKYNET CF1015 MIGRATION GUARD | "
+        f"render_region={os.environ.get('SKYNET_RENDER_REGION') or os.environ.get('RENDER_REGION') or 'UNKNOWN'} | "
+        f"legacy_blocked_ip={getattr(bot_module, 'DISCORD_CF1015_LEGACY_BLOCKED_IP', '') or 'UNSET'} | "
+        "action=old-persisted-gateway-block-may-be-cleared-only-after-verified-egress-change"
     )
 
     # V192: resolve and log the outbound network identity once before the first
