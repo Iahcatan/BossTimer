@@ -1,4 +1,4 @@
-# V189_DISCORD_BLOCK_ROOT_CAUSE_DIAGNOSTICS_GUARD_FIX_2026-10-08 | BASE=V188_OWNER_ONLY_CLOUDFLARE_1015_PERSISTENT_RECOVERY_GUARD_2026-10-07
+# V190_DISCORD_RECOVERY_RETRY_AFTER_EXACT_ONE_SHOT_FIX_2026-10-08 | BASE=V188_OWNER_ONLY_CLOUDFLARE_1015_PERSISTENT_RECOVERY_GUARD_2026-10-07
 import asyncio
 import discord
 import os
@@ -553,6 +553,19 @@ async def startup_command_sync():
         return
     log("🟢 on_ready received by start.py")
     try:
+        # V190: Gateway READY is the first real successful recovery signal. Record it
+        # before clearing the temporary restriction so the diagnostic keeps last_success.
+        try:
+            if hasattr(bot_module, "_record_discord_http_success"):
+                bot_module._record_discord_http_success("gateway:on_ready")
+        except Exception as success_exc:
+            log(f"⚠️ Gateway success telemetry failed safely: {success_exc!r}")
+        try:
+            pending_recovery = bool(getattr(bot_module, "discord_gateway_recovery_pending", False))
+            if pending_recovery and hasattr(bot_module, "log_discord_recovery_state"):
+                bot_module.log_discord_recovery_state(state="DISCORD_OPEN_RECOVERED", context="gateway:on_ready")
+        except Exception as state_exc:
+            log(f"⚠️ Discord recovery-state success log failed safely: {state_exc!r}")
         if hasattr(bot_module, "confirm_gateway_recovery_if_pending"):
             if bot_module.confirm_gateway_recovery_if_pending():
                 log("✅ Discord Gateway authenticated after recovery gate; temporary restriction state cleared without an extra REST probe")
