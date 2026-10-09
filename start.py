@@ -1,4 +1,4 @@
-# V201_DASHBOARD_ORIGIN_MIGRATION_FIX_2026-10-09 | BASE=V200_CF1015_MIGRATED_EGRESS_PERSISTED_BLOCK_RESET_FIX_2026-10-09
+# V202_WEBPUSH_WORKER_ORIGIN_AND_ROOT_HEALTH_FIX_2026-10-09 | BASE=V201_DASHBOARD_ORIGIN_MIGRATION_FIX_2026-10-09
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V201_DASHBOARD_ORIGIN_MIGRATION_FIX_2026-10-09"
+EXPECTED_BOT_PATCH_PREFIX = "V202_WEBPUSH_WORKER_ORIGIN_AND_ROOT_HEALTH_FIX_2026-10-09"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V201 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V202 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
