@@ -81,7 +81,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V208_AZURE_SHARED_FEMALE_TTS_AUDIO_QUALITY_FIX_2026-10-13 | BASE=V207_UNIFIED_FEMALE_MULTILINGUAL_TTS_FIX_2026-10-13"
+NOTICE_BF_PATCH_VERSION = "V209_EDGE_TTS_403_CIRCUIT_BREAKER_BF_PREWARM_DEDUP_FIX_2026-10-13 | BASE=V208_AZURE_SHARED_FEMALE_TTS_AUDIO_QUALITY_FIX_2026-10-13"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -5493,6 +5493,8 @@ BF_TTS_PREWARM_LEAD_SECONDS = max(
 )
 bf_tts_prewarm_cache = {}
 bf_tts_prewarm_tasks = {}
+# V209: a completed-but-empty prewarm must not be relaunched on each 0.2s loop tick.
+bf_tts_prewarm_attempted = set()
 
 # Serialize manual /notice commands to avoid bursty Discord API traffic.
 NOTICE_COMMAND_LOCK = asyncio.Lock()
@@ -5500,25 +5502,26 @@ NOTICE_LAST_RUN_TS = 0.0
 last_lib_notified_key = ""
 
 cached_live_message = None
-# V208: prefer Azure Speech's supported female multilingual neural voice when
-# credentials are configured. One model is used for TH/EN/KO with identical
-# prosody; Edge TTS and gTTS remain bounded fallback providers.
-TTS_AZURE_SHARED_FEMALE_VOICE = "en-US-AvaMultilingualNeural"
-TTS_AZURE_LANGUAGE_TAGS = {"th": "th-TH", "en": "en-US", "ko": "ko-KR"}
-TTS_SHARED_RATE = "0%"
-TTS_SHARED_PITCH = "0%"
+# V209: Edge TTS is the primary provider. Use a native female Neural voice for
+# each language and identical rate/pitch parameters. gTTS is the bounded backup.
+# gTTS itself has no speaker-gender or voice-identity setting, so its backup output
+# cannot be guaranteed to have identical speaker identity across languages.
+VOICE_THAI = "th-TH-PremwadeeNeural"
+VOICE_ENG = "en-US-AriaNeural"
+VOICE_KOR = "ko-KR-SunHiNeural"
+TTS_SHARED_RATE = "+0%"
+TTS_SHARED_PITCH = "+0Hz"
 
-# Keep the prior Edge voice as compatibility fallback. The same IDs/prosody are
-# passed on every retry; the fallback is not falsely logged as Azure success.
-VOICE_SHARED_FEMALE = "en-US-JennyMultilingualV2Neural"
-VOICE_THAI = VOICE_SHARED_FEMALE
-VOICE_ENG = VOICE_SHARED_FEMALE
-VOICE_KOR = VOICE_SHARED_FEMALE
+# Circuit breaker: one Edge HTTP 403 opens a process-wide cooldown so the bot does
+# not immediately repeat a known provider/handshake denial for each language or tick.
+try:
+    EDGE_TTS_403_COOLDOWN_SECONDS = max(300, int(os.environ.get("EDGE_TTS_403_COOLDOWN_SECONDS", "900")))
+except (TypeError, ValueError):
+    EDGE_TTS_403_COOLDOWN_SECONDS = 900
+EDGE_TTS_403_BLOCKED_UNTIL = 0.0
+EDGE_TTS_403_TOTAL = 0
+EDGE_TTS_REQUEST_LOCK = asyncio.Lock()
 
-# V207's +3 semitone processing made provider-default gTTS sound metallic and
-# did not make the three language voices the same speaker. V208 disables pitch
-# shifting and only applies matching loudness/sample-rate/tail processing.
-TTS_FALLBACK_PITCH_SEMITONES = 0.0
 
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
@@ -8028,63 +8031,6 @@ def _normalize_tts_audio_sync(filename: str):
         return False
 
 
-def _azure_speech_generate_sync(text: str, lang: str, filename: str):
-    """Synthesize one language through the same Azure multilingual female voice.
-
-    Requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION. The Azure endpoint is
-    called with one voice ID, an explicit language tag, and identical rate/pitch
-    settings for TH/EN/KO. urllib is used to avoid adding another dependency.
-    """
-    from xml.sax.saxutils import escape as xml_escape
-
-    key = str(os.environ.get("AZURE_SPEECH_KEY", "")).strip()
-    region = str(os.environ.get("AZURE_SPEECH_REGION", "")).strip().lower()
-    if not key or not region:
-        raise RuntimeError("Azure Speech not configured; set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION")
-    if not re.fullmatch(r"[a-z0-9-]+", region):
-        raise RuntimeError("AZURE_SPEECH_REGION must be the short Azure region name, not a URL")
-    locale = TTS_AZURE_LANGUAGE_TAGS.get(str(lang).lower())
-    if not locale:
-        raise RuntimeError(f"Unsupported Azure TTS language: {lang}")
-
-    safe_text = xml_escape(str(text or "").strip())
-    if not safe_text:
-        raise RuntimeError("TTS input text is empty")
-    ssml = (
-        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
-        f'<voice name="{TTS_AZURE_SHARED_FEMALE_VOICE}">'
-        f'<lang xml:lang="{locale}">'
-        f'<prosody rate="{TTS_SHARED_RATE}" pitch="{TTS_SHARED_PITCH}">{safe_text}</prosody>'
-        '</lang></voice></speak>'
-    )
-    endpoint = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
-    request = UrlRequest(
-        endpoint,
-        data=ssml.encode("utf-8"),
-        headers={
-            "Ocp-Apim-Subscription-Key": key,
-            "Content-Type": "application/ssml+xml",
-            "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
-            "User-Agent": "SKYNET-BossTimer-V208",
-        },
-        method="POST",
-    )
-    try:
-        with urlopen(request, timeout=22) as response:
-            audio_data = response.read()
-            status = getattr(response, "status", 200)
-    except HTTPError as exc:
-        try:
-            detail = exc.read(500).decode("utf-8", errors="replace")
-        except Exception:
-            detail = ""
-        raise RuntimeError(f"Azure Speech HTTP {exc.code}: {detail[:160]}") from exc
-    if status != 200 or not audio_data or len(audio_data) <= 256:
-        raise RuntimeError(f"Azure Speech returned no playable audio (HTTP {status})")
-    with open(filename, "wb") as output:
-        output.write(audio_data)
-
-
 def _tts_prepare_sentence(text):
     """Preserve the announcement wording and give TTS a clear sentence ending."""
     prepared = str(text or "").strip()
@@ -8094,39 +8040,104 @@ def _tts_prepare_sentence(text):
 
 
 def _save_gtts_fallback_sync(text: str, lang: str, filename: str):
-    """Bounded emergency fallback; keep original pitch and standardize audio only.
+    """Create one bounded gTTS backup file, then normalize audio only.
 
-    gTTS has no gender or shared-speaker control, so this fallback does not promise
-    identical vocal identity. Azure Speech is the path that fulfills that requirement.
+    gTTS exposes no voice-gender or shared-speaker control. The primary Edge voices
+    are explicitly female; the backup is logged honestly as provider-default voice.
     """
     from gtts import gTTS
 
     # This helper runs in a worker thread, not on Discord's async event loop.
-    gTTS(text=text, lang=lang, timeout=(5, 15), lang_check=False).save(filename)
+    gTTS(text=text, lang=lang, slow=False, timeout=(5, 15), lang_check=False).save(filename)
     if not os.path.isfile(filename) or os.path.getsize(filename) <= 256:
         raise RuntimeError("gTTS fallback returned no playable audio")
     _normalize_tts_audio_sync(filename)
 
 
-async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
-    """Generate TH/EN/KO tracks with a single multilingual female speaker when possible.
+def _edge_tts_installed_version():
+    try:
+        from importlib.metadata import version
+        return version("edge-tts")
+    except Exception:
+        return str(getattr(edge_tts, "__version__", "unknown"))
 
-    Azure Speech is primary when AZURE_SPEECH_KEY and AZURE_SPEECH_REGION are set;
-    the same en-US-AvaMultilingualNeural voice, language tag, rate, and pitch are used
-    for all enabled tracks. Edge TTS and bounded gTTS remain recovery paths. All files
-    receive matching loudness/sample-rate processing and a short ending pad, without
-    pitch shifting. gTTS is explicitly not treated as same-speaker output.
+
+def _edge_tts_403_cooldown_remaining():
+    return max(0.0, float(EDGE_TTS_403_BLOCKED_UNTIL) - time.monotonic())
+
+
+def _edge_tts_403_diagnosis(exc):
+    """Explain likely causes without claiming that a log alone proves one cause."""
+    message = str(exc or "")
+    if "WSServerHandshakeError" in type(exc).__name__ or "Invalid response status" in message:
+        return (
+            "Microsoft Edge Read Aloud rejected the WebSocket handshake before audio was generated. "
+            "When TH/EN/KO all fail, a provider-side handshake/policy change, temporary endpoint block, "
+            "or Render outbound-IP/provider restriction is more likely than one bad voice/text. "
+            "The exception cannot distinguish those causes by itself; this is separate from Discord HTTP 429."
+        )
+    return (
+        "The Edge TTS endpoint returned HTTP 403 (access denied). Possible causes include an upstream "
+        "service/policy change, temporary service restriction, or outbound-IP/provider filtering. "
+        "The response alone does not identify the exact cause; it is separate from Discord HTTP 429."
+    )
+
+
+def _record_edge_tts_403(lang, voice, exc):
+    global EDGE_TTS_403_BLOCKED_UNTIL, EDGE_TTS_403_TOTAL
+    EDGE_TTS_403_TOTAL += 1
+    EDGE_TTS_403_BLOCKED_UNTIL = max(
+        EDGE_TTS_403_BLOCKED_UNTIL,
+        time.monotonic() + EDGE_TTS_403_COOLDOWN_SECONDS,
+    )
+    print(
+        f"🚫 EDGE TTS HTTP 403 | lang={lang} | voice={voice} | "
+        f"package_version={_edge_tts_installed_version()} | consecutive_403_count={EDGE_TTS_403_TOTAL}",
+        flush=True,
+    )
+    print(f"🧭 EDGE TTS 403 DIAGNOSIS | {_edge_tts_403_diagnosis(exc)}", flush=True)
+    print(
+        f"🛡️ EDGE TTS CIRCUIT OPEN | cooldown={EDGE_TTS_403_COOLDOWN_SECONDS}s | "
+        "stop further Edge requests during cooldown; switch to one gTTS backup per enabled language",
+        flush=True,
+    )
+
+
+async def _edge_tts_save_guarded(text, voice, rate, pitch, filename, lang):
+    """Run Edge TTS under a single-flight lock and process-wide 403 circuit breaker."""
+    async with EDGE_TTS_REQUEST_LOCK:
+        remaining = _edge_tts_403_cooldown_remaining()
+        if remaining > 0:
+            return False, RuntimeError(f"EDGE_TTS_CIRCUIT_OPEN: retry suppressed for {remaining:.0f}s")
+        try:
+            communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
+            await asyncio.wait_for(communicator.save(filename), timeout=35.0)
+        except Exception as exc:
+            if _tts_http_status(exc) == 403:
+                _record_edge_tts_403(lang, voice, exc)
+            return False, exc
+
+    if not os.path.isfile(filename) or os.path.getsize(filename) <= 256:
+        return False, RuntimeError("No audio was received")
+    return True, None
+
+
+async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
+    """Generate the enabled TH/EN/KO tracks using Edge TTS first and gTTS backup.
+
+    The three primary voices are female, language-native Neural voices with identical
+    rate/pitch parameters. A 403 opens a process-wide circuit breaker immediately so
+    the bot does not send three denied handshakes (or hammer the provider every tick).
+    All generated files receive the same loudness/sample-rate/tail processing.
     """
     await refresh_tts_settings_from_firebase()
     actual = []
-    # Keep language enable switches/texts independent, but use the same female
-    # multilingual speaker and the same prosody values for every generated track.
     if tts_th_enabled and text_th:
-        actual.append(("th", _tts_prepare_sentence(text_th), VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
+        actual.append(("th", _tts_prepare_sentence(text_th), VOICE_THAI, TTS_SHARED_RATE, TTS_SHARED_PITCH))
     if tts_en_enabled and text_en:
-        actual.append(("en", _tts_prepare_sentence(text_en), VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
+        actual.append(("en", _tts_prepare_sentence(text_en), VOICE_ENG, TTS_SHARED_RATE, TTS_SHARED_PITCH))
     if tts_ko_enabled and text_ko:
-        actual.append(("ko", _tts_prepare_sentence(text_ko), VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
+        actual.append(("ko", _tts_prepare_sentence(text_ko), VOICE_KOR, TTS_SHARED_RATE, TTS_SHARED_PITCH))
 
     tts_voice_fallbacks = {
         "th": ["th-TH-AcharaNeural"],
@@ -8135,178 +8146,163 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
     }
 
     files = []
-    azure_key_set = bool(str(os.environ.get("AZURE_SPEECH_KEY", "")).strip())
-    azure_region_set = bool(str(os.environ.get("AZURE_SPEECH_REGION", "")).strip())
-    azure_configured = azure_key_set and azure_region_set
     if actual:
         print(
-            f"🎙️ TTS voice plan | tracks={','.join(item[0] for item in actual)} | "
-            f"shared_multilingual_voice={TTS_AZURE_SHARED_FEMALE_VOICE} | "
-            f"azure_configured={azure_configured} | rate={TTS_SHARED_RATE} | "
-            f"pitch={TTS_SHARED_PITCH} | pitch_shift=off",
+            f"🎙️ TTS provider plan | primary=Edge TTS | tracks={','.join(item[0] for item in actual)} | "
+            f"female_voices=TH:{VOICE_THAI},EN:{VOICE_ENG},KO:{VOICE_KOR} | "
+            f"rate={TTS_SHARED_RATE} | pitch={TTS_SHARED_PITCH} | backup=gTTS | "
+            f"edge_tts_version={_edge_tts_installed_version()} | "
+            f"403_cooldown={EDGE_TTS_403_COOLDOWN_SECONDS}s",
             flush=True,
         )
-        if not azure_configured:
+        remaining = _edge_tts_403_cooldown_remaining()
+        if remaining > 0:
             print(
-                "⚠️ AZURE_SPEECH_KEY/REGION not configured; if Edge TTS returns HTTP 403, "
-                "gTTS backup will play but cannot guarantee one identical speaker across languages",
+                f"🛡️ EDGE TTS 403 PROTECTION ACTIVE | remaining={remaining:.0f}s | "
+                "skip provider requests; use gTTS backup for this generation",
                 flush=True,
             )
+
     uid = uuid.uuid4().hex
     for lang, text, voice, rate, pitch in actual:
         filename = f"temp_tts_{lang}_{guild_id}_{uid}.mp3"
         success = False
         last_error = None
-        edge_provider_denied = False
+        edge_403_or_blocked = False
 
-        # V208 primary: Azure Speech uses a single female multilingual voice model
-        # with language tags so Thai, English, and Korean keep the same speaker and
-        # identical rate/pitch settings. If it is not configured or fails, retain
-        # the existing Edge/gTTS recovery path so announcements are not lost.
-        if azure_configured:
+        # Primary provider: Edge TTS. Non-403 failures get bounded retries; 403 never does.
+        for attempt in range(1, 4):
+            if _edge_tts_403_cooldown_remaining() > 0:
+                edge_403_or_blocked = True
+                if attempt == 1:
+                    print(
+                        f"⏭️ EDGE TTS REQUEST SUPPRESSED | lang={lang} | reason=403-circuit-open | "
+                        f"remaining={_edge_tts_403_cooldown_remaining():.0f}s",
+                        flush=True,
+                    )
+                break
             try:
                 if os.path.exists(filename):
                     os.remove(filename)
-                print(
-                    f"☁️ Azure Speech TTS attempt | lang={lang} | "
-                    f"voice={TTS_AZURE_SHARED_FEMALE_VOICE} | rate={TTS_SHARED_RATE} | "
-                    f"pitch={TTS_SHARED_PITCH} | chars={len(str(text))}",
-                    flush=True,
-                )
-                await asyncio.wait_for(
-                    asyncio.to_thread(_azure_speech_generate_sync, text, lang, filename),
-                    timeout=28.0,
-                )
-                if not os.path.isfile(filename) or os.path.getsize(filename) <= 256:
-                    raise RuntimeError("Azure Speech returned no playable audio")
+            except OSError:
+                pass
+            edge_ok, edge_error = await _edge_tts_save_guarded(
+                text, voice, rate, pitch, filename, lang
+            )
+            if edge_ok:
                 await asyncio.to_thread(_normalize_tts_audio_sync, filename)
                 files.append((lang, filename))
                 success = True
                 print(
-                    f"✅ TTS succeeded | provider=Azure Speech | lang={lang} | "
-                    f"voice={TTS_AZURE_SHARED_FEMALE_VOICE} | rate={TTS_SHARED_RATE} | "
-                    f"pitch={TTS_SHARED_PITCH} | speaker=shared-multilingual-female",
+                    f"✅ TTS succeeded | provider=Edge TTS | lang={lang} | voice={voice} | "
+                    f"rate={rate} | pitch={pitch} | attempt={attempt} | gender=female",
                     flush=True,
                 )
-            except Exception as e:
-                last_error = e
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except OSError:
-                    pass
-                print(
-                    f"⚠️ Azure Speech TTS failed | lang={lang} | "
-                    f"error={type(e).__name__}: {str(e)[:220]} | trying existing fallback providers",
-                    flush=True,
-                )
-            if success:
-                continue
+                break
 
-        # Keep the configured voice and existing bounded retries unless Edge returns
-        # HTTP 403. That status is a connection-level rejection, not a voice-specific
-        # error, so stop repeating it and move to the single backup attempt.
-        for attempt in range(1, 4):
-            try:
-                if os.path.exists(filename):
-                    os.remove(filename)
-                communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-                await communicator.save(filename)
-                if os.path.exists(filename) and os.path.getsize(filename) > 256:
-                    await asyncio.to_thread(_normalize_tts_audio_sync, filename)
-                    files.append((lang, filename))
-                    print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id}) voice={voice} rate={rate} pitch={pitch} attempt={attempt}", flush=True)
-                    success = True
-                    break
-                last_error = RuntimeError("No audio was received")
-            except Exception as e:
-                last_error = e
-                status = _tts_http_status(e)
-                if status == 403:
-                    edge_provider_denied = True
-                    print(
-                        f"🚫 Edge TTS provider denied HTTP 403 | lang={lang} | voice={voice} | "
-                        "skip repeated Edge requests and try one bounded backup provider",
-                        flush=True,
-                    )
-                    break
-                # Do not print the full WebSocket URL/query string for provider errors.
-                print(
-                    f"⚠️ TTS attempt {attempt}/3 failed ({lang}) voice={voice}: "
-                    f"{type(e).__name__}: {str(e)[:240]}",
-                    flush=True,
-                )
-                if attempt < 3:
-                    await asyncio.sleep(0.8 * attempt)
+            last_error = edge_error
+            if _tts_http_status(edge_error) == 403:
+                edge_403_or_blocked = True
+                # The diagnosis and cooldown are logged by _record_edge_tts_403().
+                break
+            if str(edge_error).startswith("EDGE_TTS_CIRCUIT_OPEN:"):
+                edge_403_or_blocked = True
+                break
+
+            print(
+                f"⚠️ Edge TTS attempt {attempt}/3 failed | lang={lang} | voice={voice} | "
+                f"error={type(edge_error).__name__}: {str(edge_error)[:200]}",
+                flush=True,
+            )
+            if attempt < 3:
+                await asyncio.sleep(0.8 * attempt)
 
         if success:
             continue
 
-        if edge_provider_denied:
+        # If the endpoint simply returned no audio (not a 403), try one alternate
+        # native female voice for that language before the general backup provider.
+        if (not edge_403_or_blocked) and last_error and (
+            "No audio was received" in str(last_error)
+            or last_error.__class__.__name__ == "NoAudioReceived"
+        ):
+            for fallback_voice in tts_voice_fallbacks.get(lang, []):
+                try:
+                    if _edge_tts_403_cooldown_remaining() > 0:
+                        edge_403_or_blocked = True
+                        break
+                    print(
+                        f"🔁 Edge TTS female fallback voice | lang={lang} | "
+                        f"primary={voice} | fallback={fallback_voice}",
+                        flush=True,
+                    )
+                    await asyncio.sleep(0.5)
+                    edge_ok, edge_error = await _edge_tts_save_guarded(
+                        text, fallback_voice, rate, pitch, filename, lang
+                    )
+                    if edge_ok:
+                        await asyncio.to_thread(_normalize_tts_audio_sync, filename)
+                        files.append((lang, filename))
+                        success = True
+                        print(
+                            f"✅ TTS succeeded | provider=Edge TTS | lang={lang} | "
+                            f"voice={fallback_voice} | rate={rate} | pitch={pitch} | gender=female",
+                            flush=True,
+                        )
+                        break
+                    last_error = edge_error
+                    if _tts_http_status(edge_error) == 403 or str(edge_error).startswith("EDGE_TTS_CIRCUIT_OPEN:"):
+                        edge_403_or_blocked = True
+                        break
+                except Exception as exc:
+                    last_error = exc
+                    print(
+                        f"⚠️ Edge TTS female fallback failed | lang={lang} | "
+                        f"error={type(exc).__name__}: {str(exc)[:180]}",
+                        flush=True,
+                    )
+        if success:
+            continue
+
+        # One gTTS backup attempt for any remaining Edge failure, including 403.
+        reason = "edge-http-403-or-circuit-open" if edge_403_or_blocked else "edge-primary-failed"
+        try:
+            if os.path.exists(filename):
+                os.remove(filename)
+            print(
+                f"🔁 TTS backup attempt | provider=gTTS | lang={lang} | reason={reason} | "
+                "slow=False | audio_normalization=enabled",
+                flush=True,
+            )
+            await asyncio.wait_for(
+                asyncio.to_thread(_save_gtts_fallback_sync, text, lang, filename),
+                timeout=25.0,
+            )
+            files.append((lang, filename))
+            success = True
+            print(
+                f"✅ TTS backup succeeded | provider=gTTS | lang={lang} | guild={guild_id} | "
+                "speaker_identity=provider-default; gender/rate controls unavailable in gTTS",
+                flush=True,
+            )
+        except Exception as exc:
+            last_error = exc
             try:
                 if os.path.exists(filename):
                     os.remove(filename)
-                print(
-                    f"🔁 TTS backup attempt | provider=gTTS | lang={lang} | reason=edge-http-403 | "
-                    "pitch_shift=off; audio_normalization=enabled",
-                    flush=True,
-                )
-                await asyncio.wait_for(
-                    asyncio.to_thread(_save_gtts_fallback_sync, text, lang, filename),
-                    timeout=25.0,
-                )
-                files.append((lang, filename))
-                success = True
-                print(
-                    f"✅ TTS backup succeeded | provider=gTTS | lang={lang} | guild={guild_id} | "
-                    "speaker_identity=provider-default; pitch_shift=off; volume-normalization=best-effort",
-                    flush=True,
-                )
-            except Exception as e:
-                last_error = e
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                except OSError:
-                    pass
-                print(
-                    f"❌ TTS backup failed | provider=gTTS | lang={lang} | "
-                    f"error={type(e).__name__}: {str(e)[:240]}",
-                    flush=True,
-                )
-            if not success:
-                print(f"❌ TTS unavailable for language={lang}; no audio file will be played", flush=True)
-            continue
-
-        # Existing Edge voice fallback remains limited to NoAudioReceived, not a
-        # 403 handshake denial. This avoids multiplying requests to a denied endpoint.
-        error_text = str(last_error or "")
-        no_audio_failure = bool(last_error) and (
-            "No audio was received" in error_text
-            or last_error.__class__.__name__ == "NoAudioReceived"
-        )
-        if no_audio_failure:
-            for fallback_voice in tts_voice_fallbacks.get(lang, []):
-                try:
-                    if os.path.exists(filename):
-                        os.remove(filename)
-                    print(f"🔁 TTS fallback voice | lang={lang} | primary={voice} | fallback={fallback_voice}", flush=True)
-                    await asyncio.sleep(1.5)
-                    communicator = edge_tts.Communicate(text, fallback_voice, rate=rate, pitch=pitch)
-                    await communicator.save(filename)
-                    if os.path.exists(filename) and os.path.getsize(filename) > 256:
-                        await asyncio.to_thread(_normalize_tts_audio_sync, filename)
-                        files.append((lang, filename))
-                        print(f"✅ TTS fallback สำเร็จ: {lang} ({guild_id}) voice={fallback_voice} rate={rate} pitch={pitch}", flush=True)
-                        success = True
-                        break
-                    last_error = RuntimeError("No audio was received")
-                except Exception as e:
-                    last_error = e
-                    print(f"⚠️ TTS fallback failed ({lang}) voice={fallback_voice}: {type(e).__name__}: {str(e)[:240]}", flush=True)
-
+            except OSError:
+                pass
+            print(
+                f"❌ TTS backup failed | provider=gTTS | lang={lang} | "
+                f"error={type(exc).__name__}: {str(exc)[:220]}",
+                flush=True,
+            )
         if not success:
-            print(f"❌ สร้าง TTS ไม่สำเร็จ ({lang}) หลัง primary attempts + bounded fallback: {type(last_error).__name__ if last_error else 'UnknownError'}: {str(last_error)[:240] if last_error else 'no audio'}", flush=True)
+            print(
+                f"❌ TTS unavailable for language={lang}; no audio file will be played | "
+                f"last_error={type(last_error).__name__ if last_error else 'UnknownError'}",
+                flush=True,
+            )
     return files
 
 
@@ -9700,10 +9696,17 @@ async def check_bf_notifications():
                 task = bf_tts_prewarm_tasks.get(cache_key)
                 # Once audio for this exact warning trigger is cached, keep it and
                 # avoid regenerating identical tracks on every scheduler tick.
-                if cache_key not in bf_tts_prewarm_cache and (task is None or task.done()):
+                if (
+                    cache_key not in bf_tts_prewarm_cache
+                    and cache_key not in bf_tts_prewarm_attempted
+                    and (task is None or task.done())
+                ):
+                    # Mark synchronously before create_task: a slow/failed task cannot be
+                    # restarted by the next 0.2-second scheduler tick for this trigger.
+                    bf_tts_prewarm_attempted.add(cache_key)
                     print(
                         f"🔥 BF TTS PREWARM | guild={guild.name} | next={next_bf_time} | "
-                        f"warning_in={seconds_until_warning:.2f}s | rooms={len(occupied)}",
+                        f"warning_in={seconds_until_warning:.2f}s | rooms={len(occupied)} | once_per_trigger=True",
                         flush=True,
                     )
                     task = asyncio.create_task(
@@ -9847,9 +9850,16 @@ async def check_bf_notifications():
 async def _prepare_bf_tts_cache(guild: discord.Guild, trigger_key: str):
     """Pre-generate BF TTS before :57 without entering Voice or sending Discord HTTP."""
     cache_key = (str(trigger_key), int(guild.id))
-    old = bf_tts_prewarm_cache.pop(cache_key, None)
-    if old:
-        for _, filename in old:
+    existing = bf_tts_prewarm_cache.get(cache_key)
+    if existing and all(os.path.isfile(filename) and os.path.getsize(filename) > 256 for _, filename in existing):
+        print(
+            f"⏭️ BF TTS PREWARM SKIP | guild={guild.name} | trigger={trigger_key} | reason=valid_cache_already_exists",
+            flush=True,
+        )
+        return
+    if existing:
+        bf_tts_prewarm_cache.pop(cache_key, None)
+        for _, filename in existing:
             try:
                 if os.path.exists(filename):
                     os.remove(filename)
@@ -9869,9 +9879,9 @@ async def _prepare_bf_tts_cache(guild: discord.Guild, trigger_key: str):
                 flush=True,
             )
         else:
-            print(f"⚠️ BF TTS PREWARM EMPTY | guild={guild.name} | trigger={trigger_key}", flush=True)
+            print(f"⚠️ BF TTS PREWARM EMPTY | guild={guild.name} | trigger={trigger_key} | retry=disabled_for_same_trigger", flush=True)
     except Exception as exc:
-        print(f"⚠️ BF TTS PREWARM failed safely | guild={guild.name} | trigger={trigger_key} | {exc!r}", flush=True)
+        print(f"⚠️ BF TTS PREWARM failed safely | guild={guild.name} | trigger={trigger_key} | retry=disabled_for_same_trigger | {type(exc).__name__}: {str(exc)[:180]}", flush=True)
 
 
 def _take_bf_tts_cache(trigger_key: str, guild_id: int):
