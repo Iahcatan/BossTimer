@@ -81,7 +81,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V207_UNIFIED_FEMALE_MULTILINGUAL_TTS_FIX_2026-10-13 | BASE=V206_BOSS_CONFIRMATION_TTS_403_FALLBACK_FIX_2026-10-13"
+NOTICE_BF_PATCH_VERSION = "V208_AZURE_SHARED_FEMALE_TTS_AUDIO_QUALITY_FIX_2026-10-13 | BASE=V207_UNIFIED_FEMALE_MULTILINGUAL_TTS_FIX_2026-10-13"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -5500,25 +5500,25 @@ NOTICE_LAST_RUN_TS = 0.0
 last_lib_notified_key = ""
 
 cached_live_message = None
-# V207: one female multilingual Neural voice for all enabled language tracks.
-# Microsoft documents JennyMultilingualV2 as a female voice supporting English,
-# Thai, and Korean. Using one voice ID and one prosody profile avoids deliberate
-# speaker/rate changes between TH/EN/KO when Edge TTS is available.
+# V208: prefer Azure Speech's supported female multilingual neural voice when
+# credentials are configured. One model is used for TH/EN/KO with identical
+# prosody; Edge TTS and gTTS remain bounded fallback providers.
+TTS_AZURE_SHARED_FEMALE_VOICE = "en-US-AvaMultilingualNeural"
+TTS_AZURE_LANGUAGE_TAGS = {"th": "th-TH", "en": "en-US", "ko": "ko-KR"}
+TTS_SHARED_RATE = "0%"
+TTS_SHARED_PITCH = "0%"
+
+# Keep the prior Edge voice as compatibility fallback. The same IDs/prosody are
+# passed on every retry; the fallback is not falsely logged as Azure success.
 VOICE_SHARED_FEMALE = "en-US-JennyMultilingualV2Neural"
 VOICE_THAI = VOICE_SHARED_FEMALE
 VOICE_ENG = VOICE_SHARED_FEMALE
 VOICE_KOR = VOICE_SHARED_FEMALE
 
-# A uniform pitch profile is applied only to gTTS fallback files. gTTS does not
-# expose a gender or cross-language speaker-identity option, so this is a bounded
-# best-effort way to reduce the perceived low/male pitch in fallback audio. It
-# cannot make gTTS tracks the exact same speaker identity.
-try:
-    _tts_fallback_pitch_setting = float(os.environ.get("TTS_FALLBACK_PITCH_SEMITONES", "3.0"))
-except (TypeError, ValueError):
-    _tts_fallback_pitch_setting = 3.0
-TTS_FALLBACK_PITCH_SEMITONES = max(0.0, min(6.0, _tts_fallback_pitch_setting))
-del _tts_fallback_pitch_setting
+# V207's +3 semitone processing made provider-default gTTS sound metallic and
+# did not make the three language voices the same speaker. V208 disables pitch
+# shifting and only applies matching loudness/sample-rate/tail processing.
+TTS_FALLBACK_PITCH_SEMITONES = 0.0
 
 BOSS_RESPAWN_TIMES = {
     "Wadangka": timedelta(hours=2, minutes=30),
@@ -7982,38 +7982,35 @@ def _tts_http_status(exc):
     return None
 
 
-def _apply_uniform_female_pitch_profile_sync(filename: str):
-    """Apply one conservative pitch/loudness profile to a gTTS fallback file.
+def _normalize_tts_audio_sync(filename: str):
+    """Apply the same gentle audio finishing to every provider's output.
 
-    Uses FFmpeg's rubberband filter when available. This is only a perception
-    adjustment; it does not turn language-specific gTTS voices into one identical
-    speaker. On filter/binary failure, the original playable file is preserved.
+    Do not pitch-shift provider audio: pitch shifting was a likely source of the
+    metallic/distorted sound in V207 and cannot align speaker identity. Normalize
+    loudness/sample rate and append a short tail so the final word is not perceived
+    as being cut off immediately at the end of the file. Original audio is kept if
+    FFmpeg normalization fails.
     """
-    if TTS_FALLBACK_PITCH_SEMITONES <= 0:
-        return False
     ffmpeg = get_ffmpeg_path()
-    ratio = 2.0 ** (TTS_FALLBACK_PITCH_SEMITONES / 12.0)
-    output_path = filename + ".uniform-female-profile.mp3"
-    audio_filter = (
-        f"rubberband=pitch={ratio:.6f}:tempo=1,"
-        "loudnorm=I=-18:TP=-2:LRA=11"
-    )
+    output_path = filename + ".normalized.mp3"
+    audio_filter = "loudnorm=I=-18:TP=-2:LRA=11,apad=pad_dur=0.45"
     try:
         proc = subprocess.run(
             [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", filename,
-             "-vn", "-af", audio_filter, "-codec:a", "libmp3lame", "-q:a", "3", output_path],
+             "-vn", "-af", audio_filter, "-ar", "48000", "-ac", "1",
+             "-codec:a", "libmp3lame", "-q:a", "2", output_path],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=20,
+            timeout=25,
             check=False,
         )
         if proc.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) <= 256:
-            raise RuntimeError((proc.stderr or "FFmpeg pitch normalization failed")[:220])
+            raise RuntimeError((proc.stderr or "FFmpeg audio normalization failed")[:220])
         os.replace(output_path, filename)
         print(
-            f"🎚️ TTS fallback uniform female pitch profile applied | "
-            f"semitones=+{TTS_FALLBACK_PITCH_SEMITONES:.1f} | loudness=-18 LUFS",
+            "🎚️ TTS audio standardized | loudness=-18 LUFS | sample_rate=48kHz | "
+            "pitch_shift=off | end_padding=450ms",
             flush=True,
         )
         return True
@@ -8024,19 +8021,83 @@ def _apply_uniform_female_pitch_profile_sync(filename: str):
         except OSError:
             pass
         print(
-            f"⚠️ TTS fallback pitch profile unavailable; keep provider audio | "
+            f"⚠️ TTS audio normalization unavailable; keep original audio | "
             f"reason={type(exc).__name__}: {str(exc)[:180]}",
             flush=True,
         )
         return False
 
 
-def _save_gtts_fallback_sync(text: str, lang: str, filename: str):
-    """Use bounded gTTS fallback and normalize fallback pitch consistently.
+def _azure_speech_generate_sync(text: str, lang: str, filename: str):
+    """Synthesize one language through the same Azure multilingual female voice.
 
-    gTTS uses Google Translate's speech endpoint, not Google Cloud Text-to-Speech.
-    It has no public gender/speaker identity control. The same post-processing
-    profile is applied to TH/EN/KO fallback tracks to reduce abrupt male-like pitch.
+    Requires AZURE_SPEECH_KEY and AZURE_SPEECH_REGION. The Azure endpoint is
+    called with one voice ID, an explicit language tag, and identical rate/pitch
+    settings for TH/EN/KO. urllib is used to avoid adding another dependency.
+    """
+    from xml.sax.saxutils import escape as xml_escape
+
+    key = str(os.environ.get("AZURE_SPEECH_KEY", "")).strip()
+    region = str(os.environ.get("AZURE_SPEECH_REGION", "")).strip().lower()
+    if not key or not region:
+        raise RuntimeError("Azure Speech not configured; set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION")
+    if not re.fullmatch(r"[a-z0-9-]+", region):
+        raise RuntimeError("AZURE_SPEECH_REGION must be the short Azure region name, not a URL")
+    locale = TTS_AZURE_LANGUAGE_TAGS.get(str(lang).lower())
+    if not locale:
+        raise RuntimeError(f"Unsupported Azure TTS language: {lang}")
+
+    safe_text = xml_escape(str(text or "").strip())
+    if not safe_text:
+        raise RuntimeError("TTS input text is empty")
+    ssml = (
+        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US">'
+        f'<voice name="{TTS_AZURE_SHARED_FEMALE_VOICE}">'
+        f'<lang xml:lang="{locale}">'
+        f'<prosody rate="{TTS_SHARED_RATE}" pitch="{TTS_SHARED_PITCH}">{safe_text}</prosody>'
+        '</lang></voice></speak>'
+    )
+    endpoint = f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
+    request = UrlRequest(
+        endpoint,
+        data=ssml.encode("utf-8"),
+        headers={
+            "Ocp-Apim-Subscription-Key": key,
+            "Content-Type": "application/ssml+xml",
+            "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3",
+            "User-Agent": "SKYNET-BossTimer-V208",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=22) as response:
+            audio_data = response.read()
+            status = getattr(response, "status", 200)
+    except HTTPError as exc:
+        try:
+            detail = exc.read(500).decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"Azure Speech HTTP {exc.code}: {detail[:160]}") from exc
+    if status != 200 or not audio_data or len(audio_data) <= 256:
+        raise RuntimeError(f"Azure Speech returned no playable audio (HTTP {status})")
+    with open(filename, "wb") as output:
+        output.write(audio_data)
+
+
+def _tts_prepare_sentence(text):
+    """Preserve the announcement wording and give TTS a clear sentence ending."""
+    prepared = str(text or "").strip()
+    if prepared and not re.search(r"[.!?。！？…]$", prepared):
+        prepared += "."
+    return prepared
+
+
+def _save_gtts_fallback_sync(text: str, lang: str, filename: str):
+    """Bounded emergency fallback; keep original pitch and standardize audio only.
+
+    gTTS has no gender or shared-speaker control, so this fallback does not promise
+    identical vocal identity. Azure Speech is the path that fulfills that requirement.
     """
     from gtts import gTTS
 
@@ -8044,29 +8105,28 @@ def _save_gtts_fallback_sync(text: str, lang: str, filename: str):
     gTTS(text=text, lang=lang, timeout=(5, 15), lang_check=False).save(filename)
     if not os.path.isfile(filename) or os.path.getsize(filename) <= 256:
         raise RuntimeError("gTTS fallback returned no playable audio")
-    _apply_uniform_female_pitch_profile_sync(filename)
+    _normalize_tts_audio_sync(filename)
 
 
 async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id=0):
-    """Generate TH/EN/KO tracks with one female multilingual primary voice.
+    """Generate TH/EN/KO tracks with a single multilingual female speaker when possible.
 
-    All language tracks use the same en-US-JennyMultilingualV2Neural speaker and
-    identical default prosody when Edge TTS is available. If Edge returns HTTP 403,
-    do not hammer the denied endpoint: make one bounded gTTS fallback per language
-    and apply the same female-leaning pitch/loudness profile to each fallback file.
-    gTTS cannot guarantee identical speaker identity across languages; see log note.
-    If no provider creates audio, no silent Voice join is attempted.
+    Azure Speech is primary when AZURE_SPEECH_KEY and AZURE_SPEECH_REGION are set;
+    the same en-US-AvaMultilingualNeural voice, language tag, rate, and pitch are used
+    for all enabled tracks. Edge TTS and bounded gTTS remain recovery paths. All files
+    receive matching loudness/sample-rate processing and a short ending pad, without
+    pitch shifting. gTTS is explicitly not treated as same-speaker output.
     """
     await refresh_tts_settings_from_firebase()
     actual = []
     # Keep language enable switches/texts independent, but use the same female
     # multilingual speaker and the same prosody values for every generated track.
     if tts_th_enabled and text_th:
-        actual.append(("th", text_th, VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
+        actual.append(("th", _tts_prepare_sentence(text_th), VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
     if tts_en_enabled and text_en:
-        actual.append(("en", text_en, VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
+        actual.append(("en", _tts_prepare_sentence(text_en), VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
     if tts_ko_enabled and text_ko:
-        actual.append(("ko", text_ko, VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
+        actual.append(("ko", _tts_prepare_sentence(text_ko), VOICE_SHARED_FEMALE, "+0%", "+0Hz"))
 
     tts_voice_fallbacks = {
         "th": ["th-TH-AcharaNeural"],
@@ -8075,19 +8135,73 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
     }
 
     files = []
+    azure_key_set = bool(str(os.environ.get("AZURE_SPEECH_KEY", "")).strip())
+    azure_region_set = bool(str(os.environ.get("AZURE_SPEECH_REGION", "")).strip())
+    azure_configured = azure_key_set and azure_region_set
     if actual:
         print(
-            f"🎙️ TTS unified female multilingual voice | voice={VOICE_SHARED_FEMALE} | "
-            f"tracks={','.join(item[0] for item in actual)} | "
-            f"fallback_pitch_profile=+{TTS_FALLBACK_PITCH_SEMITONES:.1f}st",
+            f"🎙️ TTS voice plan | tracks={','.join(item[0] for item in actual)} | "
+            f"shared_multilingual_voice={TTS_AZURE_SHARED_FEMALE_VOICE} | "
+            f"azure_configured={azure_configured} | rate={TTS_SHARED_RATE} | "
+            f"pitch={TTS_SHARED_PITCH} | pitch_shift=off",
             flush=True,
         )
+        if not azure_configured:
+            print(
+                "⚠️ AZURE_SPEECH_KEY/REGION not configured; if Edge TTS returns HTTP 403, "
+                "gTTS backup will play but cannot guarantee one identical speaker across languages",
+                flush=True,
+            )
     uid = uuid.uuid4().hex
     for lang, text, voice, rate, pitch in actual:
         filename = f"temp_tts_{lang}_{guild_id}_{uid}.mp3"
         success = False
         last_error = None
         edge_provider_denied = False
+
+        # V208 primary: Azure Speech uses a single female multilingual voice model
+        # with language tags so Thai, English, and Korean keep the same speaker and
+        # identical rate/pitch settings. If it is not configured or fails, retain
+        # the existing Edge/gTTS recovery path so announcements are not lost.
+        if azure_configured:
+            try:
+                if os.path.exists(filename):
+                    os.remove(filename)
+                print(
+                    f"☁️ Azure Speech TTS attempt | lang={lang} | "
+                    f"voice={TTS_AZURE_SHARED_FEMALE_VOICE} | rate={TTS_SHARED_RATE} | "
+                    f"pitch={TTS_SHARED_PITCH} | chars={len(str(text))}",
+                    flush=True,
+                )
+                await asyncio.wait_for(
+                    asyncio.to_thread(_azure_speech_generate_sync, text, lang, filename),
+                    timeout=28.0,
+                )
+                if not os.path.isfile(filename) or os.path.getsize(filename) <= 256:
+                    raise RuntimeError("Azure Speech returned no playable audio")
+                await asyncio.to_thread(_normalize_tts_audio_sync, filename)
+                files.append((lang, filename))
+                success = True
+                print(
+                    f"✅ TTS succeeded | provider=Azure Speech | lang={lang} | "
+                    f"voice={TTS_AZURE_SHARED_FEMALE_VOICE} | rate={TTS_SHARED_RATE} | "
+                    f"pitch={TTS_SHARED_PITCH} | speaker=shared-multilingual-female",
+                    flush=True,
+                )
+            except Exception as e:
+                last_error = e
+                try:
+                    if os.path.exists(filename):
+                        os.remove(filename)
+                except OSError:
+                    pass
+                print(
+                    f"⚠️ Azure Speech TTS failed | lang={lang} | "
+                    f"error={type(e).__name__}: {str(e)[:220]} | trying existing fallback providers",
+                    flush=True,
+                )
+            if success:
+                continue
 
         # Keep the configured voice and existing bounded retries unless Edge returns
         # HTTP 403. That status is a connection-level rejection, not a voice-specific
@@ -8096,14 +8210,12 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
             try:
                 if os.path.exists(filename):
                     os.remove(filename)
-                if attempt == 1:
-                    communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
-                else:
-                    communicator = edge_tts.Communicate(text, voice)
+                communicator = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch)
                 await communicator.save(filename)
                 if os.path.exists(filename) and os.path.getsize(filename) > 256:
+                    await asyncio.to_thread(_normalize_tts_audio_sync, filename)
                     files.append((lang, filename))
-                    print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id}) voice={voice} attempt={attempt}", flush=True)
+                    print(f"🔊 TTS สร้างไฟล์สำเร็จ: {lang} ({guild_id}) voice={voice} rate={rate} pitch={pitch} attempt={attempt}", flush=True)
                     success = True
                     break
                 last_error = RuntimeError("No audio was received")
@@ -8136,7 +8248,7 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
                     os.remove(filename)
                 print(
                     f"🔁 TTS backup attempt | provider=gTTS | lang={lang} | reason=edge-http-403 | "
-                    f"uniform_female_pitch_profile=+{TTS_FALLBACK_PITCH_SEMITONES:.1f}st",
+                    "pitch_shift=off; audio_normalization=enabled",
                     flush=True,
                 )
                 await asyncio.wait_for(
@@ -8147,7 +8259,7 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
                 success = True
                 print(
                     f"✅ TTS backup succeeded | provider=gTTS | lang={lang} | guild={guild_id} | "
-                    "speaker_identity=provider-default; uniform-pitch-profile=applied-or-best-effort",
+                    "speaker_identity=provider-default; pitch_shift=off; volume-normalization=best-effort",
                     flush=True,
                 )
             except Exception as e:
@@ -8180,11 +8292,12 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
                         os.remove(filename)
                     print(f"🔁 TTS fallback voice | lang={lang} | primary={voice} | fallback={fallback_voice}", flush=True)
                     await asyncio.sleep(1.5)
-                    communicator = edge_tts.Communicate(text, fallback_voice)
+                    communicator = edge_tts.Communicate(text, fallback_voice, rate=rate, pitch=pitch)
                     await communicator.save(filename)
                     if os.path.exists(filename) and os.path.getsize(filename) > 256:
+                        await asyncio.to_thread(_normalize_tts_audio_sync, filename)
                         files.append((lang, filename))
-                        print(f"✅ TTS fallback สำเร็จ: {lang} ({guild_id}) voice={fallback_voice}", flush=True)
+                        print(f"✅ TTS fallback สำเร็จ: {lang} ({guild_id}) voice={fallback_voice} rate={rate} pitch={pitch}", flush=True)
                         success = True
                         break
                     last_error = RuntimeError("No audio was received")
