@@ -3,7 +3,7 @@ flask
 waitress
 requests
 pynacl
-edge-tts
+edge-tts==7.2.8
 ffmpeg-python
 imageio-ffmpeg
 python-dotenv
@@ -11,3 +11,4 @@ pytz
 pydub
 firebase-admin
 aiohttp
+gTTS==2.5.4

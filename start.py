@@ -1,4 +1,4 @@
-# V205_INOTIAWAR_EXACT_TH_PREALERT_TEXT_FIX_2026-10-11 | BASE=V204_INOTIAWAR_30S_VOICE_PREALERTS_2026-10-11
+# V206_BOSS_CONFIRMATION_TTS_403_FALLBACK_FIX_2026-10-13 | BASE=V205_INOTIAWAR_EXACT_TH_PREALERT_TEXT_FIX_2026-10-11
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V205_INOTIAWAR_EXACT_TH_PREALERT_TEXT_FIX_2026-10-11"
+EXPECTED_BOT_PATCH_PREFIX = "V206_BOSS_CONFIRMATION_TTS_403_FALLBACK_FIX_2026-10-13"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V205 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V206 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
