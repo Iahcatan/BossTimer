@@ -1,4 +1,4 @@
-# V209_EDGE_TTS_403_CIRCUIT_BREAKER_BF_PREWARM_DEDUP_FIX_2026-10-13 | BASE=V208_AZURE_SHARED_FEMALE_TTS_AUDIO_QUALITY_FIX_2026-10-13
+# V210_DISCORD_429_DIAGNOSTIC_HARDENING_2026-10-16 | BASE=V209_EDGE_TTS_403_CIRCUIT_BREAKER_BF_PREWARM_DEDUP_FIX_2026-10-13
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V209_EDGE_TTS_403_CIRCUIT_BREAKER_BF_PREWARM_DEDUP_FIX_2026-10-13"
+EXPECTED_BOT_PATCH_PREFIX = "V210_DISCORD_429_DIAGNOSTIC_HARDENING_2026-10-16"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V209 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V210 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
