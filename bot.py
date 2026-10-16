@@ -81,7 +81,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V210_DISCORD_429_DIAGNOSTIC_HARDENING_2026-10-16 | BASE=V209_EDGE_TTS_403_CIRCUIT_BREAKER_BF_PREWARM_DEDUP_FIX_2026-10-13"
+NOTICE_BF_PATCH_VERSION = "V211_TIME_CRITICAL_REST_SKIP_RECOVERY_FIX_2026-10-16 | BASE=V210_DISCORD_429_DIAGNOSTIC_HARDENING_2026-10-16"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -4963,10 +4963,15 @@ async def guarded_discord_call(
     if background is None:
         background = _is_background_discord_rest_context(context)
 
+    critical_background = bool(background and _is_time_critical_background_rest_context(context))
+    recovery_request_candidate = False
     if background:
         post_recovery_remaining = _background_post_recovery_quiet_remaining()
-        if post_recovery_remaining > 0 and not recovery_probe:
-            _log_background_rest_skip(context, post_recovery_remaining, reason="post-recovery-quiet")
+        # V211: the long post-recovery quiet is for non-critical/background maintenance.
+        # Do not silently discard due Boss/BF/Attendance work once Discord's server timer
+        # has expired; time-critical work may serve as the one real recovery request.
+        if post_recovery_remaining > 0 and not recovery_probe and not critical_background:
+            _log_background_rest_skip(context, post_recovery_remaining, reason="post-recovery-quiet-noncritical")
             return None
 
     if SKYNET_RUNTIME_ROLE == "web":
@@ -4987,7 +4992,6 @@ async def guarded_discord_call(
 
     # V180: after the server timer + local no-HTTP safety margin, background REST
     # remains held, while a real foreground request may become the recovery test.
-    recovery_request_candidate = False
     if not recovery_probe:
         with discord_block_lock:
             temp_restriction = bool(discord_block_temp_restriction)
@@ -4996,10 +5000,12 @@ async def guarded_discord_call(
         timer_expired = (server_until > 0 and time.time() >= server_until)
         local_timer_expired = (server_until <= 0 and next_probe_mono > 0 and time.monotonic() >= next_probe_mono)
         if temp_restriction and (timer_expired or local_timer_expired):
-            if _is_background_discord_rest_context(context):
+            if _is_background_discord_rest_context(context) and not critical_background:
                 remaining = max(0.0, next_probe_mono - time.monotonic()) if next_probe_mono > 0 else 0.0
-                _log_background_rest_skip(context, remaining, reason="awaiting-real-recovery-request")
+                _log_background_rest_skip(context, remaining, reason="awaiting-real-recovery-request-noncritical")
                 return None
+            # V211: a due, real time-critical business request is not a synthetic probe.
+            # Permit exactly this normal request to confirm recovery after the server timer.
             recovery_request_candidate = True
 
     global discord_rest_next_call_at, discord_background_rest_next_call_at, discord_background_rest_noncritical_next_call_at
@@ -5022,14 +5028,15 @@ async def guarded_discord_call(
             return None
 
         bg_remaining = _background_rest_remaining()
-        if discord_background_rest_quarantined or bg_remaining > 0:
-            if bg_remaining <= 0 and discord_background_rest_quarantined:
-                # Release only after the explicit recovery quiet window has elapsed.
+        post_recovery_remaining = _background_post_recovery_quiet_remaining()
+        critical_recovery_exception = critical_background and (recovery_request_candidate or post_recovery_remaining > 0)
+        if (discord_background_rest_quarantined or bg_remaining > 0) and not critical_recovery_exception:
+            if bg_remaining <= 0 and discord_background_rest_quarantined and post_recovery_remaining <= 0:
                 discord_background_rest_quarantined = False
             else:
                 _log_background_rest_skip(
                     context,
-                    max(bg_remaining, 0.0),
+                    max(bg_remaining, post_recovery_remaining, 0.0),
                     reason="recovery-hold" if bg_remaining > 0 else "quarantine",
                 )
                 return None
@@ -5088,9 +5095,9 @@ async def guarded_discord_call(
         timer_expired = (server_until > 0 and time.time() >= server_until)
         local_timer_expired = (server_until <= 0 and next_probe_mono > 0 and time.monotonic() >= next_probe_mono)
         if temp_restriction and (timer_expired or local_timer_expired) and not recovery_probe:
-            if background:
+            if background and not critical_background:
                 remaining = max(0.0, next_probe_mono - now_mono) if next_probe_mono > 0 else 0.0
-                _log_background_rest_skip(context, remaining, reason="awaiting-real-recovery-request")
+                _log_background_rest_skip(context, remaining, reason="awaiting-real-recovery-request-noncritical")
                 return None
             recovery_request_candidate = True
         if temp_restriction and next_probe_mono > now_mono and not recovery_probe:
@@ -5102,13 +5109,15 @@ async def guarded_discord_call(
 
         if background:
             bg_remaining = _background_rest_remaining()
-            if discord_background_rest_quarantined or bg_remaining > 0:
-                if bg_remaining <= 0 and discord_background_rest_quarantined:
+            post_recovery_remaining = _background_post_recovery_quiet_remaining()
+            critical_recovery_exception = critical_background and (recovery_request_candidate or post_recovery_remaining > 0)
+            if (discord_background_rest_quarantined or bg_remaining > 0) and not critical_recovery_exception:
+                if bg_remaining <= 0 and discord_background_rest_quarantined and post_recovery_remaining <= 0:
                     discord_background_rest_quarantined = False
                 else:
                     _log_background_rest_skip(
                         context,
-                        max(bg_remaining, 0.0),
+                        max(bg_remaining, post_recovery_remaining, 0.0),
                         reason="recovery-hold" if bg_remaining > 0 else "quarantine",
                     )
                     return None
@@ -5166,10 +5175,15 @@ async def guarded_discord_call(
                     and server_until > 0
                     and time.time() >= server_until
                 )
-                if discord_background_rest_startup_hold or discord_background_rest_quarantined or bg_remaining > 0 or post_recovery_remaining > 0 or recovery_confirmation_pending or (temp_restriction and next_probe_mono > now_after_wait) or _discord_rest_rate_limit_remaining() > 0:
+                critical_recovery_exception = critical_background and (
+                    recovery_request_candidate or recovery_confirmation_pending or post_recovery_remaining > 0
+                )
+                blocked_by_quarantine = (discord_background_rest_quarantined or bg_remaining > 0 or post_recovery_remaining > 0) and not critical_recovery_exception
+                blocked_by_expired_block = recovery_confirmation_pending and not critical_recovery_exception
+                if discord_background_rest_startup_hold or blocked_by_quarantine or blocked_by_expired_block or (temp_restriction and next_probe_mono > now_after_wait) or _discord_rest_rate_limit_remaining() > 0:
                     remaining_for_log = max(
-                        bg_remaining,
-                        post_recovery_remaining,
+                        bg_remaining if not critical_recovery_exception else 0.0,
+                        post_recovery_remaining if not critical_recovery_exception else 0.0,
                         max(0.0, next_probe_mono - now_after_wait) if temp_restriction else 0.0,
                         _discord_rest_rate_limit_remaining(),
                     )
@@ -5204,7 +5218,7 @@ async def guarded_discord_call(
                 context=context,
                 recovery_probe=(recovery_probe or recovery_request_candidate),
             )
-            if not background and had_active_block:
+            if had_active_block:
                 _arm_background_rest_after_foreground_recovery()
             return result
         except discord.HTTPException as exc:
