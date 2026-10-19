@@ -1,4 +1,4 @@
-# V217_FIREBASE_DOWNLOAD_OPTIMIZATION_2026-10-19 | BASE=V216_SHARED_BOT_ATTENDANCE_AUTO_CLOSE_2026-10-19
+# V218_FIREBASE_PAGINATED_ATTENDANCE_AND_BANDWIDTH_GUARD_2026-10-19 | BASE=V217_FIREBASE_DOWNLOAD_OPTIMIZATION_2026-10-19
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V217_FIREBASE_DOWNLOAD_OPTIMIZATION_2026-10-19"
+EXPECTED_BOT_PATCH_PREFIX = "V218_FIREBASE_PAGINATED_ATTENDANCE_AND_BANDWIDTH_GUARD_2026-10-19"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V217 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V218 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
