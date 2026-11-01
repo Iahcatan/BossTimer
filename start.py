@@ -1,4 +1,4 @@
-# V218_FIREBASE_PAGINATED_ATTENDANCE_AND_BANDWIDTH_GUARD_2026-10-19 | BASE=V217_FIREBASE_DOWNLOAD_OPTIMIZATION_2026-10-19
+# V221_ADMIN_DASHBOARD_CONTROLS_2026-10-29 | BASE=V220_FIREBASE_RENDER_QUOTA_GUARD_2026-10-25
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V218_FIREBASE_PAGINATED_ATTENDANCE_AND_BANDWIDTH_GUARD_2026-10-19"
+EXPECTED_BOT_PATCH_PREFIX = "V221_ADMIN_DASHBOARD_CONTROLS_2026-10-29"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V218 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V221 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
@@ -75,7 +75,7 @@ GATEWAY_LEASE_TTL_SECONDS = max(
 )
 GATEWAY_LEASE_RENEW_SECONDS = max(
     15.0,
-    min(GATEWAY_LEASE_TTL_SECONDS / 3.0, float(os.environ.get("DISCORD_GATEWAY_LEASE_RENEW", "20"))),
+    min(GATEWAY_LEASE_TTL_SECONDS / 3.0, float(os.environ.get("DISCORD_GATEWAY_LEASE_RENEW", "35"))),
 )
 GATEWAY_LEASE_POLL_SECONDS = max(
     5.0,
