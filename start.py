@@ -1,4 +1,4 @@
-# V221_ADMIN_DASHBOARD_CONTROLS_2026-10-29 | BASE=V220_FIREBASE_RENDER_QUOTA_GUARD_2026-10-25
+# V222_DISCORD_429_SAFE_RECOVERY_AND_STARTUP_RECONCILE_FIX_2026-11-01 | BASE=V221_ADMIN_DASHBOARD_CONTROLS_2026-10-29
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V221_ADMIN_DASHBOARD_CONTROLS_2026-10-29"
+EXPECTED_BOT_PATCH_PREFIX = "V222_DISCORD_429_SAFE_RECOVERY_AND_STARTUP_RECONCILE_FIX_2026-11-01"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V221 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V222 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
@@ -694,12 +694,15 @@ async def main():
     # no Discord request and does not change the existing Boss/Voice/TTS logic.
     try:
         if hasattr(bot_module, "library_boss_daily_rotation_loop"):
-            if not bot_module.library_boss_daily_rotation_loop.is_running():
-                bot_module.library_boss_daily_rotation_loop.start()
-                log("📚 Library Boss daily rotation scheduler STARTED independently of Gateway")
+            # Reconcile once BEFORE starting tasks.loop. discord.py runs the first
+            # loop iteration immediately; the old start-then-ensure order raced two
+            # full delete/set rotations against the same expired Firebase rows.
             if hasattr(bot_module, "ensure_library_boss_schedule_records"):
                 await bot_module.ensure_library_boss_schedule_records()
                 log("📚 Library Boss startup reconciliation COMPLETE | Gateway-independent")
+            if not bot_module.library_boss_daily_rotation_loop.is_running():
+                bot_module.library_boss_daily_rotation_loop.start()
+                log("📚 Library Boss daily rotation scheduler STARTED independently of Gateway")
     except Exception as exc:
         log(f"⚠️ Library Boss Gateway-independent startup reconciliation failed safely: {exc!r}")
 
