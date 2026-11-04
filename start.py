@@ -1,4 +1,4 @@
-# V224_CF1015_EDGE_GATE_BOSS_VOICE_TOGGLE_2026-11-01 | BASE=V223_WEEKLY_ATTENDANCE_IDEMPOTENCY_CF1015_GUARD_2026-11-01
+# V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04 | BASE=V224_CF1015_EDGE_GATE_BOSS_VOICE_TOGGLE_2026-11-01
 import asyncio
 import discord
 import os
@@ -21,7 +21,7 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V224_CF1015_EDGE_GATE_BOSS_VOICE_TOGGLE_2026-11-01"
+EXPECTED_BOT_PATCH_PREFIX = "V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
@@ -507,7 +507,7 @@ async def sync_commands_once():
 
         if successful == len(guilds):
             # V138: verification can legitimately finish with zero HTTP writes when the
-            # remote Guild command set already matches the local 21-direct-command tree plus /add boss. V137
+            # remote Guild command set already matches the local 22-direct-command tree plus /add boss. V137
             # only released the background startup hold from tree.sync(), so the no-sync
             # path stayed permanently blocked and logged startup-command-sync-hold forever.
             # Release the hold here after successful verification. Existing probation remains
