@@ -1,4 +1,4 @@
-# V223_WEEKLY_ATTENDANCE_IDEMPOTENCY_CF1015_GUARD_2026-11-01 | BASE=V222_DISCORD_429_SAFE_RECOVERY_AND_STARTUP_RECONCILE_FIX_2026-11-01
+# V224_CF1015_EDGE_GATE_BOSS_VOICE_TOGGLE_2026-11-01 | BASE=V223_WEEKLY_ATTENDANCE_IDEMPOTENCY_CF1015_GUARD_2026-11-01
 import asyncio
 import discord
 import os
@@ -21,13 +21,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V223_WEEKLY_ATTENDANCE_IDEMPOTENCY_CF1015_GUARD_2026-11-01"
+EXPECTED_BOT_PATCH_PREFIX = "V224_CF1015_EDGE_GATE_BOSS_VOICE_TOGGLE_2026-11-01"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V223 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V224 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
@@ -507,7 +507,7 @@ async def sync_commands_once():
 
         if successful == len(guilds):
             # V138: verification can legitimately finish with zero HTTP writes when the
-            # remote Guild command set already matches the local 20-command tree. V137
+            # remote Guild command set already matches the local 21-direct-command tree plus /add boss. V137
             # only released the background startup hold from tree.sync(), so the no-sync
             # path stayed permanently blocked and logged startup-command-sync-hold forever.
             # Release the hold here after successful verification. Existing probation remains
