@@ -1,7 +1,8 @@
-# V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04 | BASE=V224_CF1015_EDGE_GATE_BOSS_VOICE_TOGGLE_2026-11-01
+# V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05 | BASE=V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04
 import asyncio
 import discord
 import os
+import re
 import sys
 import traceback
 from discord import app_commands
@@ -21,13 +22,13 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04"
+EXPECTED_BOT_PATCH_PREFIX = "V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
         "STARTUP VERSION GUARD FAILED: start.py requires "
         f"{EXPECTED_BOT_PATCH_PREFIX}, but bot.py reports "
-        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V224 package."
+        f"{ACTUAL_BOT_PATCH_VERSION or 'UNKNOWN'}. Replace bot.py and start.py from the same V226 package."
     )
 
 SKYNET_RUNTIME_ROLE = os.environ.get("SKYNET_RUNTIME_ROLE", "web").strip().lower()
@@ -46,6 +47,43 @@ COMMAND_SYNC_DELAY = float(os.environ.get("COMMAND_SYNC_DELAY", "1.0"))
 
 def log(message: str):
     print(message, flush=True)
+
+
+def _package_version(name: str) -> str:
+    try:
+        from importlib.metadata import version
+        return str(version(name))
+    except Exception:
+        return "NOT_INSTALLED"
+
+
+def _version_tuple(value: str):
+    numbers = re.findall(r"\d+", str(value or ""))
+    return tuple(int(x) for x in numbers[:3]) if numbers else (0, 0, 0)
+
+
+def log_voice_dependency_status():
+    """Report the DAVE-capable Voice dependency stack without altering startup flow."""
+    discord_py = _package_version("discord.py")
+    davey = _package_version("davey")
+    pynacl = _package_version("PyNaCl")
+    log(
+        f"🧩 DISCORD VOICE STACK | discord.py={discord_py} | davey={davey} | PyNaCl={pynacl} | "
+        "required=discord.py PR #10548 (2.8.0a preview), davey>=0.2.0, PyNaCl"
+    )
+    if (
+        _version_tuple(discord_py) < (2, 8, 0)
+        or _version_tuple(davey) < (0, 2, 0)
+        or _version_tuple(pynacl) < (1, 6, 0)
+    ):
+        log(
+            "⚠️ DISCORD VOICE STACK OUTDATED/INCOMPLETE | replace the existing discord.py requirement "
+            "with the V226 VOICE_DEPENDENCY_UPDATE.txt line and install davey==0.2.0. "
+            "Voice announcements will be withheld unless the DAVE media-key readiness gate passes."
+        )
+
+
+log_voice_dependency_status()
 
 
 # ============================================================

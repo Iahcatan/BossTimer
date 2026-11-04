@@ -83,7 +83,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04 | BASE=V224_CF1015_EDGE_GATE_BOSS_VOICE_TOGGLE_2026-11-01"
+NOTICE_BF_PATCH_VERSION = "V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05 | BASE=V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -9218,14 +9218,102 @@ async def _tts_generate_files(text_th=None, text_en=None, text_ko=None, guild_id
     return files
 
 
+def _voice_dave_status_snapshot(vc):
+    """Read DAVE media-encryption readiness without initiating network activity."""
+    connection = getattr(vc, "_connection", None)
+    if connection is None:
+        return {
+            "protocol": 0,
+            "session_ready": False,
+            "connection_can_encrypt": False,
+            "session_can_encrypt": False,
+        }
+
+    try:
+        protocol = int(getattr(connection, "dave_protocol_version", 0) or 0)
+    except (TypeError, ValueError):
+        protocol = 0
+
+    session = getattr(connection, "dave_session", None)
+    try:
+        session_ready = bool(getattr(session, "ready", False)) if session is not None else False
+    except Exception:
+        session_ready = False
+
+    try:
+        value = getattr(connection, "can_encrypt", False)
+        connection_can_encrypt = bool(value() if callable(value) else value)
+    except Exception:
+        connection_can_encrypt = False
+
+    # davey 0.2.x distinguishes a ready MLS session from an active media key.
+    # This second flag becomes true only when the DAVE transition has executed.
+    try:
+        session_can_encrypt = bool(getattr(session, "can_encrypt", False)) if session is not None else False
+    except Exception:
+        session_can_encrypt = False
+
+    return {
+        "protocol": protocol,
+        "session_ready": session_ready,
+        "connection_can_encrypt": connection_can_encrypt,
+        "session_can_encrypt": session_can_encrypt,
+    }
+
+
+async def _wait_for_voice_dave_encryption(vc, guild, channel, timeout=20.0):
+    """Wait until DAVE's active media key is usable before starting a short TTS file.
+
+    The Discord Voice transport handshake may complete before the DAVE MLS key
+    transition. A session can be marked ready after Welcome while the media key
+    is not active yet. Do not start FFmpeg/Opus playback until dave_session.can_encrypt
+    is true, otherwise a short announcement may finish before encrypted frames can
+    be emitted.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + max(1.0, float(timeout))
+    last = _voice_dave_status_snapshot(vc)
+
+    while loop.time() < deadline:
+        last = _voice_dave_status_snapshot(vc)
+        if (
+            last["protocol"] > 0
+            and last["session_ready"]
+            and last["connection_can_encrypt"]
+            and last["session_can_encrypt"]
+        ):
+            waited = loop.time() - started
+            print(
+                f"🔐 DAVE VOICE ENCRYPTION READY | guild={guild.name} | channel={channel.name} | "
+                f"protocol={last['protocol']} | session_ready=True | "
+                f"connection_can_encrypt=True | session_can_encrypt=True | waited={waited:.2f}s",
+                flush=True,
+            )
+            return True
+        await asyncio.sleep(0.1)
+
+    waited = loop.time() - started
+    print(
+        f"❌ DAVE VOICE NOT READY; audio withheld | guild={guild.name} | channel={channel.name} | "
+        f"protocol={last['protocol']} | session_ready={last['session_ready']} | "
+        f"connection_can_encrypt={last['connection_can_encrypt']} | "
+        f"session_can_encrypt={last['session_can_encrypt']} | waited={waited:.2f}s | "
+        "check discord.py PR #10548 voice fixes and davey>=0.2.0",
+        flush=True,
+    )
+    return False
+
+
 async def _play_tts_in_channel(guild, channel, files):
     """Join one active voice channel, play all TTS files, then leave.
 
     Robustness rules:
     - Verify the configured room is occupied and the bot has Connect/Speak permissions.
     - Reuse an existing connection only when it is healthy; otherwise reconnect.
-    - Retry Voice connection once after a short backoff.
-    - Wait for the audio player callback, so a successful function return means audio was actually played.
+    - Retry Voice connection after a short backoff, with bounded attempts.
+    - Wait for DAVE media-key readiness before sending any Opus audio.
+    - Wait for the audio player callback; this confirms local source playback, not that every listener heard it.
     """
     if not isinstance(channel, discord.VoiceChannel):
         return False
@@ -9317,9 +9405,13 @@ async def _play_tts_in_channel(guild, channel, files):
                 )
                 return False
 
-        # Give the Discord voice websocket and UDP path time to become ready.
+        # Let the transport settle, then wait for DAVE's actual media key.
+        # VoiceClient.connect() completing is not proof that the MLS transition ran.
         await asyncio.sleep(0.8)
-        print(f"🎙️ Voice ready for playback: {guild.name} -> {channel.name}")
+        if not await _wait_for_voice_dave_encryption(vc, guild, channel, timeout=20.0):
+            # Never transmit a notification before non-stage Voice E2EE is ready.
+            return False
+        print(f"🎙️ Voice ready for playback (DAVE encrypted): {guild.name} -> {channel.name}")
 
         loop = asyncio.get_running_loop()
         played_any = False
@@ -10675,13 +10767,23 @@ async def check_bf_notifications():
                     _run_bf_voice_for_guild(guild, trigger_key, seconds_until_warning),
                     name=f"bf-voice-{guild.id}-{trigger_key}",
                 )
-            else:
-                wait_key = f"bf-boundary:{trigger_key}:{guild.id}"
+            elif not undelivered:
+                wait_key = f"bf-boundary-empty:{trigger_key}:{guild.id}"
                 if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
                     bf_voice_diag_last_ts[wait_key] = now_mono
                     print(
                         f"⏭️ BF VOICE SKIP | guild={guild.name} | no occupied /setvoice rooms at warning boundary | "
                         "no late voice retry",
+                        flush=True,
+                    )
+            else:
+                # A delivery task for this exact trigger is already running.
+                wait_key = f"bf-boundary-inflight:{trigger_key}:{guild.id}"
+                if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
+                    bf_voice_diag_last_ts[wait_key] = now_mono
+                    print(
+                        f"⏭️ BF VOICE TASK ALREADY INFLIGHT | guild={guild.name} | trigger={trigger_key} | "
+                        f"occupied={len(undelivered)} | no duplicate task created",
                         flush=True,
                     )
 
