@@ -83,7 +83,7 @@ if not firebase_admin._apps:
 # ⚙️ ซ่อน Log แจ้งเตือนที่ไม่จำเป็นจาก Discord.py
 # ==========================================
 
-NOTICE_BF_PATCH_VERSION = "V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05 | BASE=V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04"
+NOTICE_BF_PATCH_VERSION = "V227_DAVE_DEPENDENCY_AND_BF_VOICE_LOG_FIX_2026-11-05 | BASE=V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05"
 
 # V57 runtime split:
 # - web = Render Dashboard/Firebase/API only; NEVER starts Discord Gateway.
@@ -10756,7 +10756,37 @@ async def check_bf_notifications():
             ]
 
             voice_task_key = ("bf", trigger_key, int(guild.id))
-            if undelivered and voice_task_key not in _boss_voice_stage_inflight:
+            if voice_task_key in _boss_voice_stage_inflight:
+                # The task owns this trigger already. Never mislabel an in-flight task
+                # as an empty-room result, even if room membership changes meanwhile.
+                wait_key = f"bf-boundary-inflight:{trigger_key}:{guild.id}"
+                if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
+                    bf_voice_diag_last_ts[wait_key] = now_mono
+                    print(
+                        f"⏭️ BF VOICE TASK ALREADY INFLIGHT | guild={guild.name} | trigger={trigger_key} | "
+                        f"occupied={len(occupied)} | undelivered={len(undelivered)} | no duplicate task created",
+                        flush=True,
+                    )
+            elif not occupied:
+                wait_key = f"bf-boundary-empty:{trigger_key}:{guild.id}"
+                if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
+                    bf_voice_diag_last_ts[wait_key] = now_mono
+                    print(
+                        f"⏭️ BF VOICE SKIP | guild={guild.name} | no occupied /setvoice rooms at warning boundary | "
+                        "no late voice retry",
+                        flush=True,
+                    )
+            elif not undelivered:
+                # Occupied rooms exist, but every room has already completed this trigger.
+                wait_key = f"bf-boundary-delivered:{trigger_key}:{guild.id}"
+                if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
+                    bf_voice_diag_last_ts[wait_key] = now_mono
+                    print(
+                        f"✅ BF VOICE SKIP | guild={guild.name} | all occupied /setvoice rooms already delivered | "
+                        f"trigger={trigger_key} | occupied={len(occupied)} | no duplicate task created",
+                        flush=True,
+                    )
+            else:
                 _boss_voice_stage_inflight.add(voice_task_key)
                 print(
                     f"📢 Schedule BF VOICE task | guild={guild.name} | next={next_bf_time} | "
@@ -10767,25 +10797,6 @@ async def check_bf_notifications():
                     _run_bf_voice_for_guild(guild, trigger_key, seconds_until_warning),
                     name=f"bf-voice-{guild.id}-{trigger_key}",
                 )
-            elif not undelivered:
-                wait_key = f"bf-boundary-empty:{trigger_key}:{guild.id}"
-                if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
-                    bf_voice_diag_last_ts[wait_key] = now_mono
-                    print(
-                        f"⏭️ BF VOICE SKIP | guild={guild.name} | no occupied /setvoice rooms at warning boundary | "
-                        "no late voice retry",
-                        flush=True,
-                    )
-            else:
-                # A delivery task for this exact trigger is already running.
-                wait_key = f"bf-boundary-inflight:{trigger_key}:{guild.id}"
-                if now_mono - bf_voice_diag_last_ts.get(wait_key, 0.0) >= 60.0:
-                    bf_voice_diag_last_ts[wait_key] = now_mono
-                    print(
-                        f"⏭️ BF VOICE TASK ALREADY INFLIGHT | guild={guild.name} | trigger={trigger_key} | "
-                        f"occupied={len(undelivered)} | no duplicate task created",
-                        flush=True,
-                    )
 
             # Text is built from the already loaded language switches. No Firebase read is
             # inserted into the exact-boundary path, so the notification can enter the guarded
@@ -10929,11 +10940,18 @@ async def _run_bf_voice_for_guild(guild: discord.Guild, trigger_key: str, second
             if _bf_voice_room_key(trigger_key, guild.id, ch.id) not in bf_voice_room_completed
         ]
         if not undelivered:
-            print(
-                f"⏭️ BF VOICE SKIP NOW EMPTY | guild={guild.name} | trigger={trigger_key} | "
-                "no occupied room at warning boundary",
-                flush=True,
-            )
+            if not occupied:
+                print(
+                    f"⏭️ BF VOICE SKIP NOW EMPTY | guild={guild.name} | trigger={trigger_key} | "
+                    "no occupied /setvoice room at warning boundary",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"✅ BF VOICE SKIP ALREADY DELIVERED | guild={guild.name} | trigger={trigger_key} | "
+                    f"occupied={len(occupied)} | all occupied rooms already completed this trigger",
+                    flush=True,
+                )
             return
 
         prepared_files = _take_bf_tts_cache(trigger_key, guild.id)

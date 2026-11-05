@@ -1,4 +1,4 @@
-# V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05 | BASE=V225_WEEKLY_GUILD_ATTENDANCE_CLOSE_AND_TOGGLE_2026-11-04
+# V227_DAVE_DEPENDENCY_AND_BF_VOICE_LOG_FIX_2026-11-05 | BASE=V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05
 import asyncio
 import discord
 import os
@@ -22,7 +22,7 @@ os.environ.setdefault("PYTHONUNBUFFERED", "1")
 
 import bot as bot_module
 
-EXPECTED_BOT_PATCH_PREFIX = "V226_DAVE_VOICE_ENCRYPTION_READY_GATE_2026-11-05"
+EXPECTED_BOT_PATCH_PREFIX = "V227_DAVE_DEPENDENCY_AND_BF_VOICE_LOG_FIX_2026-11-05"
 ACTUAL_BOT_PATCH_VERSION = str(getattr(bot_module, "NOTICE_BF_PATCH_VERSION", "")).strip()
 if not ACTUAL_BOT_PATCH_VERSION.startswith(EXPECTED_BOT_PATCH_PREFIX):
     raise RuntimeError(
@@ -69,16 +69,17 @@ def log_voice_dependency_status():
     pynacl = _package_version("PyNaCl")
     log(
         f"🧩 DISCORD VOICE STACK | discord.py={discord_py} | davey={davey} | PyNaCl={pynacl} | "
-        "required=discord.py PR #10548 (2.8.0a preview), davey>=0.2.0, PyNaCl"
+        "required=discord.py PR #10548 preview, davey==0.2.0, PyNaCl>=1.6.0,<1.7"
     )
     if (
         _version_tuple(discord_py) < (2, 8, 0)
         or _version_tuple(davey) < (0, 2, 0)
         or _version_tuple(pynacl) < (1, 6, 0)
+        or _version_tuple(pynacl) >= (1, 7, 0)
     ):
         log(
             "⚠️ DISCORD VOICE STACK OUTDATED/INCOMPLETE | replace the existing discord.py requirement "
-            "with the V226 VOICE_DEPENDENCY_UPDATE.txt line and install davey==0.2.0. "
+            "with the V227 requirements.txt Git PR pin and install davey==0.2.0. "
             "Voice announcements will be withheld unless the DAVE media-key readiness gate passes."
         )
 
